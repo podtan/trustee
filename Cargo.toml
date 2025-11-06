@@ -1,0 +1,23 @@
+[package]
+name = "trustee"
+version = "0.1.0"
+edition = "2021"
+description = "A general-purpose agent that can morph into different specialized agents using WASM lifecycle plugins"
+license = "MIT OR Apache-2.0"
+authors = ["Podtan Team"]
+keywords = ["agent", "ai", "llm", "wasm"]
+categories = ["command-line-utilities", "development-tools", "wasm"]
+repository = "https://github.com/podtan/trustee"
+homepage = "https://trustee.podtan.com"
+readme = "README.md"
+
+[[bin]]
+name = "trustee"
+path = "src/main.rs"
+
+[dependencies]
+abk = { version = "0.1.24", features = ["cli", "orchestration", "agent", "observability"] }
+tokio = { version = "1.0", features = ["full"] }
+
+[workspace]
+# Empty workspace to prevent being included in parent workspace
