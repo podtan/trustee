@@ -95,7 +95,33 @@ flowchart LR
 - ABK requests a provider via `ProviderFactory::create(&env)`; the concrete provider may be implemented as a feature or local crate (tanbal WASM). ABK ties together features instead of using a strict trait/adapter boundary at runtime.
 - UMF types are used across agent, provider, and tools; this is appropriate but must be an explicit dependency (UMF already exists as a crate in `tmp/umf`).
 - Lifecycle is correctly separated (WASM plugin) but ABI expectations (template names and JSON shapes) must be treated as a stable interface.
-<!-- Solutions / recommendations removed. Current state documented above. -->
-## Clear candidate boundaries to decouple (practical)
+
+## Components (one-line job descriptions)
+
+`abk[checkpoint]` — Manage session checkpoints: store, list, restore, and resume agent sessions.
+
+`abk[config]` — Load configuration from TOML and environment variables and expose runtime settings.
+
+`abk[executor]` — Execute shell commands safely with timeouts, capture output, and validate dangerous commands.
+
+`abk[lifecycle]` — Load and call lifecycle WASM plugins for templates, task classification, and rendering.
+
+`abk[provider]` — Provide a small LLM provider abstraction and factory to create concrete providers.
+
+`abk[cli]` — Bootstrap and run the CLI, wiring adapter traits to the host environment.
+
+`abk[orchestration]` — Coordinate multi-step workflows, tool invocation ordering, and runtime orchestration.
+
+`abk[agent]` — Core agent runtime: wire components together, handle messages, tool-calls and sessions.
+
+`abk[observability]` — Structured logging and telemetry for sessions, LLM interactions, and errors.
+
+`CATS` — Provide a registry of tools (file ops, editing, search, run_command) and execute tool calls.
+
+`UMF` — Canonical internal message format (InternalMessage, ContentBlock, ToolCall/ToolResult) and ChatML helpers.
+
+`Lifecycle-WASM` — WASM lifecycle plugin that supplies templates, classification and rendering (isolated template logic).
+
+`Provider-WASM` — WASM provider implementation that formats requests and parses responses (handles backend differences and streaming inside WASM).
 
 
