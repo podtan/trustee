@@ -7,19 +7,19 @@ This file documents my understanding of the current, tightly-coupled runtime wir
 ```mermaid
 flowchart LR
   subgraph Host["Agent Host"]
-    A["main.rs"] --> B["ABK CLI Runner"]
-    B --> C["DefaultCommandContext"]
-    C --> D["Agent"]
+    A["main.rs(abk[cli])"] --> B["ABK CLI Runner(abk[cli])"]
+    B --> C["DefaultCommandContext(abk[cli])"]
+    C --> D["Agent(abk[agent])"]
   end
 
   subgraph AgentRuntime["Agent (abk::agent)"]
-    D --> LIFETIME["LIFECYCLE (WASM)"]
-    D --> UMF["UMF::ChatMLFormatter"]
-    D --> PROVIDER_FACTORY["ProviderFactory"]
-    D --> TOOLS["CATS ToolRegistry"]
-    D --> EXEC["CommandExecutor"]
-    D --> CHECKPOINT["Checkpoint/SessionManager"]
-    D --> OBS["Observability/Logger"]
+    D --> LIFETIME["LIFECYCLE (WASM)(Lifecycle-WASM / abk[lifecycle])"]
+    D --> UMF["UMF::ChatMLFormatter(UMF)"]
+    D --> PROVIDER_FACTORY["ProviderFactory(abk[provider])"]
+    D --> TOOLS["CATS ToolRegistry(CATS)"]
+    D --> EXEC["CommandExecutor(abk[executor])"]
+    D --> CHECKPOINT["Checkpoint/SessionManager(abk[checkpoint])"]
+    D --> OBS["Observability/Logger(abk[observability])"]
   end
 
   subgraph Lifecycle["Lifecycle Plugin (WASM)"]
@@ -27,10 +27,10 @@ flowchart LR
   end
 
   subgraph Provider["LLM Provider"]
-    PROVIDER_FACTORY --> PROVIDER_BOX["Box&lt;dyn LlmProvider&gt;"]
-    PROVIDER_BOX --> WASM_PROVIDER["Tanbal WASM Provider"]
-    PROVIDER_BOX --> HTTP_PROVIDER["HTTP Provider (OpenAI / Anthropic)"]
-    WASM_PROVIDER -->|"format-request: JSON"| HOST_HTTP["Host HTTP executor"]
+    PROVIDER_FACTORY --> PROVIDER_BOX["Box&lt;dyn LlmProvider&gt;(abk[provider])"]
+    PROVIDER_BOX --> WASM_PROVIDER["Tanbal WASM Provider(Provider-WASM)"]
+    PROVIDER_BOX --> HTTP_PROVIDER["HTTP Provider(abk[provider])"]
+    WASM_PROVIDER -->|"format-request: JSON"| HOST_HTTP["Host HTTP executor(abk[provider] host)"]
     HOST_HTTP -->|"response body"| WASM_PROVIDER
     WASM_PROVIDER -->|"parse-response: UMF JSON or ToolCalls"| D
   end
