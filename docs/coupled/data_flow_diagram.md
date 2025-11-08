@@ -8,7 +8,8 @@ This file documents my understanding of the current, tightly-coupled runtime wir
 flowchart LR
   subgraph Host["Agent Host"]
     A["main.rs(abk[cli])"] --> B["ABK CLI Runner(abk[cli])"]
-    B --> C["DefaultCommandContext(abk[cli])"]
+    B --> CFG["ConfigurationLoader(abk[config])"]
+    CFG --> C["DefaultCommandContext(abk[cli])"]
     C --> D["Agent(abk[agent])"]
   end
 
@@ -20,6 +21,7 @@ flowchart LR
     D --> EXEC["CommandExecutor(abk[executor])"]
     D --> CHECKPOINT["Checkpoint/SessionManager(abk[checkpoint])"]
     D --> OBS["Observability/Logger(abk[observability])"]
+    D --> ORCH["WorkflowCoordinator(abk[orchestration])"]
   end
 
   subgraph Lifecycle["Lifecycle Plugin (WASM)"]
