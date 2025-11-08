@@ -44,6 +44,13 @@ flowchart LR
   TOOLS -->|"ToolResult: UMF ToolResult"| D
   end
 
+  %% Orchestration connections (explicit)
+  ORCH -->|"invoke provider"| PROVIDER_BOX
+  ORCH -->|"coordinate tools"| TOOLS
+  ORCH -->|"checkpoint & resume"| CHECKPOINT
+  ORCH -->|"load/render templates"| LIFETIME
+  ORCH -->|"observability / logs"| OBS
+
   %% Data shapes labels
   D -.->|"UMF::InternalMessage"| UMF
   UMF -->|"ChatML string"| PROVIDER_BOX
