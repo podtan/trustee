@@ -30,13 +30,94 @@ Collect, normalize, and persist the following kinds of metadata into a single SQ
 
 The consumer expects to be able to produce per-project, per-file summaries like the example below when needed. This is NOT a schema — it is an example of the desired extracted information.
 
-abk
-abk[cli]
-Files: x.rs, y.rs
-File x.rs
-Functions: a, b, c
-Functions variables a = x
-Function struct ....
+Project: abk
+Path: /crates/abk
+Manifest: /crates/abk/Cargo.toml
+Languages: Rust
+
+Files (summary):
+- src/lib.rs (source) — 12.3 KB, 2025-09-01T12:34:10Z, sha256:9f2...a7c
+- src/cli.rs (source) — 4.8 KB, 2025-09-01T12:34:11Z, sha256:3b1...9d2
+- tests/integration.rs (test) — 3.1 KB, 2025-09-02T08:01:22Z, sha256:efe...11b
+- Cargo.toml (manifest/config) — 1.6 KB, 2025-08-31T18:20:00Z, sha256:aa4...c0f
+
+File: src/cli.rs
+- Role: source (binary/CLI)
+- Path: crates/abk/src/cli.rs
+- Size: 4,812 bytes
+- Last modified: 2025-09-01T12:34:11Z
+- Checksum: sha256:3b1...9d2
+- Parser: rustc-syn 2.0.1
+- Defined symbols (counts): functions=4, structs=2, enums=1, traits=0
+
+Symbols (detailed):
+- fn build_cli() -> clap::Command
+   - Visibility: pub(crate)
+   - Defined: src/cli.rs:12:1-28:1
+   - Doc: "Create CLI command structure for the agent"
+   - Attributes: #[inline]
+
+- pub struct CliArgs
+   - Fields:
+      - verbose: bool (line 31)
+      - config: Option<PathBuf> (line 32)
+   - Visibility: pub
+   - Defined: src/cli.rs:30:1-42:1
+   - Doc: "Parsed CLI arguments"
+
+- fn run_command(args: &CliArgs) -> Result<(), Error>
+   - Visibility: pub
+   - Signature: (&CliArgs) -> Result<(), Error>
+   - Defined: src/cli.rs:50:1-98:1
+   - Doc: "Execute the main CLI flow; handles subcommands 'run' and 'test'"
+   - Inline TODOs: `// TODO: support --parallel` at src/cli.rs:72:5
+
+Imports / uses (top-level):
+- use clap::{Command, Arg};
+- use crate::executor::Executor; // local crate reference
+
+Relationships / references (human-readable):
+- `CliArgs` is instantiated in `main.rs` and passed to `run_command` (call sites: src/main.rs:14)
+- `run_command` calls `Executor::spawn` (resolved to crate `abk::executor::Executor::spawn`)
+- `build_cli` is re-exported by `lib.rs` as `pub use cli::build_cli;`
+
+Config keys (example from Cargo.toml):
+- package.name = "abk" (file: Cargo.toml:2:10)
+- package.version = "0.1.24" (file: Cargo.toml:3:10)
+- dependencies.clap = { version = "4.0", features = ["derive"] } (file: Cargo.toml:12:1)
+
+Comments / docs / notes found:
+- File-level doc summary (src/lib.rs): "ABK - Agent Builder Kit, provides modular agent components."
+- Doc for `build_cli`: "Create CLI command structure for the agent"
+- TODO / FIXME index:
+   - TODO: support --parallel (src/cli.rs:72)
+   - FIXME: handle edge-case for empty stdin in Executor::spawn (src/executor/mod.rs:128)
+
+Per-repo summary (example output of an extractor run):
+- Projects: 5
+- Files indexed: 312
+- Total symbols: 1,428 (functions: 924, structs: 210, enums: 74, traits: 22)
+- Config entries: 48
+- Extraction timestamp: 2025-11-09T10:02:12Z
+- Extractor version: extractor/0.2.0
+- VCS commit (if available): git sha: 7a9c5f2e
+
+Example: query result — functions named `build_cli`
+
+- build_cli
+   - Project: abk
+   - File: crates/abk/src/cli.rs
+   - Signature: fn build_cli() -> clap::Command
+   - Visibility: pub(crate)
+   - Defined at: crates/abk/src/cli.rs:12:1-28:1
+   - Doc summary: "Create CLI command structure for the agent"
+
+Example: config key provenance
+
+- dependencies.clap -> found in crates/abk/Cargo.toml at line 12, column 1; value: { version = "4.0", features = ["derive"] }
+
+Notes:
+- These human-readable summaries are examples of how the extracted rows should be presented; the underlying SQLite schema should support producing these views via queries (counts, joins, and text aggregation). The extractor should capture raw text and location metadata so that these summaries can include signatures, doc excerpts, and TODO/FIXME annotations.
 
 The SQLite schema should enable these textual summaries as well as structured queries.
 
