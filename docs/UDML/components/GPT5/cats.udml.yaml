@@ -1,0 +1,93 @@
+id: cats
+layer: runtime
+ownership: crate
+summary: Code Agent Tool System providing LLM-facing tools and a registry for invocation.
+provides:
+  information:
+    - id: tool-registry
+      kind: struct
+      schema:
+        fields:
+          - id: tools
+            type: list<tool-spec>
+      purpose: Declares available tools and their contracts.
+      owners: [cats]
+    - id: tool-spec
+      kind: struct
+      schema:
+        fields:
+          - id: name
+            type: string
+          - id: input_schema
+            type: json-schema
+          - id: output_schema
+            type: json-schema
+          - id: safety
+            type: object{dangerous:bool, notes?:string}
+      purpose: Contract for a single tool.
+      owners: [cats]
+    - id: tool-result
+      kind: struct
+      schema:
+        fields:
+          - id: name
+            type: string
+          - id: success
+            type: bool
+          - id: stdout
+            type: text
+          - id: stderr
+            type: text
+          - id: return_code
+            type: int
+      purpose: Normalized result consumable by agent/UMF.
+      owners: [cats]
+access:
+  rules:
+    - id: registry-read
+      target: tool-registry
+      read: abk-agent|abk-orchestration
+      constraints: []
+      description: Agent reads registry to resolve tool calls.
+manipulation:
+  mutations:
+    - id: execute-tool
+      target: tool-result
+      kind: create
+      preconditions: []
+      postconditions: []
+      side_effects: [mv-exec]
+extract:
+  transforms:
+    - id: tool-call-adapter
+      inputs: [umf:tool-call]
+      output: exec:exec-request
+      method: adapter
+      description: Convert UMF tool call into executor request when appropriate.
+movement:
+  routes:
+    - id: mv-exec
+      direction: out
+      from: cats
+      to: abk-executor
+      medium: process
+      payload: exec:exec-request
+      trigger: event
+      reliability: best-effort
+coordination:
+  primitives:
+    - id: tool-policy
+      kind: orchestration
+      participants: [cats, abk-config]
+      drives: [mv-exec]
+      description: Enable/disable tools, set limits based on configuration.
+dependencies:
+  runtime: [abk-executor, abk-config, umf]
+  build: [cats]
+  feature_flags: []
+risks:
+  - id: dangerous-tools
+    impact: high
+    likelihood: medium
+    description: Tools may modify filesystem or run commands.
+    mitigation: Safety flags, validation, sandboxes.

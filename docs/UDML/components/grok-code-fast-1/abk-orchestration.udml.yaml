@@ -1,0 +1,121 @@
+component: abk::orchestration
+description: "Workflow coordination and session management for multi-step agent execution"
+
+information:
+  - name: Workflow
+    description: "Definition of multi-step workflow"
+    schema:
+      steps: "Vec<WorkflowStep>"
+      current_step: integer
+      context: "WorkflowContext"
+
+  - name: WorkflowStep
+    description: "Individual step in workflow"
+    schema:
+      id: string
+      action: "WorkflowAction"
+      dependencies: "Vec<String>"
+      timeout_seconds: integer
+
+  - name: WorkflowContext
+    description: "Shared context across workflow steps"
+    schema:
+      variables: "HashMap<String, Value>"
+      results: "HashMap<String, StepResult>"
+
+access:
+  - name: read_workflow_definition
+    description: "Access workflow templates from lifecycle"
+    rules:
+      - source: "abk::lifecycle::LifecyclePlugin"
+      - method: "get_workflow_template(task_type)"
+      - visibility: "internal"
+
+  - name: read_execution_state
+    description: "Access current workflow execution state"
+    rules:
+      - source: "Workflow"
+      - method: "get_current_step()"
+      - visibility: "internal"
+
+manipulation:
+  - name: create_workflow
+    description: "Create workflow from task classification"
+    rules:
+      - input: "TaskType"
+      - operation: "Workflow::from_task_type(task_type)"
+      - validation: "workflow steps valid"
+
+  - name: advance_workflow
+    description: "Move to next workflow step"
+    rules:
+      - input: "StepResult"
+      - operation: "workflow.advance(result)"
+      - constraints: "dependencies satisfied"
+
+  - name: update_workflow_context
+    description: "Update shared workflow context"
+    rules:
+      - input: "StepResult"
+      - operation: "context.update_variables(result)"
+      - constraints: "variable types compatible"
+
+extract:
+  - name: derive_next_action
+    description: "Extract next action from workflow state"
+    rules:
+      - input: "Workflow"
+      - transform: "get_current_step | extract_action | resolve_variables"
+      - output: "NextAction"
+
+  - name: generate_workflow_summary
+    description: "Extract execution summary from completed workflow"
+    rules:
+      - input: "Workflow"
+      - transform: "count_steps | calculate_duration | extract_results"
+      - output: "WorkflowSummary"
+
+movement:
+  - name: step_execution_routing
+    description: "Route workflow steps to appropriate handlers"
+    rules:
+      - from: "WorkflowStep"
+      - to: "StepExecutor (provider/tools/lifecycle)"
+      - protocol: "action-specific protocol"
+      - boundaries: "component boundary"
+
+  - name: result_collection
+    description: "Collect results from executed steps"
+    rules:
+      - from: "StepExecutor"
+      - to: "WorkflowContext"
+      - protocol: "StepResult"
+      - boundaries: "component communication boundary"
+
+  - name: context_sharing
+    description: "Share context variables between steps"
+    rules:
+      - from: "WorkflowContext"
+      - to: "StepExecutor"
+      - protocol: "variable substitution"
+      - boundaries: "step execution boundary"
+
+coordination:
+  - name: workflow_execution
+    description: "Coordinate multi-step workflow execution"
+    primitives:
+      - initialization: "create_workflow() -> initialize_context() -> start_first_step()"
+      - progression: "execute_step() -> collect_result() -> update_context() -> check_completion()"
+      - completion: "finalize_results() -> generate_summary() -> cleanup_resources()"
+
+  - name: dependency_resolution
+    description: "Coordinate step dependencies and ordering"
+    primitives:
+      - planning: "analyze_dependencies() -> build_execution_order() -> validate_graph()"
+      - execution: "wait_for_dependencies() -> execute_when_ready() -> propagate_results()"
+
+  - name: error_recovery
+    description: "Coordinate error handling and recovery"
+    primitives:
+      - detection: "monitor_execution() -> detect_failures() -> classify_errors()"
+      - recovery: "retry_step() -> skip_optional() -> rollback_workflow()"

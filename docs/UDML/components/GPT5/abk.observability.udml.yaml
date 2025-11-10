@@ -1,0 +1,71 @@
+id: abk-observability
+layer: support
+ownership: crate
+summary: Structured logging and telemetry for sessions, LLM interactions, tools, and errors.
+provides:
+  information:
+    - id: log-event
+      kind: struct
+      schema:
+        fields:
+          - id: ts
+            type: datetime
+          - id: level
+            type: enum{trace,debug,info,warn,error}
+          - id: component
+            type: string
+          - id: message
+            type: string
+          - id: fields
+            type: map
+      purpose: Canonical log event shape.
+      owners: [abk-observability]
+access:
+  rules:
+    - id: emit-logs
+      target: log-event
+      read: all
+      constraints: []
+      description: Any component may emit structured logs.
+extract:
+  transforms:
+    - id: sse-log-summarize
+      inputs: [log-event]
+      output: log-event
+      method: aggregation
+      description: Optional aggregation and rate-limiting of repetitive events.
+movement:
+  routes:
+    - id: mv-log-to-console
+      direction: out
+      from: abk-observability
+      to: external
+      medium: stdout
+      payload: log-event
+      trigger: event
+      reliability: best-effort
+    - id: mv-log-to-file
+      direction: out
+      from: abk-observability
+      to: external
+      medium: fs
+      payload: log-event
+      trigger: event
+      reliability: best-effort
+coordination:
+  primitives:
+    - id: observability-policy
+      kind: orchestration
+      participants: [abk-observability]
+      drives: [mv-log-to-console, mv-log-to-file]
+      description: Configure sinks and levels from config.
+dependencies:
+  runtime: [abk-config]
+  build: [abk]
+  feature_flags: [observability]
+risks:
+  - id: pii-leak
+    impact: high
+    likelihood: low
+    description: Sensitive data could appear in logs.
+    mitigation: Redaction policies and filters.

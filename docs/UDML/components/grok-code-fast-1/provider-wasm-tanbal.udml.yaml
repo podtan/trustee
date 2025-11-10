@@ -1,0 +1,117 @@
+component: provider-wasm-tanbal
+description: "WASM provider implementation handling LLM API backends and response parsing"
+
+information:
+  - name: WasmProvider
+    description: "WASM-based LLM provider interface"
+    schema:
+      format_request: "fn(JSON) -> Result<String>"
+      parse_response: "fn(String) -> Result<String>"
+      parse_stream_event: "fn(String) -> Result<String>"
+
+  - name: ProviderConfig
+    description: "Configuration for WASM provider backends"
+    schema:
+      backend: "ProviderBackend"
+      api_key: string
+      base_url: "Option<String>"
+      model: "Option<String>"
+
+  - name: BackendResponse
+    description: "Parsed response from LLM backend"
+    schema:
+      content: "Option<String>"
+      tool_calls: "Option<Vec<ToolCall>>"
+      usage: "Option<TokenUsage>"
+
+access:
+  - name: read_wasm_module
+    description: "Access compiled WASM provider module"
+    rules:
+      - source: "filesystem (~/.trustee/providers/)"
+      - method: "wasmtime::Module::from_file()"
+      - visibility: "internal"
+
+  - name: read_backend_config
+    description: "Access backend-specific configuration"
+    rules:
+      - source: "environment variables"
+      - method: "env::var(API_KEY)"
+      - visibility: "private"
+
+manipulation:
+  - name: instantiate_wasm_provider
+    description: "Create WASM provider instance"
+    rules:
+      - input: "WasmModule + Config"
+      - operation: "WasmProvider::new(module, config)"
+      - validation: "WASM functions available"
+
+  - name: format_llm_request
+    description: "Format request for LLM backend"
+    rules:
+      - input: "ChatMLMessages + Config"
+      - operation: "provider.format_request(json_data)"
+      - constraints: "backend-specific formatting"
+
+  - name: parse_llm_response
+    description: "Parse response from LLM backend"
+    rules:
+      - input: "RawResponse"
+      - operation: "provider.parse_response(response)"
+      - validation: "response format valid"
+
+extract:
+  - name: extract_backend_type
+    description: "Extract backend type from configuration"
+    rules:
+      - input: "ProviderConfig"
+      - transform: "match_backend_string -> BackendType"
+      - output: "BackendType"
+
+  - name: parse_streaming_events
+    description: "Extract structured data from streaming events"
+    rules:
+      - input: "StreamEvent"
+      - transform: "provider.parse_stream_event() -> extract_content"
+      - output: "StreamingChunk"
+
+movement:
+  - name: wasm_function_calls
+    description: "Call WASM provider functions"
+    rules:
+      - from: "request data"
+      - to: "WASM runtime"
+      - protocol: "WASM function interface"
+      - boundaries: "WASM runtime boundary"
+
+  - name: backend_api_routing
+    description: "Route requests to LLM API backends"
+    rules:
+      - from: "formatted request"
+      - to: "OpenAI/Anthropic/GitHub API"
+      - protocol: "HTTP/JSON"
+      - boundaries: "network boundary"
+
+  - name: streaming_data_flow
+    description: "Handle streaming responses from backends"
+    rules:
+      - from: "API stream"
+      - to: "WASM parser"
+      - protocol: "SSE or WebSocket"
+      - boundaries: "network streaming boundary"
+
+coordination:
+  - name: provider_initialization
+    description: "Coordinate WASM provider setup"
+    primitives:
+      - loading: "locate_wasm() -> validate_module() -> instantiate_runtime()"
+      - configuration: "read_config() -> set_environment() -> validate_credentials()"
+      - activation: "test_connection() -> register_backends() -> ready_for_requests()"
+
+  - name: request_response_cycle
+    description: "Coordinate request formatting and response parsing"
+    primitives:
+      - request: "format_request() -> send_to_backend() -> handle_http_errors()"
+      - response: "receive_response() -> parse_content() -> extract_metadata()"
+      - streaming: "process_events() -> accumulate_content() -> handle_completion()"

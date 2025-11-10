@@ -1,0 +1,412 @@
+---
+# UDML: Provider-WASM / Tanbal — WASM Provider
+# WebAssembly-based provider for multi-backend LLM support
+
+metadata:
+  name: "Provider-WASM / Tanbal"
+  version: "0.1.0"
+  owner: "Provider WASM System"
+  responsibility: "WASM provider loading, multi-backend LLM request/response handling, streaming support"
+
+information:
+  # WASM provider module structure
+  wasm_provider_module:
+    - export: "format_request"
+      signature: "(config_json: String, messages_json: String) -> String"
+      semantics: "Format messages into backend-specific request"
+      returns:
+        - field: status
+          type: "ok|error"
+        - field: body
+          type: String (JSON or protocol-specific)
+          semantics: "Formatted request body"
+    
+    - export: "parse_response"
+      signature: "(response_body: String) -> String"
+      semantics: "Parse backend response to standardized format"
+      returns:
+        - field: status
+          type: "ok|error"
+        - field: content
+          type: String (JSON)
+          semantics: "Parsed response (content + tool_calls)"
+    
+    - export: "parse_stream_event"
+      signature: "(event_data: String) -> String"
+      semantics: "Parse streaming event (SSE) to delta"
+      returns:
+        - field: status
+          type: "ok|error"
+        - field: delta
+          type: String (JSON)
+          semantics: "Streaming delta"
+    
+    - export: "get_provider_info"
+      signature: "() -> String"
+      semantics: "Get provider metadata"
+      returns:
+        - field: name
+          type: String
+          semantics: "Provider name (e.g., 'tanbal-openai')"
+        - field: version
+          type: String
+          semantics: "Provider version"
+        - field: supported_backends
+          type: Vec<String>
+          semantics: "List of supported LLM backends"
+
+  # Provider configuration (passed to format_request)
+  provider_config:
+    - field: backend
+      type: String
+      enum: ["openai", "anthropic", "github_copilot"]
+      semantics: "Which LLM backend to use"
+    
+    - field: api_key
+      type: String
+      semantics: "Authentication token"
+    
+    - field: model
+      type: String
+      semantics: "Model identifier"
+    
+    - field: base_url
+      type: Option<String>
+      semantics: "Custom endpoint (if not default)"
+    
+    - field: temperature
+      type: f32
+      semantics: "Sampling temperature"
+    
+    - field: max_tokens
+      type: u32
+      semantics: "Maximum output tokens"
+    
+    - field: tool_choice
+      type: String
+      enum: ["auto", "required", "none"]
+      semantics: "Tool handling mode"
+
+  # Streaming event format (SSE)
+  sse_streaming_event:
+    - field: event
+      type: String
+      enum: ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]
+      semantics: "Event type"
+    
+    - field: data
+      type: JSON object
+      semantics: "Event-specific data"
+
+  # Request/Response translation examples
+  backend_request_openai:
+    - source: "UMF ChatML messages"
+      target: "OpenAI Chat Completion API format"
+    - mapping: |
+        {
+          "model": "gpt-4o",
+          "messages": [
+            { "role": "user", "content": "..." },
+            { "role": "assistant", "content": "...", "tool_calls": [...] }
+          ],
+          "tools": [...],
+          "temperature": 0.7,
+          "max_tokens": 2000
+        }
+
+  backend_response_anthropic:
+    - source: "Anthropic API response"
+      target: "UMF GenerateResponse"
+    - mapping: |
+        {
+          "content": [
+            { "type": "text", "text": "..." },
+            { "type": "tool_use", "id": "...", "name": "...", "input": {...} }
+          ],
+          "stop_reason": "tool_use|end_turn|..."
+        }
+
+access:
+  # WASM provider interface (host side)
+  wasm_interface:
+    - query: "wasm_provider.format_request(config: ProviderConfig, messages: Vec<InternalMessage>) -> Result<String, String>"
+      visibility: "Internal (host-only)"
+      semantics: "Request formatting via WASM"
+    
+    - query: "wasm_provider.parse_response(body: String) -> Result<GenerateResponse, String>"
+      visibility: "Internal (host-only)"
+      semantics: "Response parsing via WASM"
+    
+    - query: "wasm_provider.parse_stream_event(event: String) -> Result<StreamingDelta, String>"
+      visibility: "Internal (host-only)"
+      semantics: "Streaming event parsing via WASM"
+
+manipulation:
+  # WASM provider initialization
+  initialization:
+    - operation: "load_wasm_provider(path: &Path) -> Result<WasmProvider, Error>"
+      semantics: "Load WASM provider binary from file"
+      precondition: "File exists, is valid WASM, has correct exports"
+      postcondition: "WASM module instantiated and ready"
+      logic: "Use wasmtime to load and validate ABI"
+
+  # Request formatting
+  request_formatting:
+    - operation: "format_request_via_wasm(config: ProviderConfig, messages: Vec<InternalMessage>) -> Result<String, Error>"
+      semantics: "Call WASM format_request export"
+      precondition: "WASM module loaded, config valid"
+      postcondition: "Formatted HTTP request body (JSON or protocol-specific)"
+      boundary_crossing: "Marshal config and messages to JSON, call WASM, unmarshal result"
+
+  # Response parsing
+  response_parsing:
+    - operation: "parse_response_via_wasm(body: String) -> Result<GenerateResponse, Error>"
+      semantics: "Call WASM parse_response export"
+      precondition: "Response body received from API"
+      postcondition: "GenerateResponse (content, tool_calls, finish_reason)"
+      boundary_crossing: "Pass response body to WASM, unmarshal parsed result"
+
+  # Streaming event parsing
+  streaming_parsing:
+    - operation: "parse_stream_event_via_wasm(event: String) -> Result<StreamingDelta, Error>"
+      semantics: "Call WASM parse_stream_event export"
+      precondition: "SSE event received"
+      postcondition: "StreamingDelta (text, tool_call, or stop)"
+      boundary_crossing: "Pass event to WASM, unmarshal delta"
+
+extract:
+  # Provider info extraction
+  info_extraction:
+    - extract: "get_provider_capabilities() -> ProviderCapabilities"
+      rule: "Call WASM get_provider_info and extract capabilities"
+      input_owner: "Provider-WASM"
+      output_owner: "abk[provider] factory"
+      extraction:
+        - "supported_backends"
+        - "version"
+        - "feature_flags"
+
+  # Request/Response transformation
+  transformation_extraction:
+    - extract: "transform_uml_to_backend_format(messages: Vec<InternalMessage>) -> String"
+      rule: "Format UMF messages for specific backend"
+      input_owner: "abk[provider] (messages)"
+      output_owner: "HTTP request body"
+      backend_specific: "Each backend has different request format"
+    
+    - extract: "transform_backend_to_umf(response: String) -> GenerateResponse"
+      rule: "Parse backend-specific response to GenerateResponse"
+      input_owner: "HTTP response body"
+      output_owner: "UMF GenerateResponse"
+      backend_specific: "Each backend has different response format"
+
+movement:
+  # WASM provider loading
+  loading_flow:
+    - from: "abk[provider]::ProviderFactory"
+      to: "filesystem"
+      data: "WASM provider path"
+      protocol: "File read"
+      semantics: "Load WASM binary"
+    
+    - from: "filesystem"
+      to: "Provider-WASM"
+      data: "WASM binary bytes"
+      protocol: "File system"
+      semantics: "File loaded"
+    
+    - from: "Provider-WASM (host)"
+      to: "wasmtime runtime"
+      data: "Instantiate WASM module"
+      protocol: "WASM runtime"
+      semantics: "Module instantiated"
+
+  # Request formatting flow
+  request_flow:
+    - from: "abk[provider] (host)"
+      to: "UMF::ChatMLFormatter"
+      data: "Vec<InternalMessage>"
+      protocol: "Function call (in-process)"
+      semantics: "Format messages to ChatML"
+    
+    - from: "UMF"
+      to: "Provider-WASM (host)"
+      data: "ChatML string + config JSON"
+      protocol: "Function parameter"
+      semantics: "Formatted messages ready for WASM"
+    
+    - from: "abk[provider] (host)"
+      to: "Provider-WASM (guest)"
+      data: "format_request(config_json, messages_json) call"
+      protocol: "WASM function call"
+      semantics: "Cross WASM boundary"
+    
+    - from: "Provider-WASM (guest)"
+      to: "Provider-WASM (guest)"
+      data: "Format transformation logic (backend-specific)"
+      protocol: "In-WASM logic"
+      semantics: "WASM logic executes"
+    
+    - from: "Provider-WASM (guest)"
+      to: "abk[provider] (host)"
+      data: "Formatted request (JSON string)"
+      protocol: "WASM return value"
+      semantics: "Return formatted request"
+    
+    - from: "abk[provider] (host)"
+      to: "HTTP API"
+      data: "POST with formatted body"
+      protocol: "HTTP"
+      semantics: "Send request to LLM backend"
+
+  # Response parsing flow
+  response_flow:
+    - from: "HTTP API"
+      to: "abk[provider] (host)"
+      data: "Response body (JSON)"
+      protocol: "HTTP response"
+      semantics: "Receive API response"
+    
+    - from: "abk[provider] (host)"
+      to: "Provider-WASM (guest)"
+      data: "parse_response(body) call"
+      protocol: "WASM function call"
+      semantics: "Cross WASM boundary"
+    
+    - from: "Provider-WASM (guest)"
+      to: "Provider-WASM (guest)"
+      data: "Parse backend-specific response"
+      protocol: "In-WASM logic"
+      semantics: "WASM logic parses"
+    
+    - from: "Provider-WASM (guest)"
+      to: "abk[provider] (host)"
+      data: "Parsed response (JSON: content, tool_calls, finish_reason)"
+      protocol: "WASM return value"
+      semantics: "Return parsed response"
+    
+    - from: "abk[provider] (host)"
+      to: "abk::agent"
+      data: "GenerateResponse"
+      protocol: "Function return (in-process)"
+      semantics: "Agent receives response"
+
+  # Streaming flow
+  streaming_flow:
+    - from: "HTTP stream (SSE)"
+      to: "abk[provider] (host)"
+      data: "SSE events (data: {...})"
+      protocol: "HTTP streaming"
+      semantics: "Receive SSE event"
+    
+    - from: "abk[provider] (host)"
+      to: "Provider-WASM (guest)"
+      data: "parse_stream_event(event) call"
+      protocol: "WASM function call"
+      semantics: "Cross WASM boundary (per event)"
+    
+    - from: "Provider-WASM (guest)"
+      to: "Provider-WASM (guest)"
+      data: "Parse backend-specific streaming format"
+      protocol: "In-WASM logic"
+      semantics: "WASM logic parses streaming event"
+    
+    - from: "Provider-WASM (guest)"
+      to: "abk[provider] (host)"
+      data: "Streaming delta (JSON)"
+      protocol: "WASM return value"
+      semantics: "Return parsed delta"
+    
+    - from: "abk[provider] (host)"
+      to: "abk::agent"
+      data: "StreamingDelta"
+      protocol: "AsyncIterator yield"
+      semantics: "Agent consumes delta"
+
+coordination:
+  # Multi-backend routing
+  backend_routing:
+    - logic: "Configuration specifies backend (openai, anthropic, github_copilot)"
+    - logic: "Single WASM provider handles routing to all backends"
+    - logic: "Backend-specific logic encapsulated in WASM"
+    - benefit: "No recompilation needed to add/update backends; just update WASM"
+
+  # Request/Response lifecycle
+  lifecycle:
+    - phase: 1
+      action: "Configuration specifies backend"
+      owner: "abk[config]"
+    
+    - phase: 2
+      action: "Provider Factory creates WasmProvider"
+      owner: "abk[provider]"
+    
+    - phase: 3
+      action: "Agent calls format_request via WASM"
+      owner: "Provider-WASM"
+      semantics: "Transform UMF to backend-specific format"
+    
+    - phase: 4
+      action: "Host sends HTTP request to backend"
+      owner: "abk[provider] (host)"
+    
+    - phase: 5
+      action: "Backend responds (sync or streaming)"
+      owner: "LLM backend"
+    
+    - phase: 6
+      action: "Provider calls parse_response (or parse_stream_event per event)"
+      owner: "Provider-WASM"
+      semantics: "Transform backend response to GenerateResponse"
+    
+    - phase: 7
+      action: "Agent receives response"
+      owner: "abk::agent"
+
+  # Error handling
+  error_handling:
+    - error: "WASM module not found"
+      handler: "Fail provider creation with clear error"
+      recovery: "User must provide valid WASM provider"
+    
+    - error: "WASM format_request fails"
+      handler: "Return error, do not send HTTP request"
+      recovery: "Log error, fallback (if configured) or fail"
+    
+    - error: "HTTP request fails"
+      handler: "Retry logic in abk[provider] (timeout, rate limit)"
+      recovery: "Exponential backoff or fail after max retries"
+    
+    - error: "WASM parse_response fails"
+      handler: "Return parse error, do not return invalid response"
+      recovery: "Log error, return generic error response"
+
+  # Streaming state management
+  streaming_state:
+    - state: "stream_open: AsyncIterator created, HTTP connection open"
+    - state: "delta_pending: Partial message accumulated (for streaming)"
+    - state: "stream_complete: Stop delta received, stream closed"
+    - transition: "On each SSE event, parse_stream_event called to update state"
+
+dependencies:
+  internal:
+    - "UMF" # Message format conversion
+    - "abk[provider]" # Provider trait and factory
+    - "abk[observability]" # Error logging
+  
+  external:
+    - "wasmtime" # WASM runtime
+    - "serde_json" # JSON marshaling across WASM boundary
+    - "reqwest" or "hyper" # HTTP client for actual requests
+
+notes: |
+  - Provider-WASM is a multi-backend LLM provider using WebAssembly.
+  - Single WASM module handles routing to OpenAI, Anthropic, GitHub Copilot, etc.
+  - Request/response formatting is backend-specific logic inside WASM.
+  - Host handles HTTP execution; WASM handles format transformation only.
+  - Streaming is supported via parse_stream_event export for per-event parsing.
+  - WASM boundary crossings use JSON marshaling for config, messages, and responses.
+  - No recompilation needed to add new backends; update WASM provider and restart.
+  - Error handling is defensive; parse errors are caught before invalid responses propagate.
+  - Streaming state accumulated incrementally via repeated parse_stream_event calls.
+  - Architecture enables experimentation with new backends without trustee recompilation.

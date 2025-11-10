@@ -1,0 +1,96 @@
+format: UDML-YAML-0.1
+component: "abk[executor]"
+summary: "Host-side command executor that runs shell commands requested by tools with validation and sandboxing."
+context:
+  crate: "abk"
+  feature_flags:
+    - executor
+  upstream_interfaces:
+    - cats::ToolRegistry
+    - host OS
+  downstream_interfaces:
+    - abk::agent
+    - abk::observability
+
+domains:
+  information:
+    - name: execution_policy
+      ownership: abk[executor]
+      description: "Rules describing allowed commands, timeout limits, working directory scope, and resource caps."
+      shape: |
+        struct ExecutionPolicy {
+          allowed_binaries: Vec<PathBuf>,
+          blocked_patterns: Vec<String>,
+          default_timeout_secs: u64,
+          max_output_bytes: usize,
+          working_dir: PathBuf
+        }
+    - name: execution_record
+      ownership: abk[executor]
+      description: "Structured record of a completed command invocation."
+      shape: |
+        struct ExecutionRecord {
+          command: Vec<String>,
+          started_at: Timestamp,
+          finished_at: Timestamp,
+          exit_code: i32,
+          stdout: TruncatedBytes,
+          stderr: TruncatedBytes,
+          status: ExecutionStatus
+        }
+  access:
+    - name: filesystem_scope
+      subject: abk[executor]
+      description: "Executor may access workspace paths within configured root; outside paths denied unless policy allows."
+      rules:
+        - enforce chroot-like root_path
+        - deny write outside workspace
+    - name: env_access
+      subject: abk[executor]
+      description: "Commands inherit sanitized environment variables; secrets filtered."
+      rules:
+        - allow whitelisted env vars
+        - redact sensitive keys
+  manipulation:
+    - name: command_validation
+      description: "Rewrite or reject commands based on ExecutionPolicy before execution."
+      operations:
+        - validate_binary
+        - enforce_timeout
+        - patch_working_dir
+    - name: output_truncation
+      description: "Mutate raw stdout/stderr into limited-size buffers for tool results."
+      operations:
+        - truncate_stdout
+        - redact_sensitive_lines
+  extract:
+    - name: execution_summary
+      description: "Produce high-level summary (success/failure, key output lines) for lifecycle templates."
+      outputs:
+        - ExecutionSummary
+    - name: telemetry_projection
+      description: "Send execution metrics (duration, exit status) to observability layer."
+      outputs:
+        - ExecutionMetricEvent
+  movement:
+    - name: host_process_spawn
+      source: abk[executor]
+      destination: OS process manager
+      protocol: "spawn + wait"
+      payload: command argv, env, cwd
+      notes: "Blocking call with timeout cancellation."
+    - name: result_delivery
+      source: abk[executor]
+      destination: cats::ToolRegistry / abk::agent
+      protocol: "Struct return"
+      payload: ExecutionRecord
+  coordination:
+    - name: execution_quota
+      participants:
+        - abk[executor]
+        - abk::orchestration
+        - abk::checkpoint
+      triggers:
+        - tool_request
+        - quota_exceeded
+      policy: "Orchestration consults executor to enforce per-session execution limits; checkpoints may persist cumulative usage."

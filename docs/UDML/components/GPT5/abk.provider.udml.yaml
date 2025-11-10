@@ -1,0 +1,87 @@
+id: abk-provider
+layer: boundary
+ownership: crate
+summary: Provider abstraction (trait) and factory to create concrete LLM providers (WASM or HTTP).
+provides:
+  information:
+    - id: chatml-request
+      kind: struct
+      schema:
+        fields:
+          - id: messages
+            type: list<umf:internal-message>
+          - id: model
+            type: string
+          - id: params
+            type: map
+      purpose: Normalized provider request.
+      owners: [abk-provider]
+    - id: generate-response
+      kind: struct
+      schema:
+        fields:
+          - id: content
+            type: list<umf:content-block>
+          - id: tool_calls
+            type: list<umf:tool-call>
+          - id: raw
+            type: json
+      purpose: Provider output normalized to UMF blocks + tool calls.
+      owners: [abk-provider]
+access:
+  rules:
+    - id: provider-use
+      target: chatml-request
+      read: abk-orchestration|abk-agent
+      constraints: []
+      description: Agent/orchestration can submit provider requests.
+manipulation:
+  mutations:
+    - id: parse-provider-output
+      target: generate-response
+      kind: create
+      preconditions: []
+      postconditions: []
+      side_effects: []
+extract:
+  transforms:
+    - id: format-request
+      inputs: [umf:internal-message]
+      output: chatml-request
+      method: adapter
+      description: Convert UMF messages to provider-specific ChatML or JSON.
+movement:
+  routes:
+    - id: mv-wasm-provider
+      direction: bi
+      from: abk-provider
+      to: provider-wasm-tanbal
+      medium: wasm-call
+      payload: chatml-request
+      trigger: event
+      reliability: best-effort
+    - id: mv-http-provider
+      direction: bi
+      from: abk-provider
+      to: external
+      medium: network
+      payload: http-json
+      trigger: event
+      reliability: best-effort
+coordination:
+  primitives:
+    - id: provider-selection
+      kind: orchestration
+      participants: [abk-provider, abk-config]
+      drives: [mv-wasm-provider, mv-http-provider]
+      description: Create provider instance based on configuration.
+dependencies:
+  runtime: [umf]
+  build: [abk]
+  feature_flags: [provider]
+risks:
+  - id: abi-break
+    impact: high
+    likelihood: medium
+    description: WASM provider ABI changes break compatibility.
+    mitigation: Versioned WIT/interfaces + adapters.

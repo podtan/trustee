@@ -1,0 +1,107 @@
+component: abk::provider
+description: "LLM provider abstraction and factory for creating provider instances"
+
+information:
+  - name: LlmProvider
+    description: "Trait defining LLM provider interface"
+    schema:
+      generate: "fn(ChatMLMessages) -> GenerateResult"
+      stream: "fn(ChatMLMessages) -> StreamingResponse"
+      configure: "fn(ProviderConfig) -> ()"
+
+  - name: ProviderFactory
+    description: "Factory for creating provider instances"
+    schema:
+      create_provider: "fn(&Environment) -> Box<dyn LlmProvider>"
+      supported_providers: "Vec<String>"
+
+  - name: GenerateResult
+    description: "Result from LLM generation"
+    schema:
+      content: "Option<String>"
+      tool_calls: "Vec<ToolCall>"
+      usage: "TokenUsage"
+
+access:
+  - name: read_provider_config
+    description: "Access provider configuration from environment"
+    rules:
+      - source: "abk::config::Configuration"
+      - method: "get_llm_config()"
+      - visibility: "internal"
+
+  - name: read_environment_secrets
+    description: "Access API keys and secrets from environment"
+    rules:
+      - source: "std::env"
+      - method: "env::var(API_KEY)"
+      - visibility: "private"
+
+manipulation:
+  - name: create_provider_instance
+    description: "Create concrete provider implementation"
+    rules:
+      - input: "ProviderType + Config"
+      - operation: "ProviderFactory::create()"
+      - validation: "provider type supported"
+
+  - name: configure_provider
+    description: "Configure provider with runtime settings"
+    rules:
+      - input: "ProviderConfig"
+      - operation: "provider.configure(config)"
+      - constraints: "validate API keys present"
+
+extract:
+  - name: derive_provider_type
+    description: "Extract provider type from configuration"
+    rules:
+      - input: "LlmConfig"
+      - transform: "match provider_string -> ProviderType"
+      - output: "ProviderType"
+
+  - name: extract_token_usage
+    description: "Extract token usage from provider response"
+    rules:
+      - input: "GenerateResult"
+      - transform: "parse_usage_metadata"
+      - output: "TokenUsage"
+
+movement:
+  - name: llm_api_requests
+    description: "Route requests to external LLM APIs"
+    rules:
+      - from: "ChatMLMessages"
+      - to: "LLM API endpoint"
+      - protocol: "HTTP/JSON or WASM interface"
+      - boundaries: "network boundary or WASM boundary"
+
+  - name: streaming_response_handling
+    description: "Handle streaming responses from providers"
+    rules:
+      - from: "LLM API stream"
+      - to: "StreamingResponse handler"
+      - protocol: "SSE or WebSocket"
+      - boundaries: "network streaming boundary"
+
+  - name: provider_discovery
+    description: "Discover available WASM providers"
+    rules:
+      - from: "filesystem scan"
+      - to: "ProviderFactory registry"
+      - protocol: "WASM file paths"
+      - boundaries: "filesystem boundary"
+
+coordination:
+  - name: provider_lifecycle
+    description: "Coordinate provider initialization and usage"
+    primitives:
+      - discovery: "scan_providers() -> validate_wasm() -> register()"
+      - initialization: "create_instance() -> configure() -> validate_connection()"
+      - execution: "prepare_request() -> send() -> handle_response() -> cleanup()"
+
+  - name: multi_provider_coordination
+    description: "Handle multiple provider types"
+    primitives:
+      - routing: "match_provider_type() -> route_to_implementation()"
+      - fallback: "primary_failure() -> try_fallback_provider() -> report_error()"

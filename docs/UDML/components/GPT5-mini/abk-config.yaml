@@ -1,0 +1,45 @@
+# UDML for abk[config] (Configuration loader)
+metadata:
+  name: abk[config]
+  role: Configuration loader and resolver
+  version: 1.0
+information:
+  description: |
+    Loads TOML configuration, resolves environment variables, merges defaults, and exposes typed runtime settings to callers.
+  canonical_schemas:
+    - config_file: TOML structure (see config/trustee.toml)
+    - effective_config: map<string, any>
+access:
+  surface:
+    - load_from_file(path) -> EffectiveConfig
+    - load_from_env() -> EffectiveConfig
+    - validate(config)
+  auth:
+    - filesystem read for config path
+manipulation:
+  mutations:
+    - merge(defaults, file, env) -> effective_config
+    - validate_and_normalize(effective_config)
+  invariants:
+    - required keys present (llm.provider, checkpoint.dir etc)
+extract:
+  transforms:
+    - derive_provider_config(effective_config) -> ProviderConfig
+    - derive_execution_limits(effective_config) -> ExecutionConfig
+movement:
+  routes:
+    - provides EffectiveConfig to abk::cli, abk::agent, ProviderFactory
+coordination:
+  responsibilities:
+    - canonical owner of configuration shapes for runtime
+    - convert env vars (e.g., OPENAI_API_KEY) into typed provider settings
+contracts:
+  inputs: [TOML, environment variables]
+  outputs: [EffectiveConfig struct]
+  error_modes:
+    - missing_required_key
+    - invalid_type
+examples:
+  - default_override: { llm: { provider: "tanbal" }, execution: { timeout_secs: 60 } }
+notes: |
+  The config loader should be deterministic and idempotent. It is the canonical source of runtime settings and must be minimal and well-tested.

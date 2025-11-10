@@ -1,0 +1,81 @@
+id: abk-orchestration
+layer: runtime
+ownership: crate
+summary: Workflow coordinator for the agent turn loop, tool ordering, retries, and resume.
+provides:
+  information:
+    - id: turn-plan
+      kind: struct
+      schema:
+        fields:
+          - id: next-action
+            type: enum{call-provider,call-tools,await-stream,render-template,checkpoint,finish}
+          - id: reasons
+            type: list<string>
+      purpose: Minimal plan for the next step in the loop.
+      owners: [abk-orchestration]
+access:
+  rules:
+    - id: read-session-plan
+      target: turn-plan
+      read: abk-agent
+      constraints: []
+      description: Agent reads plan to drive the loop.
+manipulation:
+  mutations:
+    - id: build-plan
+      target: turn-plan
+      kind: create
+      preconditions: []
+      postconditions: []
+      side_effects: []
+extract:
+  transforms:
+    - id: derive-plan
+      inputs: [abk-agent:session-state]
+      output: turn-plan
+      method: rules
+      description: Lightweight rule-based planner.
+movement:
+  routes:
+    - id: mv-invoke-provider
+      direction: out
+      from: abk-orchestration
+      to: abk-provider
+      medium: memory
+      payload: abk-provider:chatml-request
+      trigger: event
+      reliability: best-effort
+    - id: mv-invoke-tools
+      direction: out
+      from: abk-orchestration
+      to: cats
+      medium: memory
+      payload: umf:tool-call
+      trigger: event
+      reliability: best-effort
+    - id: mv-checkpoint
+      direction: out
+      from: abk-orchestration
+      to: abk-checkpoint
+      medium: fs
+      payload: abk-checkpoint:checkpoint-record
+      trigger: schedule
+      reliability: at-least-once
+coordination:
+  primitives:
+    - id: turn-state-machine
+      kind: orchestration
+      participants: [abk-orchestration, abk-agent]
+      drives: [mv-invoke-provider, mv-invoke-tools, mv-checkpoint]
+      description: Stepwise turn loop with decision points and retries.
+dependencies:
+  runtime: [abk-agent, abk-provider, cats, abk-checkpoint]
+  build: [abk]
+  feature_flags: [orchestration]
+risks:
+  - id: deadlock
+    impact: medium
+    likelihood: low
+    description: Conflicting rules stall progress.
+    mitigation: Watchdog timeouts + fallback plans.

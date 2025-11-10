@@ -1,0 +1,83 @@
+id: abk-checkpoint
+layer: infrastructure
+ownership: crate
+summary: Session checkpointing and resume capabilities for the agent.
+provides:
+  information:
+    - id: checkpoint-record
+      kind: struct
+      schema:
+        fields:
+          - id: id
+            type: string
+          - id: timestamp
+            type: datetime
+          - id: session-state
+            type: abk-agent:session-state
+          - id: metadata
+            type: map
+      purpose: Durable snapshot of agent state for recovery.
+      owners: [abk-checkpoint]
+access:
+  rules:
+    - id: read-write-checkpoints
+      target: checkpoint-record
+      read: abk-agent|abk-orchestration
+      constraints: []
+      description: Agent/orchestration can read and write checkpoints.
+manipulation:
+  mutations:
+    - id: write-checkpoint
+      target: checkpoint-record
+      kind: create
+      preconditions: []
+      postconditions: []
+      side_effects: [mv-write-file]
+    - id: prune-checkpoints
+      target: checkpoint-record
+      kind: delete
+      preconditions: []
+      postconditions: []
+      side_effects: [mv-delete-file]
+extract:
+  transforms:
+    - id: compress-snapshot
+      inputs: [checkpoint-record]
+      output: checkpoint-record
+      method: compression
+      description: Optional compression of large sessions.
+movement:
+  routes:
+    - id: mv-write-file
+      direction: out
+      from: abk-checkpoint
+      to: external
+      medium: fs
+      payload: checkpoint-record
+      trigger: schedule|event
+      reliability: at-least-once
+    - id: mv-delete-file
+      direction: out
+      from: abk-checkpoint
+      to: external
+      medium: fs
+      payload: checkpoint-record
+      trigger: schedule
+      reliability: best-effort
+coordination:
+  primitives:
+    - id: periodic-checkpoint
+      kind: checkpoint
+      participants: [abk-checkpoint, abk-orchestration]
+      drives: [mv-write-file]
+      description: Auto-checkpoint every N iterations.
+dependencies:
+  runtime: [abk-agent]
+  build: [abk]
+  feature_flags: [checkpoint]
+risks:
+  - id: corruption
+    impact: medium
+    likelihood: low
+    description: Partial writes or incompatible schema break restore.
+    mitigation: Atomic writes + versioning.

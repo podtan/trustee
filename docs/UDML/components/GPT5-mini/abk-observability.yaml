@@ -1,0 +1,42 @@
+# UDML for abk[observability] (Logging / telemetry)
+metadata:
+  name: abk[observability]
+  role: Logging and telemetry
+  version: 1.0
+information:
+  description: |
+    Structured logging, metrics, and traces for sessions, provider requests, tool executions, and lifecycle events. Supports multiple backends (console, file, Datadog, Prometheus push).
+  canonical_schemas:
+    - log_event: { ts: timestamp, level: string, target: string, message: string, attrs: map }
+    - metric: { name: string, value: number, tags: map }
+access:
+  surface:
+    - log(event)
+    - emit_metric(metric)
+  auth:
+    - backend credentials (resolved via abk[config])
+manipulation:
+  mutations:
+    - sampling and rate limiting
+  invariants:
+    - PII must be redacted before emission unless explicitly allowed
+extract:
+  transforms:
+    - aggregate metrics -> rollups
+movement:
+  routes:
+    - send logs/metrics to configured backends
+coordination:
+  responsibilities:
+    - annotate events with session_id, request_id, and correlation ids
+    - provide hooks for alerting on error conditions
+contracts:
+  inputs: [LogEvent, Metric]
+  outputs: [Backend delivery confirmations or errors]
+  error_modes:
+    - backend_unavailable
+    - authorization_failure
+examples:
+  - log_event: { ts: "2025-11-10T00:00:00Z", level: "INFO", target: "abk::agent", message: "session started", attrs: { session_id: "s-1" } }
+notes: |
+  Observability should be pluggable. Default to console structured logs during development and allow seamless switch to prod backends.

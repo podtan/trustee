@@ -1,0 +1,24 @@
+name: abk::provider
+description: "LLM provider factory + trait: provides a small LLM provider abstraction and factory to create concrete providers."
+udml:
+  information:
+    - description: "A trait object (`Box<dyn LlmProvider>`) representing the active LLM provider."
+    - description: "Configuration for the provider, such as API keys, model names, and base URLs."
+
+  access:
+    - description: "The `ProviderFactory` is accessed by `abk::agent` to get an instance of an LLM provider."
+
+  manipulation:
+    - description: "The `ProviderFactory` creates and configures a specific provider implementation (e.g., WASM, HTTP) based on the application configuration."
+
+  extract:
+    - description: "Abstracts the specific details of LLM provider APIs into a common `LlmProvider` trait (generate, stream)."
+    - description: "The `ChatMLAdapter` converts `UMF` messages into the ChatML format required by some providers."
+
+  movement:
+    - description: "The `ProviderFactory` returns a `Box<dyn LlmProvider>` to the `abk::agent`."
+    - description: "The provider implementation sends formatted requests (e.g., ChatML strings) to an LLM backend (either via HTTP or through a WASM host function)."
+    - description: "The provider receives responses (e.g., JSON with content or tool calls) from the LLM backend and returns them as `GenerateResult`."
+
+  coordination:
+    - description: "Decouples the agent logic from the concrete implementation of LLM clients, allowing different backends to be swapped out via configuration."

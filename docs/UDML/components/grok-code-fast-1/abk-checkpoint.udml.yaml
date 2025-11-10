@@ -1,0 +1,116 @@
+component: abk::checkpoint
+description: "Session checkpointing and resume capabilities for agent persistence"
+
+information:
+  - name: Checkpoint
+    description: "Snapshot of agent state for persistence"
+    schema:
+      session_id: string
+      timestamp: "DateTime<Utc>"
+      agent_state: "AgentState"
+      metadata: "CheckpointMetadata"
+
+  - name: CheckpointMetadata
+    description: "Metadata about the checkpoint"
+    schema:
+      version: string
+      compression: boolean
+      size_bytes: integer
+
+  - name: SessionList
+    description: "List of available sessions"
+    schema:
+      sessions: "Vec<SessionInfo>"
+      total_count: integer
+
+access:
+  - name: read_checkpoint_store
+    description: "Access persisted checkpoints from storage"
+    rules:
+      - source: "filesystem or database"
+      - method: "load_checkpoint(session_id)"
+      - visibility: "internal"
+
+  - name: read_session_list
+    description: "Access list of available sessions"
+    rules:
+      - source: "checkpoint directory"
+      - method: "list_sessions()"
+      - visibility: "internal"
+
+manipulation:
+  - name: create_checkpoint
+    description: "Create checkpoint from current agent state"
+    rules:
+      - input: "AgentState"
+      - operation: "Checkpoint::from_state(state)"
+      - constraints: "include timestamp and metadata"
+
+  - name: save_checkpoint
+    description: "Persist checkpoint to storage"
+    rules:
+      - input: "Checkpoint"
+      - operation: "serialize_and_save()"
+      - validation: "storage write successful"
+
+  - name: delete_checkpoint
+    description: "Remove checkpoint from storage"
+    rules:
+      - input: "SessionId"
+      - operation: "remove_checkpoint_file()"
+      - constraints: "only delete own sessions"
+
+extract:
+  - name: extract_session_summary
+    description: "Extract summary information from checkpoint"
+    rules:
+      - input: "Checkpoint"
+      - transform: "extract_message_count | extract_duration | extract_tools_used"
+      - output: "SessionSummary"
+
+  - name: validate_checkpoint_integrity
+    description: "Extract validation status from checkpoint"
+    rules:
+      - input: "CheckpointData"
+      - transform: "check_version | verify_checksum | validate_structure"
+      - output: "IntegrityStatus"
+
+movement:
+  - name: checkpoint_persistence
+    description: "Persist checkpoints to filesystem"
+    rules:
+      - from: "Checkpoint"
+      - to: "filesystem storage"
+      - protocol: "compressed JSON or binary format"
+      - boundaries: "filesystem boundary"
+
+  - name: checkpoint_restoration
+    description: "Restore checkpoints from storage"
+    rules:
+      - from: "filesystem storage"
+      - to: "AgentState"
+      - protocol: "decompressed checkpoint data"
+      - boundaries: "filesystem boundary"
+
+  - name: session_discovery
+    description: "Discover available checkpointed sessions"
+    rules:
+      - from: "checkpoint directory scan"
+      - to: "SessionList"
+      - protocol: "filesystem metadata"
+      - boundaries: "filesystem boundary"
+
+coordination:
+  - name: checkpoint_lifecycle
+    description: "Coordinate checkpoint creation and restoration"
+    primitives:
+      - creation: "capture_state() -> serialize() -> compress() -> save()"
+      - restoration: "locate_checkpoint() -> decompress() -> deserialize() -> validate()"
+      - management: "list_sessions() -> cleanup_old() -> maintain_quota()"
+
+  - name: session_management
+    description: "Coordinate session lifecycle with checkpoints"
+    primitives:
+      - start: "create_session_id() -> initialize_state() -> first_checkpoint()"
+      - resume: "find_checkpoint() -> restore_state() -> continue_execution()"
+      - end: "final_checkpoint() -> update_metadata() -> archive_session()"

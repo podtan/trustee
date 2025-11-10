@@ -1,0 +1,25 @@
+name: Lifecycle-WASM
+description: "WASM lifecycle plugin: a specific lifecycle implementation that runs as a WASM module, supplying templates, task classification, and rendering logic."
+udml:
+  information:
+    - description: "A set of prompt templates (e.g., for system messages, tool observations) stored within the WASM module itself."
+
+  access:
+    - description: "The WASM module is loaded by the host (`abk::lifecycle`)."
+    - description: "It has no access to the host system, except for the data explicitly passed to it."
+
+  manipulation:
+    - description: "Does not manipulate any host state."
+
+  extract:
+    - description: "`classify_task`: Takes a task description and returns a string identifying the agent type (e.g., 'coder', 'researcher')."
+    - description: "`load_template`: Takes a template name and returns the template string."
+    - description: "`render_template`: Takes a template name and a JSON context object, and returns the rendered prompt string."
+
+  movement:
+    - description: "Receives function calls from the host (`abk::lifecycle`) with input data (e.g., task description, context for rendering)."
+    - description: "Returns strings (classification result, templates, rendered prompts) back to the host."
+
+  coordination:
+    - description: "Allows the agent's personality, prompts, and high-level behavior to be defined and swapped out independently of the core agent runtime. This enables the agent to 'morph' into different specialists."
+    - description: "Decouples prompt engineering from the agent's orchestration logic."

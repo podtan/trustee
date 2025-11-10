@@ -1,0 +1,81 @@
+format: UDML-YAML-0.1
+component: "abk[config]"
+summary: "Configuration loader merging TOML files, defaults, and environment overrides into typed settings."
+context:
+  crate: "abk"
+  feature_flags:
+    - config
+  upstream_interfaces:
+    - filesystem
+    - environment variables
+  downstream_interfaces:
+    - abk::cli
+    - abk::agent
+    - abk::orchestration
+
+domains:
+  information:
+    - name: configuration_schema
+      ownership: abk[config]
+      description: "Canonical schema for trustee.toml including execution, checkpointing, provider, and observability sections."
+      shape: |
+        struct Configuration {
+          execution: ExecutionConfig,
+          checkpointing: Option<CheckpointConfig>,
+          provider: ProviderConfig,
+          lifecycle: LifecycleConfig,
+          observability: ObservabilityConfig,
+          templates: TemplatePaths
+        }
+    - name: defaults_catalog
+      ownership: abk[config]
+      description: "Built-in default values for absent configuration entries."
+      shape: "HashMap<String, Value>"
+  access:
+    - name: file_read_policy
+      subject: abk[config]
+      description: "Allowed to read TOML files from paths supplied by CLI; write operations are disallowed."
+      rules:
+        - allow read config/trustee.toml
+        - allow read from user-specified overrides
+        - deny writes to disk
+    - name: env_projection
+      subject: abk[config]
+      description: "Environment variables namespaced by prefixes (e.g., TRUSTEE_) are readable and merged."
+      rules:
+        - prefix filtering enforced
+        - sensitive keys redacted when logging
+  manipulation:
+    - name: merge_strategy
+      description: "Apply deterministic precedence: defaults < file < env < runtime overrides."
+      operations:
+        - apply_defaults
+        - merge_file
+        - merge_env
+        - merge_runtime
+      invariants:
+        - resulting config validated against schema
+  extract:
+    - name: typed_projection
+      description: "Convert loosely typed TOML values into strongly typed structs."
+      outputs:
+        - ExecutionConfig
+        - ProviderConfig
+        - LifecycleConfig
+      notes: "Uses serde for typing; errors include path context."
+  movement:
+    - name: config_delivery
+      source: abk[config]
+      destination: consumers (CLI, agent, orchestration)
+      protocol: "Struct return"
+      payload: Configuration
+      notes: "Configuration cloneable for downstream modifications (not persisted)."
+  coordination:
+    - name: reload_cycle
+      participants:
+        - abk[config]
+        - abk::cli
+        - abk::agent
+      triggers:
+        - reload_requested
+      policy: "Reload invalidates cached Configuration and re-runs merge_strategy; downstream modules notified via shared handles."

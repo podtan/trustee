@@ -1,0 +1,130 @@
+component: umf
+description: "Universal Message Format providing ChatML messages, content blocks, and tool call/result structures"
+
+information:
+  - name: InternalMessage
+    description: "Core message structure for agent communication"
+    schema:
+      role: "MessageRole"
+      content: "MessageContent"
+      metadata: "HashMap<String, Value>"
+      tool_call_id: "Option<String>"
+      name: "Option<String>"
+
+  - name: ContentBlock
+    description: "Flexible content representation"
+    schema:
+      text: "Option<String>"
+      tool_use: "Option<ToolUse>"
+      tool_result: "Option<ToolResult>"
+
+  - name: ToolCall
+    description: "Tool invocation request"
+    schema:
+      id: string
+      name: string
+      input: "HashMap<String, Value>"
+
+  - name: ToolResult
+    description: "Tool execution result"
+    schema:
+      tool_call_id: string
+      content: "Vec<ContentBlock>"
+
+access:
+  - name: read_message_content
+    description: "Access message content and metadata"
+    rules:
+      - source: "InternalMessage"
+      - method: "get_content() | get_metadata()"
+      - visibility: "public"
+
+  - name: read_tool_definitions
+    description: "Access tool call and result structures"
+    rules:
+      - source: "ToolCall | ToolResult"
+      - method: "get_parameters() | get_output()"
+      - visibility: "public"
+
+manipulation:
+  - name: create_internal_message
+    description: "Create new internal message"
+    rules:
+      - input: "Role + Content + Metadata"
+      - operation: "InternalMessage::new(role, content, metadata)"
+      - validation: "content format valid"
+
+  - name: add_content_block
+    description: "Add content block to message"
+    rules:
+      - input: "ContentBlock"
+      - operation: "message.add_content_block(block)"
+      - constraints: "block type compatible"
+
+  - name: create_tool_call
+    description: "Create tool call structure"
+    rules:
+      - input: "ToolName + Arguments"
+      - operation: "ToolCall::new(name, args)"
+      - validation: "arguments match tool schema"
+
+extract:
+  - name: convert_to_chatml
+    description: "Extract ChatML format from internal messages"
+    rules:
+      - input: "Vec<InternalMessage>"
+      - transform: "map_roles | format_content | add_metadata"
+      - output: "ChatMLMessages"
+
+  - name: extract_tool_calls
+    description: "Extract tool calls from message content"
+    rules:
+      - input: "InternalMessage"
+      - transform: "parse_content_blocks | filter_tool_use | extract_calls"
+      - output: "Vec<ToolCall>"
+
+  - name: generate_message_summary
+    description: "Extract summary information from messages"
+    rules:
+      - input: "Vec<InternalMessage>"
+      - transform: "count_by_role | extract_length | identify_tools"
+      - output: "MessageSummary"
+
+movement:
+  - name: message_serialization
+    description: "Serialize messages for transport"
+    rules:
+      - from: "InternalMessage"
+      - to: "JSON or binary format"
+      - protocol: "UMF schema"
+      - boundaries: "serialization boundary"
+
+  - name: chatml_conversion
+    description: "Convert to ChatML for LLM providers"
+    rules:
+      - from: "InternalMessage"
+      - to: "ChatML format"
+      - protocol: "OpenAI ChatML specification"
+      - boundaries: "format conversion boundary"
+
+  - name: tool_data_flow
+    description: "Flow tool calls and results between components"
+    rules:
+      - from: "ToolCall"
+      - to: "ToolResult"
+      - protocol: "structured tool protocol"
+      - boundaries: "component communication boundary"
+
+coordination:
+  - name: message_processing
+    description: "Coordinate message creation and processing"
+    primitives:
+      - creation: "build_content() -> add_metadata() -> validate_structure()"
+      - transformation: "convert_formats() -> apply_filters() -> route_messages()"
+      - aggregation: "collect_related() -> merge_content() -> deduplicate()"
+
+  - name: tool_protocol
+    description: "Coordinate tool call and result handling"
+    primitives:
+      - invocation: "create_call() -> validate_args() -> dispatch_execution()"
+      - completion: "receive_result() -> validate_output() -> integrate_response()"

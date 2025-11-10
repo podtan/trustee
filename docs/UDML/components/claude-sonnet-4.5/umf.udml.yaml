@@ -1,0 +1,221 @@
+# UDML Specification for UMF (InternalMessage, ContentBlock, ToolCall/ToolResult, ChatML helpers)
+# This component provides canonical internal message format and ChatML helpers
+
+information:
+  # UMF data structures
+  - name: InternalMessage
+    description: "Canonical internal message format for agent communication"
+    schema:
+      type: object
+      properties:
+        role: { type: string, enum: [system, user, assistant, tool] }
+        content: { type: array, items: { $ref: "#/definitions/ContentBlock" } }
+        metadata: { type: object }
+        tool_call_id: { type: string }
+        name: { type: string }
+        timestamp: { type: string, format: date-time }
+
+  - name: ContentBlock
+    description: "Flexible content block that can contain text, images, or tool calls"
+    schema:
+      type: object
+      properties:
+        type: { type: string, enum: [text, image, tool_use, tool_result] }
+        text: { type: string }
+        image_url: { type: object, properties: { url: { type: string } } }
+        tool_use: { $ref: "#/definitions/ToolCall" }
+        tool_result: { $ref: "#/definitions/ToolResult" }
+
+  - name: ToolCall
+    description: "Representation of a tool invocation request"
+    schema:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        input: { type: object }
+
+  - name: ToolResult
+    description: "Result of a tool execution"
+    schema:
+      type: object
+      properties:
+        tool_call_id: { type: string }
+        content: { type: array, items: { $ref: "#/definitions/ContentBlock" } }
+        is_error: { type: boolean }
+
+  - name: ChatMLMessage
+    description: "ChatML formatted message for LLM provider communication"
+    schema:
+      type: object
+      properties:
+        role: { type: string, enum: [system, user, assistant, tool] }
+        content: { type: string }
+        tool_calls: { type: array, items: { $ref: "#/definitions/ToolCall" } }
+        tool_call_id: { type: string }
+        name: { type: string }
+
+access:
+  # Message access patterns
+  - name: get_message_by_id
+    description: "Retrieve message by unique identifier"
+    parameters:
+      message_id: { type: string }
+    returns: { $ref: "#/definitions/InternalMessage" }
+
+  - name: get_messages_by_role
+    description: "Get all messages with specific role"
+    parameters:
+      role: { type: string, enum: [system, user, assistant, tool] }
+    returns:
+      type: array
+      items: { $ref: "#/definitions/InternalMessage" }
+
+  - name: get_conversation_history
+    description: "Get complete conversation history"
+    parameters:
+      session_id: { type: string }
+      limit: { type: integer }
+    returns:
+      type: array
+      items: { $ref: "#/definitions/InternalMessage" }
+
+  - name: search_messages
+    description: "Search messages by content or metadata"
+    parameters:
+      query: { type: string }
+      filters: { type: object }
+    returns:
+      type: array
+      items: { $ref: "#/definitions/InternalMessage" }
+
+manipulation:
+  # Message operations
+  - name: create_message
+    description: "Create new internal message"
+    parameters:
+      role: { type: string }
+      content: { type: array, items: { $ref: "#/definitions/ContentBlock" } }
+      metadata: { type: object }
+    creates: { $ref: "#/definitions/InternalMessage" }
+
+  - name: add_content_block
+    description: "Add content block to existing message"
+    parameters:
+      message_id: { type: string }
+      content_block: { $ref: "#/definitions/ContentBlock" }
+    modifies: { $ref: "#/definitions/InternalMessage" }
+
+  - name: update_message_metadata
+    description: "Update metadata of existing message"
+    parameters:
+      message_id: { type: string }
+      metadata_updates: { type: object }
+    modifies: { $ref: "#/definitions/InternalMessage" }
+
+  - name: delete_message
+    description: "Remove message from conversation"
+    parameters:
+      message_id: { type: string }
+    deletes: { $ref: "#/definitions/InternalMessage" }
+
+extract:
+  # Message computations
+  - name: convert_to_chatml
+    description: "Convert internal message format to ChatML"
+    input: { $ref: "#/definitions/InternalMessage" }
+    output: { $ref: "#/definitions/ChatMLMessage" }
+
+  - name: extract_tool_calls
+    description: "Extract all tool calls from message content"
+    input: { $ref: "#/definitions/InternalMessage" }
+    output:
+      type: array
+      items: { $ref: "#/definitions/ToolCall" }
+
+  - name: calculate_token_count
+    description: "Calculate token count for message content"
+    input: { $ref: "#/definitions/InternalMessage" }
+    output:
+      type: object
+      properties:
+        total_tokens: { type: integer }
+        breakdown: { type: object }
+
+  - name: validate_message_structure
+    description: "Validate message conforms to schema"
+    input: { $ref: "#/definitions/InternalMessage" }
+    output:
+      type: object
+      properties:
+        is_valid: { type: boolean }
+        errors: { type: array, items: { type: string } }
+
+  - name: merge_messages
+    description: "Merge multiple messages into single message"
+    input:
+      type: array
+      items: { $ref: "#/definitions/InternalMessage" }
+    output: { $ref: "#/definitions/InternalMessage" }
+
+movement:
+  # Message data flow
+  - name: message_serialization
+    description: "Convert messages to/from wire formats"
+    from: { $ref: "#/definitions/InternalMessage" }
+    to: ["json_format", "binary_format"]
+    protocol: "message_encoding"
+    boundaries: ["memory_to_wire"]
+
+  - name: format_conversion
+    description: "Convert between internal and external message formats"
+    from: { $ref: "#/definitions/InternalMessage" }
+    to: { $ref: "#/definitions/ChatMLMessage" }
+    protocol: "format_transformation"
+    boundaries: ["internal_to_external"]
+
+  - name: content_block_routing
+    description: "Route different content block types to appropriate handlers"
+    from: { $ref: "#/definitions/ContentBlock" }
+    to: ["text_processor", "image_processor", "tool_executor"]
+    protocol: "content_type_dispatch"
+    boundaries: ["generic_to_specific"]
+
+  - name: streaming_message_assembly
+    description: "Assemble streaming message fragments into complete messages"
+    from: "message_fragments"
+    to: { $ref: "#/definitions/InternalMessage" }
+    protocol: "fragment_assembly"
+    boundaries: ["streaming_to_complete"]
+
+coordination:
+  # Message coordination
+  - name: conversation_flow
+    description: "Coordinate message flow in conversations"
+    primitives:
+      - type: "message_ordering"
+        description: "Maintain correct message sequence and dependencies"
+      - type: "context_preservation"
+        description: "Preserve conversation context across messages"
+      - type: "threading_support"
+        description: "Support conversation threading and branching"
+
+  - name: content_processing_pipeline
+    description: "Process different content block types"
+    primitives:
+      - type: "type_detection"
+        description: "Detect and classify content block types"
+      - type: "parallel_processing"
+        description: "Process independent content blocks in parallel"
+      - type: "result_aggregation"
+        description: "Aggregate results from different content processors"
+
+  - name: format_adaptation
+    description: "Adapt messages for different LLM providers"
+    primitives:
+      - type: "provider_specific_formatting"
+        description: "Format messages according to provider requirements"
+      - type: "capability_detection"
+        description: "Detect provider capabilities and adapt accordingly"
+      - type: "fallback_formatting"
+        description: "Provide fallback formatting for unsupported features"

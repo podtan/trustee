@@ -1,0 +1,497 @@
+---
+# UDML: Lifecycle-WASM — WASM Lifecycle Templates
+# WASM plugin for agent lifecycle, templates, classification, and morphing
+
+metadata:
+  name: "Lifecycle-WASM"
+  version: "0.1.0"
+  owner: "Lifecycle WASM System"
+  responsibility: "WASM lifecycle plugin for templates, task classification, agent morphing"
+
+information:
+  # WASM lifecycle module structure
+  wasm_lifecycle_module:
+    - export: "load_template"
+      signature: "(template_name: String, context_json: String) -> String"
+      semantics: "Load and render a template"
+      parameters:
+        - name: template_name
+          type: String
+          examples: ["system_prompt", "action_observation", "tool_error", "final_response"]
+        - name: context_json
+          type: String
+          semantics: "JSON object with template variables"
+      returns:
+        - field: status
+          type: "ok|error"
+        - field: content
+          type: String
+          semantics: "Rendered template"
+    
+    - export: "classify_task"
+      signature: "(task_description: String) -> String"
+      semantics: "Classify task to determine agent type"
+      parameters:
+        - name: task_description
+          type: String
+          semantics: "User's task description"
+      returns:
+        - field: status
+          type: "ok|error"
+        - field: agent_type
+          type: String
+          semantics: "Determined agent type (coder, researcher, etc.)"
+        - field: confidence
+          type: f32
+          semantics: "Confidence score [0.0, 1.0]"
+        - field: reasoning
+          type: String
+          semantics: "Explanation of classification"
+    
+    - export: "get_lifecycle_info"
+      signature: "() -> String"
+      semantics: "Get lifecycle plugin metadata"
+      returns:
+        - field: name
+          type: String
+          semantics: "Lifecycle name (e.g., 'coder-lifecycle')"
+        - field: version
+          type: String
+          semantics: "Lifecycle plugin version"
+        - field: supported_templates
+          type: Vec<String>
+          semantics: "List of template names"
+        - field: supported_agent_types
+          type: Vec<String>
+          semantics: "List of agent types this lifecycle can morph into"
+
+  # Template examples
+  template_system_prompt:
+    - name: "system_prompt"
+      description: "Initial system instructions for agent"
+      context_vars:
+        - agent_type: String
+        - task: String
+        - max_iterations: u32
+      example_context: |
+        {
+          "agent_type": "coder",
+          "task": "Implement a binary search function",
+          "max_iterations": 10
+        }
+      example_output: |
+        You are a {{ agent_type }} assistant. Your task is:
+        {{ task }}
+        
+        You have {{ max_iterations }} iterations to complete this task.
+        Use available tools to read files, write code, and test your implementation.
+
+  template_action_observation:
+    - name: "action_observation"
+      description: "Format tool execution results as observations"
+      context_vars:
+        - tool_name: String
+        - tool_output: String
+        - exit_code: i32
+        - success: bool
+      example_context: |
+        {
+          "tool_name": "run_command",
+          "tool_output": "compilation successful\n",
+          "exit_code": 0,
+          "success": true
+        }
+      example_output: |
+        Tool {{ tool_name }} executed successfully (exit code {{ exit_code }}):
+        {{ tool_output }}
+
+  template_tool_error:
+    - name: "tool_error"
+      description: "Format tool execution errors"
+      context_vars:
+        - tool_name: String
+        - error_message: String
+        - attempt: u32
+      example_output: |
+        Error executing {{ tool_name }} (attempt {{ attempt }}): {{ error_message }}
+        Please try a different approach or verify the command.
+
+  template_final_response:
+    - name: "final_response"
+      description: "Format final response to user"
+      context_vars:
+        - result: String
+        - iterations: u32
+        - success: bool
+      example_output: |
+        Task completed in {{ iterations }} iterations.
+        {% if success %}Success!{% else %}Failed.{% endif %}
+        
+        Result:
+        {{ result }}
+
+  # Agent type definitions
+  agent_type_coder:
+    - name: "coder"
+      description: "Agent specialized in software development"
+      system_instructions: "You are a code generation and debugging expert"
+      available_tools: ["file_read", "file_write", "run_command", "search_file"]
+      max_iterations: 10
+      specialized_templates:
+        - "system_prompt_coder"
+        - "action_observation_coder"
+        - "debug_suggestion"
+
+  agent_type_researcher:
+    - name: "researcher"
+      description: "Agent specialized in information research"
+      system_instructions: "You are a research analyst"
+      available_tools: ["search_file", "search_dir", "file_read"]
+      max_iterations: 15
+      specialized_templates:
+        - "system_prompt_researcher"
+        - "synthesis_observation"
+
+  agent_type_analyst:
+    - name: "analyst"
+      description: "Agent specialized in data analysis"
+      system_instructions: "You are a data analyst"
+      available_tools: ["file_read", "run_command"]
+      max_iterations: 8
+      specialized_templates:
+        - "system_prompt_analyst"
+        - "metric_observation"
+
+  # Classification rules
+  classification_rules:
+    - rule: "If task contains 'write', 'implement', 'fix', 'debug' -> agent_type = coder"
+    - rule: "If task contains 'search', 'find', 'research', 'analyze' -> agent_type = researcher"
+    - rule: "If task contains 'measure', 'calculate', 'statistics' -> agent_type = analyst"
+    - rule: "Default -> agent_type = general"
+
+access:
+  # WASM lifecycle interface (host side)
+  wasm_interface:
+    - query: "wasm_lifecycle.load_template(name: &str, context: Value) -> Result<String, String>"
+      visibility: "Internal (host-only)"
+      semantics: "Load template from WASM plugin"
+    
+    - query: "wasm_lifecycle.classify_task(description: &str) -> Result<TaskClassification, String>"
+      visibility: "Internal (host-only)"
+      semantics: "Classify task via WASM plugin"
+    
+    - query: "wasm_lifecycle.get_lifecycle_info() -> Result<LifecycleInfo, String>"
+      visibility: "Internal (host-only)"
+      semantics: "Get plugin metadata"
+
+manipulation:
+  # WASM lifecycle initialization
+  initialization:
+    - operation: "load_wasm_lifecycle(path: &Path) -> Result<WasmLifecycle, Error>"
+      semantics: "Load WASM lifecycle plugin binary"
+      precondition: "File exists, is valid WASM, has correct exports"
+      postcondition: "WASM module instantiated and ready"
+      logic: "Use wasmtime to load and validate ABI"
+
+  # Template loading
+  template_loading:
+    - operation: "load_template_via_wasm(name: &str, context: Value) -> Result<String, Error>"
+      semantics: "Call WASM load_template export"
+      precondition: "WASM module loaded, context valid"
+      postcondition: "Rendered template string"
+      boundary_crossing: "Marshal context to JSON, call WASM, unmarshal result"
+
+  # Task classification
+  classification_operation:
+    - operation: "classify_task_via_wasm(description: &str) -> Result<TaskClassification, Error>"
+      semantics: "Call WASM classify_task export"
+      precondition: "WASM module loaded, description provided"
+      postcondition: "TaskClassification (agent_type, confidence, reasoning)"
+      boundary_crossing: "Pass description to WASM, unmarshal classification"
+
+  # Agent morphing
+  morphing_operation:
+    - operation: "morph_to_agent_type(agent_type: &str) -> Result<AgentConfiguration, Error>"
+      semantics: "Change agent configuration based on agent type"
+      precondition: "agent_type is supported by lifecycle"
+      postcondition: "Agent configuration updated (system prompt, tools, templates)"
+      logic: "Load type-specific configuration and templates"
+
+extract:
+  # Lifecycle info extraction
+  info_extraction:
+    - extract: "extract_lifecycle_capabilities() -> LifecycleCapabilities"
+      rule: "Call WASM get_lifecycle_info and extract capabilities"
+      input_owner: "Lifecycle-WASM"
+      output_owner: "abk[lifecycle] loader"
+      extraction:
+        - "supported_templates list"
+        - "supported_agent_types list"
+        - "version"
+
+  # Template content extraction
+  template_extraction:
+    - extract: "extract_template_content(name: &str, context: Value) -> String"
+      rule: "Render template with context via WASM"
+      input_owner: "abk[lifecycle] (template name, context)"
+      output_owner: "Template string"
+      backend: "WASM plugin handles rendering logic"
+
+  # Classification extraction
+  classification_extraction:
+    - extract: "extract_classification(task: &str) -> TaskClassification"
+      rule: "Classify task via WASM plugin"
+      input_owner: "Task description"
+      output_owner: "TaskClassification (agent_type, confidence)"
+      backend: "WASM plugin handles classification logic"
+
+movement:
+  # WASM lifecycle loading
+  loading_flow:
+    - from: "abk::agent"
+      to: "abk[lifecycle]::LifecycleLoader"
+      data: "LifecycleConfig (plugin path)"
+      protocol: "Function call (in-process)"
+      semantics: "Trigger lifecycle loading"
+    
+    - from: "abk[lifecycle]"
+      to: "filesystem"
+      data: "WASM lifecycle plugin path"
+      protocol: "File read"
+      semantics: "Load WASM binary"
+    
+    - from: "filesystem"
+      to: "Lifecycle-WASM"
+      data: "WASM binary bytes"
+      protocol: "File system"
+      semantics: "File loaded"
+    
+    - from: "Lifecycle-WASM (host)"
+      to: "wasmtime runtime"
+      data: "Instantiate WASM module"
+      protocol: "WASM runtime"
+      semantics: "Module instantiated"
+
+  # Template request flow
+  template_flow:
+    - from: "abk::agent"
+      to: "abk[lifecycle]::LifecycleLoader"
+      data: "TemplateRequest (name, context)"
+      protocol: "Function call (in-process)"
+      semantics: "Request template rendering"
+    
+    - from: "abk[lifecycle]"
+      to: "Lifecycle-WASM (host)"
+      data: "template_name + context JSON"
+      protocol: "Function parameter"
+      semantics: "Template request ready for WASM"
+    
+    - from: "abk[lifecycle] (host)"
+      to: "Lifecycle-WASM (guest)"
+      data: "load_template(name, context_json) call"
+      protocol: "WASM function call"
+      semantics: "Cross WASM boundary"
+    
+    - from: "Lifecycle-WASM (guest)"
+      to: "Lifecycle-WASM (guest)"
+      data: "Template lookup and rendering logic"
+      protocol: "In-WASM logic"
+      semantics: "WASM plugin renders template"
+    
+    - from: "Lifecycle-WASM (guest)"
+      to: "abk[lifecycle] (host)"
+      data: "Rendered template (JSON string)"
+      protocol: "WASM return value"
+      semantics: "Return rendered template"
+    
+    - from: "abk[lifecycle]"
+      to: "abk::agent"
+      data: "Rendered template string"
+      protocol: "Function return (in-process)"
+      semantics: "Agent receives template"
+
+  # Task classification flow
+  classification_flow:
+    - from: "abk::agent"
+      to: "abk[lifecycle]::LifecycleLoader"
+      data: "task_description"
+      protocol: "Function call (in-process)"
+      semantics: "Request task classification"
+    
+    - from: "abk[lifecycle]"
+      to: "Lifecycle-WASM (host)"
+      data: "task_description"
+      protocol: "Function parameter"
+      semantics: "Classification request ready for WASM"
+    
+    - from: "abk[lifecycle] (host)"
+      to: "Lifecycle-WASM (guest)"
+      data: "classify_task(task_description) call"
+      protocol: "WASM function call"
+      semantics: "Cross WASM boundary"
+    
+    - from: "Lifecycle-WASM (guest)"
+      to: "Lifecycle-WASM (guest)"
+      data: "Classification logic (keyword matching, rules, etc.)"
+      protocol: "In-WASM logic"
+      semantics: "WASM plugin classifies task"
+    
+    - from: "Lifecycle-WASM (guest)"
+      to: "abk[lifecycle] (host)"
+      data: "Classification JSON (agent_type, confidence, reasoning)"
+      protocol: "WASM return value"
+      semantics: "Return classification"
+    
+    - from: "abk[lifecycle]"
+      to: "abk::agent"
+      data: "TaskClassification"
+      protocol: "Function return (in-process)"
+      semantics: "Agent receives classification"
+
+coordination:
+  # Lifecycle plugin lifecycle
+  plugin_lifecycle:
+    - phase: 1
+      action: "Load WASM lifecycle plugin"
+      owner: "abk[lifecycle] loader"
+      trigger: "abk::agent initialization"
+    
+    - phase: 2
+      action: "Query plugin info (supported templates, agent types)"
+      owner: "abk[lifecycle] loader"
+      semantics: "Validate plugin capabilities"
+    
+    - phase: 3
+      action: "Cache plugin info for runtime use"
+      owner: "abk[lifecycle] loader"
+    
+    - phase: 4
+      action: "Load initial system prompt template"
+      owner: "abk[lifecycle] (via WASM)"
+      semantics: "Prepare first message for agent"
+    
+    - phase: 5
+      action: "During execution, load templates on demand"
+      owner: "abk[lifecycle] (via WASM)"
+      semantics: "Render observation, error, final response templates"
+
+  # Agent morphing workflow
+  morphing_workflow:
+    - step: 1
+      action: "User provides task description"
+      owner: "User"
+    
+    - step: 2
+      action: "Agent calls classify_task() with description"
+      owner: "abk::agent"
+      semantics: "Request classification via abk[lifecycle]"
+    
+    - step: 3
+      action: "abk[lifecycle] calls WASM classify_task()"
+      owner: "Lifecycle-WASM (host)"
+      semantics: "Call WASM plugin"
+    
+    - step: 4
+      action: "WASM plugin classifies and returns agent_type"
+      owner: "Lifecycle-WASM (guest)"
+      semantics: "Apply classification rules"
+    
+    - step: 5
+      action: "Agent morphs: load type-specific config"
+      owner: "abk::agent"
+      semantics: "Change system instructions, available tools, templates"
+    
+    - step: 6
+      action: "Agent execution proceeds with morphed configuration"
+      owner: "abk::agent"
+      semantics: "Agent behaves as determined agent type"
+
+  # Template rendering workflow
+  template_workflow:
+    - step: 1
+      action: "Agent needs to render template (observation, error, response)"
+      owner: "abk::agent"
+    
+    - step: 2
+      action: "Call abk[lifecycle]::load_template(name, context)"
+      owner: "abk::agent"
+      semantics: "Request template rendering"
+    
+    - step: 3
+      action: "abk[lifecycle] calls WASM load_template()"
+      owner: "Lifecycle-WASM (host)"
+      semantics: "Cross WASM boundary"
+    
+    - step: 4
+      action: "WASM plugin looks up template and renders with context"
+      owner: "Lifecycle-WASM (guest)"
+      semantics: "Template rendering logic (Jinja2, Handlebars, custom, etc.)"
+    
+    - step: 5
+      action: "WASM returns rendered template string"
+      owner: "Lifecycle-WASM (guest)"
+    
+    - step: 6
+      action: "abk[lifecycle] caches rendered template (if static)"
+      owner: "abk[lifecycle] loader"
+      semantics: "Optimization: avoid re-rendering same template"
+    
+    - step: 7
+      action: "Agent receives rendered template"
+      owner: "abk::agent"
+      semantics: "Ready to use in message or response"
+
+  # Error handling
+  error_handling:
+    - error: "WASM plugin not found"
+      handler: "Fail agent startup with clear error"
+      recovery: "User must provide valid lifecycle plugin"
+    
+    - error: "WASM template not found"
+      handler: "Log warning, return fallback template or empty string"
+      recovery: "Agent may use default template or proceed without"
+    
+    - error: "WASM classification fails"
+      handler: "Return default agent type (e.g., 'general')"
+      recovery: "Agent proceeds with default configuration"
+    
+    - error: "WASM module validation fails"
+      handler: "Fail startup with ABI mismatch error"
+      recovery: "Plugin must be updated to match ABI version"
+
+  # Performance optimization
+  optimizations:
+    - optimization: "Template caching"
+      logic: "Cache rendered templates if they don't depend on dynamic context"
+      benefit: "Avoid re-rendering same template every iteration"
+    
+    - optimization: "Classification caching"
+      logic: "Cache task classification for session lifetime"
+      benefit: "Avoid re-classifying same task"
+    
+    - optimization: "Lazy plugin loading"
+      logic: "Load only used templates on-demand instead of all at startup"
+      benefit: "Faster startup for plugins with many templates"
+
+dependencies:
+  internal:
+    - "abk[lifecycle]" # Plugin loader and caller
+    - "abk[config]" # Lifecycle configuration
+    - "abk[observability]" # Error logging
+  
+  external:
+    - "wasmtime" # WASM runtime
+    - "serde_json" # JSON marshaling
+
+notes: |
+  - Lifecycle-WASM is a plugin system for agent morphing and lifecycle management.
+  - Single WASM module provides templates, task classification, and agent type configuration.
+  - Templates support context variables and can use various rendering engines (Jinja2, Handlebars, etc.).
+  - Task classification enables agent type selection: different agents have different capabilities.
+  - Agent morphing changes system instructions, available tools, and template selection at runtime.
+  - WASM boundary crossings use JSON marshaling for context and responses.
+  - Template rendering is cached for static templates to optimize repeated use.
+  - Classification is cached for session lifetime to avoid repeated classification.
+  - Error handling is defensive; missing templates or classification failures don't crash the agent.
+  - Multiple lifecycle plugins can coexist (in different sessions) for different agent domains.
+  - No recompilation needed to add new templates or classification rules; update WASM and restart.

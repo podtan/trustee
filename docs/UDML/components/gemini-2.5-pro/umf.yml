@@ -1,0 +1,52 @@
+name: UMF
+description: "Universal Message Format: defines canonical internal message formats (InternalMessage, ContentBlock, ToolCall/ToolResult) and ChatML helpers."
+udml:
+  information:
+    - description: "The core data structures for representing conversations and tool interactions."
+    - id: InternalMessage
+      description: "A single message in a conversation."
+      schema:
+        type: object
+        properties:
+          role: { type: string, enum: ["system", "user", "assistant", "tool"] }
+          content: { type: "array", items: { "$ref": "#/ContentBlock" } }
+          name: { type: string }
+          tool_call_id: { type: string }
+    - id: ContentBlock
+      description: "A piece of content within a message, which can be text or a tool-related block."
+      schema:
+        oneOf:
+          - { type: "string" } # Text
+          - { "$ref": "#/ToolUse" }
+          - { "$ref": "#/ToolResult" }
+    - id: ToolUse
+      description: "A request from the assistant to use a tool."
+      schema:
+        type: object
+        properties:
+          id: { type: string }
+          name: { type: string }
+          input: { type: object }
+    - id: ToolResult
+      description: "The result of a tool execution."
+      schema:
+        type: object
+        properties:
+          id: { type: string }
+          content: { type: string } # stdout, stderr, or error message
+
+  access:
+    - description: "UMF structs are accessed by all major components: `abk::agent`, `abk::provider`, `CATS`, and `abk::checkpoint`."
+
+  manipulation:
+    - description: "UMF provides helper functions to create and manipulate these message structures."
+
+  extract:
+    - description: "Provides `ChatML` helpers to serialize a sequence of `InternalMessage` structs into a single string for providers that consume the ChatML format."
+    - description: "Provides helpers to parse LLM responses back into UMF structures (e.g., extracting `ToolUse` blocks from a response)."
+
+  movement:
+    - description: "UMF structs are the primary data type passed between the `agent`, `provider`, `CATS`, and `checkpoint` components. They are the 'blood' of the system."
+
+  coordination:
+    - description: "Provides a stable, canonical data model for all communication within the agent, ensuring that all components speak the same language."

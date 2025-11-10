@@ -1,0 +1,43 @@
+# UDML for abk[executor] (Command executor)
+metadata:
+  name: abk[executor]
+  role: Command execution with safety
+  version: 1.0
+information:
+  description: |
+    Executes system commands and tool processes on behalf of the Agent. Provides timeouts, sandboxing hints, and captures stdout/stderr/exit codes.
+  canonical_schemas:
+    - command_request: { id: string, argv: [string], env: map, cwd: string, timeout_secs: int }
+    - execution_result: { id: string, stdout: string, stderr: string, exit_code: int, duration_ms: int }
+access:
+  surface:
+    - execute(command_request) -> execution_result
+  auth:
+    - restricted to host user privileges; executor enforces allow-list of safe commands
+manipulation:
+  mutations:
+    - may write temporary files during command execution
+  invariants:
+    - commands exceeding timeouts are terminated and reported as errors
+extract:
+  transforms:
+    - normalize stdout/stderr into structured tool result
+movement:
+  routes:
+    - local OS process namespace
+    - return results to CATS or Agent
+coordination:
+  responsibilities:
+    - resource isolation (timeouts, working dir)
+    - validate commands against allowlist and sandbox rules
+contracts:
+  inputs: [CommandRequest]
+  outputs: [ExecutionResult]
+  error_modes:
+    - permission_denied
+    - command_not_found
+    - timeout
+examples:
+  - command_request: { id: "c1", argv: ["bash","-lc","echo hi"], timeout_secs: 10 }
+notes: |
+  The executor is an adapter for tools and should enforce host-level safety. Prefer process isolation where available.

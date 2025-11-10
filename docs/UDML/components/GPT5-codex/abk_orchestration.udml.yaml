@@ -1,0 +1,111 @@
+format: UDML-YAML-0.1
+component: "abk[orchestration]"
+summary: "Workflow coordinator that sequences provider calls, tool executions, lifecycle interactions, and checkpoints."
+context:
+  crate: "abk"
+  feature_flags:
+    - orchestration
+    - agent
+    - checkpoint
+    - provider
+  upstream_interfaces:
+    - abk::agent state APIs
+    - abk::provider capabilities
+    - Lifecycle outputs
+  downstream_interfaces:
+    - abk::agent
+    - abk::checkpoint
+    - cats::ToolRegistry
+
+domains:
+  information:
+    - name: turn_plan
+      ownership: abk[orchestration]
+      description: "Sequence plan describing next actions (provider call, tool execution, checkpoint)."
+      shape: |
+        struct TurnPlan {
+          turn_id: u64,
+          actions: Vec<TurnAction>,
+          rationale: String,
+          guard_conditions: Vec<Guard>
+        }
+    - name: orchestration_state
+      ownership: abk[orchestration]
+      description: "State machine state capturing progress, pending tool calls, error recovery strategy."
+      shape: |
+        struct OrchestrationState {
+          status: TurnStatus,
+          pending_actions: Vec<TurnAction>,
+          last_provider_request: Option<ProviderRequestId>,
+          retry_budget: RetryBudget,
+          checkpoint_pending: bool
+        }
+  access:
+    - name: session_state_access
+      subject: abk[orchestration]
+      description: "Read/write access to selected portions of agent session state (messages, tool queue) through controlled APIs."
+      rules:
+        - reads allowed for planning
+        - writes only via defined mutations to keep invariants intact
+    - name: capability_catalog_access
+      subject: abk[orchestration]
+      description: "Reads provider and lifecycle capability descriptors for decision making."
+      rules:
+        - read-only; updates propagate from providers/lifecycle modules
+  manipulation:
+    - name: action_scheduling
+      description: "Mutate orchestration_state by enqueuing/dequeuing actions based on lifecycle guidance and runtime events."
+      operations:
+        - enqueue_provider_call
+        - enqueue_tool_execution
+        - mark_checkpoint_due
+    - name: error_recovery
+      description: "Adjust plan when errors occur (retry, fallback, abort)."
+      operations:
+        - schedule_retry
+        - escalate_failure
+  extract:
+    - name: lifecycle_signal_interpretation
+      description: "Interpret lifecycle outputs (e.g., next_step template) into concrete TurnAction sequences."
+      outputs:
+        - TurnAction list
+    - name: telemetry_snapshot
+      description: "Extract orchestration metrics for observability (turn durations, retries)."
+      outputs:
+        - OrchestrationMetric
+  movement:
+    - name: provider_invocation
+      source: abk[orchestration]
+      destination: abk::provider
+      protocol: "trait call"
+      payload: GenerateConfig + messages
+    - name: tool_dispatch
+      source: abk[orchestration]
+      destination: cats::ToolRegistry
+      protocol: "ToolExecutionRequest"
+      payload: tool identifier, arguments
+    - name: checkpoint_trigger
+      source: abk[orchestration]
+      destination: abk::checkpoint
+      protocol: "CheckpointRequest"
+      payload: snapshot reference
+  coordination:
+    - name: turn_loop
+      participants:
+        - abk[orchestration]
+        - abk::agent
+        - abk::provider
+        - cats::ToolRegistry
+      triggers:
+        - plan_ready
+        - provider_response
+        - tool_result
+      policy: "Loop continues until completion criteria satisfied; each action requires acknowledgement before next begins."
+    - name: retry_policy
+      participants:
+        - abk[orchestration]
+        - abk::observability
+        - abk::checkpoint
+      triggers:
+        - error_detected
+      policy: "Retries bounded by config; failures logged and optionally checkpointed for later resume."

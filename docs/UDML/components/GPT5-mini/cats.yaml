@@ -1,0 +1,44 @@
+# UDML for CATS (Code Agent Tool System)
+metadata:
+  name: CATS
+  role: Tool registry + tool implementations
+  version: 1.0
+information:
+  description: |
+    CATS exposes a registry of tools (file ops, edit, run_command, search, etc.) and a stable contract for executing tool calls originating from provider responses. Tools are first-class UDML movement/coordination primitives.
+  canonical_schemas:
+    - tool_spec: { id: string, name: string, inputs: schema, output: schema, allowed_roles: ["agent","tool"] }
+    - tool_call: { id: string, tool_id: string, input: any }
+    - tool_result: { id: string, success: bool, output: any, diagnostics: map }
+access:
+  surface:
+    - register_tool(spec)
+    - find_tool(name) -> tool_spec
+    - call_tool(tool_call) -> tool_result
+  auth:
+    - tool execution subject to executor allowlist and role-based checks
+manipulation:
+  mutations:
+    - tool registry updates (add/remove)
+  invariants:
+    - tool inputs validated against tool_spec before execution
+extract:
+  transforms:
+    - convert tool_result -> UMF ToolResult blocks
+movement:
+  routes:
+    - tool execution may call CommandExecutor, internal functions or remote services depending on tool implementation
+coordination:
+  responsibilities:
+    - windowing and execution concurrency limits
+    - provide tool semantics to the Agent (sync vs async tools)
+contracts:
+  inputs: [ToolCall]
+  outputs: [ToolResult]
+  error_modes:
+    - tool_not_found
+    - execution_failure
+examples:
+  - tool_spec: { id: "t-1", name: "run_command", inputs: { argv: ["string"] }, output: { stdout: string, exit_code: int } }
+notes: |
+  CATS is the canonical owner of tool semantics. Keep tool implementations small and testable. Prefer adapters for heavy I/O.

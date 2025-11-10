@@ -1,0 +1,318 @@
+---
+# UDML: abk::cli — CLI/Bootstrap
+# Entry point for the agent, configuration loading, and command dispatch
+
+metadata:
+  name: "abk::cli"
+  version: "0.1.24"
+  owner: "ABK (Agent Builder Kit)"
+  responsibility: "CLI argument parsing, configuration bootstrap, command dispatch"
+
+information:
+  # CLI arguments and input
+  cli_input:
+    - field: command
+      type: String
+      semantics: "CLI command (e.g., 'run', 'list-sessions', 'resume')"
+    - field: subcommand_args
+      type: Vec<String>
+      semantics: "Arguments for the subcommand"
+    - field: config_path
+      type: PathBuf
+      semantics: "Path to configuration file (default: config/trustee.toml)"
+    - field: verbosity
+      type: u8
+      semantics: "Log verbosity level (0=silent, 1=error, 2=warn, 3=info, 4=debug)"
+
+  # Parsed command context
+  command_context:
+    - field: config
+      type: Config
+      semantics: "Loaded configuration from file and environment"
+      owner: "abk[config]"
+    - field: command_name
+      type: String
+      semantics: "Name of command to execute"
+    - field: task_description
+      type: String
+      semantics: "Task description or query for agent"
+    - field: session_id
+      type: Option<String>
+      semantics: "Optional session ID for resume operations"
+
+  # Available commands
+  command_registry:
+    - command: "run"
+      args: ["task_description"]
+      optional: ["--config PATH", "--session-id ID", "--model MODEL"]
+      semantics: "Start a new agent session with a task"
+    
+    - command: "resume"
+      args: ["session_id"]
+      optional: ["--config PATH"]
+      semantics: "Resume an interrupted agent session"
+    
+    - command: "list-sessions"
+      optional: ["--config PATH", "--status (active|completed|failed)"]
+      semantics: "List available sessions"
+    
+    - command: "show-session"
+      args: ["session_id"]
+      optional: ["--config PATH"]
+      semantics: "Display session details and messages"
+
+access:
+  # CLI argument parsing
+  argument_parsing:
+    - query: "parse_args(args: Vec<String>) -> CliArgs"
+      visibility: "Public"
+      semantics: "Parse command-line arguments"
+    
+    - query: "validate_args(args: &CliArgs) -> Result<(), String>"
+      visibility: "Public"
+      semantics: "Validate parsed arguments"
+
+  # Configuration access
+  config_access:
+    - query: "load_config(path: &Path) -> Result<Config, Error>"
+      visibility: "Public"
+      semantics: "Load configuration file"
+    
+    - query: "merge_env_overrides(config: Config) -> Config"
+      visibility: "Public"
+      semantics: "Override config with environment variables"
+
+  # Command discovery
+  command_discovery:
+    - query: "get_available_commands() -> Vec<CommandDescriptor>"
+      visibility: "Public"
+      semantics: "List all supported CLI commands"
+
+manipulation:
+  # Configuration initialization
+  config_initialization:
+    - operation: "initialize_config_defaults()"
+      semantics: "Set default configuration values"
+      postcondition: "Default config ready for override"
+    
+    - operation: "load_config_file(path: &Path) -> Config"
+      semantics: "Load configuration from TOML file"
+      precondition: "File exists and is readable"
+      postcondition: "Config object populated"
+    
+    - operation: "apply_env_overrides(config: &mut Config)"
+      semantics: "Apply environment variable overrides to config"
+      postcondition: "Config merged with environment"
+
+  # Context creation
+  context_creation:
+    - operation: "create_command_context(args: CliArgs, config: Config) -> CommandContext"
+      semantics: "Create execution context from CLI args and config"
+      precondition: "Args are validated, config is loaded"
+      postcondition: "CommandContext ready for dispatch"
+
+  # Dynamic state mutation (CLI session tracking)
+    - operation: "update_cli_state(event: CliEvent)"
+      semantics: "Update CLI state for session tracking"
+      examples:
+        - "SessionStarted { session_id, task }"
+        - "SessionCompleted { session_id, result }"
+
+extract:
+  # Configuration extraction
+  config_extraction:
+    - extract: "extract_config_schema(config: Config) -> ConfigSchema"
+      rule: "Generate runtime configuration schema from TOML"
+      input_owner: "abk[config]"
+      output_owner: "abk::cli"
+      implementation: "Type-driven schema introspection"
+
+  # Task extraction
+  task_extraction:
+    - extract: "extract_task_description(args: &CliArgs) -> String"
+      rule: "Extract the primary task description from CLI args"
+      input_owner: "abk::cli (args)"
+      output_owner: "abk::agent"
+
+  # Session metadata extraction
+  session_extraction:
+    - extract: "extract_session_scope(args: &CliArgs) -> SessionScope"
+      rule: "Determine if operation is new session or resume"
+      input_owner: "abk::cli (args)"
+      output_owner: "abk[checkpoint] or abk::agent"
+      logic: |
+        If command == "run" -> NEW_SESSION
+        If command == "resume" -> RESUME_SESSION
+        If command == "list-sessions" -> NO_SESSION
+
+movement:
+  # Entry point to agent
+  bootstrap_flow:
+    - from: "OS (shell)"
+      to: "main.rs"
+      data: "CLI arguments (ARGV)"
+      protocol: "Process invocation"
+      semantics: "User invokes trustee CLI"
+    
+    - from: "main.rs"
+      to: "abk[cli]::run_cli()"
+      data: "Vec<String> (args)"
+      protocol: "Function call (in-process)"
+      semantics: "CLI entry point"
+
+  # Configuration loading and propagation
+  config_flow:
+    - from: "abk::cli"
+      to: "abk[config]::ConfigurationLoader"
+      data: "config_path (PathBuf), env_vars"
+      protocol: "Function call (in-process)"
+      semantics: "Load configuration"
+    
+    - from: "abk[config]"
+      to: "abk::cli"
+      data: "Config object (all settings)"
+      protocol: "Function call return (in-process)"
+      semantics: "Configuration loaded"
+    
+    - from: "abk::cli"
+      to: "abk::agent (via context)"
+      data: "Config (passed in CommandContext)"
+      protocol: "Function parameter (in-process)"
+      semantics: "Configuration propagated to agent"
+
+  # Command dispatch
+  command_dispatch:
+    - from: "abk::cli"
+      to: "abk::agent::Agent::new()"
+      data: "CommandContext (config, task, session_id)"
+      protocol: "Function call (in-process)"
+      condition: "command == 'run'"
+      semantics: "Create new agent session"
+    
+    - from: "abk::cli"
+      to: "abk[checkpoint]::SessionManager::restore()"
+      data: "session_id"
+      protocol: "Function call (in-process)"
+      condition: "command == 'resume'"
+      semantics: "Restore interrupted session"
+    
+    - from: "abk::cli"
+      to: "abk[checkpoint]::SessionManager::list()"
+      data: "filter_status (optional)"
+      protocol: "Function call (in-process)"
+      condition: "command == 'list-sessions'"
+      semantics: "Query session metadata"
+
+  # Result output
+  output_flow:
+    - from: "abk::agent or abk[checkpoint]"
+      to: "abk::cli (formatter)"
+      data: "Result or session data"
+      protocol: "Function call (in-process)"
+      semantics: "Format result for display"
+    
+    - from: "abk::cli (formatter)"
+      to: "stdout / stderr"
+      data: "Formatted text (JSON or human-readable)"
+      protocol: "IO stream"
+      semantics: "Display result to user"
+
+coordination:
+  # CLI execution phases
+  execution_phases:
+    - phase: 1
+      name: "Argument Parsing"
+      action: "Parse ARGV into CliArgs structure"
+      owner: "abk::cli"
+      error_handling: "Print help and exit on parse error"
+    
+    - phase: 2
+      name: "Argument Validation"
+      action: "Validate required arguments and mutually exclusive options"
+      owner: "abk::cli"
+      error_handling: "Print validation error and exit with code 1"
+    
+    - phase: 3
+      name: "Configuration Loading"
+      action: "Load config file and apply environment overrides"
+      owner: "abk::cli (delegates to abk[config])"
+      error_handling: "Print config error and exit with code 1"
+    
+    - phase: 4
+      name: "Context Creation"
+      action: "Create CommandContext from parsed args and config"
+      owner: "abk::cli"
+      error_handling: "Print context creation error and exit"
+    
+    - phase: 5
+      name: "Command Dispatch"
+      action: "Route to appropriate handler (run, resume, list, show)"
+      owner: "abk::cli"
+      branches:
+        - "command == 'run' -> Agent::new() and execute"
+        - "command == 'resume' -> SessionManager::restore() and execute"
+        - "command == 'list-sessions' -> SessionManager::list() and format"
+        - "command == 'show-session' -> SessionManager::get() and format"
+    
+    - phase: 6
+      name: "Result Output"
+      action: "Format and output result to stdout/stderr"
+      owner: "abk::cli"
+      error_handling: "Capture and log output errors"
+    
+    - phase: 7
+      name: "Exit"
+      action: "Exit process with appropriate exit code"
+      owner: "abk::cli"
+      codes:
+        - 0: "Success"
+        - 1: "General error (parsing, config, validation)"
+        - 2: "Command execution error (agent task failed)"
+
+  # Output formatting options
+  output_formatting:
+    - format: "human"
+      use_case: "Interactive terminal output"
+      structure: "Indented text with colors and emoji"
+    
+    - format: "json"
+      use_case: "Machine-readable output for scripting"
+      structure: "Structured JSON with full metadata"
+    
+    - format: "compact"
+      use_case: "Minimal output for CI/CD pipelines"
+      structure: "Single-line status + result"
+
+  # Error recovery and retry
+  error_handling:
+    - error: "Config file not found"
+      recovery: "Use default config and continue (or exit depending on policy)"
+      logging: "Log warning via abk[observability]"
+    
+    - error: "Invalid TOML in config"
+      recovery: "Print parse error and exit"
+      logging: "Log error via abk[observability]"
+    
+    - error: "Session not found for resume"
+      recovery: "Print error and suggest listing available sessions"
+      logging: "Log error via abk[observability]"
+
+dependencies:
+  internal:
+    - "abk[config]" # Configuration loading
+    - "abk[checkpoint]" # Session management (resume, list)
+    - "abk::agent" # Agent execution (run command)
+    - "abk[observability]" # Logging
+  
+  external:
+    - "clap" # CLI argument parsing
+    - "serde_json" # JSON output formatting
+    - "colored" # Colored terminal output (optional)
+
+notes: |
+  - abk::cli is primarily a bootstrapping and routing layer.
+  - It does NOT implement business logic; it dispatches to appropriate components.
+  - Configuration is loaded once at startup and passed through to all components.
+  - The CLI is synchronous: commands block until completion.
+  - Session IDs are opaque strings; abk::cli does not validate their format.
+  - Output formatting is pluggable (human, JSON, compact).

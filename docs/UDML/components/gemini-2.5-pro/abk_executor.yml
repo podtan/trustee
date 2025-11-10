@@ -1,0 +1,36 @@
+name: abk::executor
+description: "Command executor: executes shell commands safely with timeouts, captures output, and validates dangerous commands."
+udml:
+  information:
+    - description: "A shell command to be executed."
+      schema:
+        type: object
+        properties:
+          command: { type: string }
+          timeout: { type: integer }
+    - description: "The result of a command execution."
+      schema:
+        type: object
+        properties:
+          stdout: { type: string }
+          stderr: { type: string }
+          exit_code: { type: integer }
+          success: { type: boolean }
+
+  access:
+    - description: "Accessed by `CATS` tools (specifically `run_command`) to execute system commands."
+
+  manipulation:
+    - description: "Executes the command in a new process."
+
+  extract:
+    - description: "Captures the `stdout`, `stderr`, and `exit_code` from the executed process."
+    - description: "Validates commands against a deny-list to prevent dangerous operations."
+
+  movement:
+    - description: "Receives a command string from a `CATS` tool."
+    - description: "Returns an `ExecutionResult` struct to the calling tool."
+
+  coordination:
+    - description: "Provides a safe, controlled, and observable boundary for the agent to interact with the host operating system's shell."
+    - description: "Enforces timeouts to prevent runaway processes."

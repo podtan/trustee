@@ -1,0 +1,69 @@
+id: lifecycle-wasm
+layer: plugin
+ownership: wasm
+summary: WASM lifecycle plugin providing classification and prompt templates for morphable agents.
+provides:
+  information:
+    - id: lifecycle-api
+      kind: struct
+      schema:
+        fields:
+          - id: funcs
+            type: list<string>
+          - id: version
+            type: string
+      purpose: Declares available functions like load_template, render_template, classify.
+      owners: [lifecycle-wasm]
+    - id: template-io
+      kind: struct
+      schema:
+        fields:
+          - id: template
+            type: abk-lifecycle:lifecycle-template
+          - id: variables
+            type: map
+          - id: rendered
+            type: string|null
+      purpose: Template input/output contract.
+      owners: [lifecycle-wasm]
+access:
+  rules:
+    - id: host-invokes
+      target: lifecycle-api
+      read: abk-lifecycle
+      constraints: [abi-v1]
+      description: Host lifecycle loader may call WASM functions.
+extract:
+  transforms:
+    - id: render-prompt
+      inputs: [template-io]
+      output: template-io
+      method: templating
+      description: Fill variables into template for provider prompt.
+movement:
+  routes:
+    - id: mv-host-lifecycle-call
+      direction: bi
+      from: abk-lifecycle
+      to: lifecycle-wasm
+      medium: wasm-call
+      payload: template-io
+      trigger: event
+      reliability: best-effort
+coordination:
+  primitives:
+    - id: task-classification
+      kind: classification
+      participants: [lifecycle-wasm, abk-lifecycle]
+      drives: [mv-host-lifecycle-call]
+      description: Categorize tasks to select appropriate templates and behaviors.
+dependencies:
+  runtime: [abk-lifecycle]
+  build: [coder-lifecycle]
+  feature_flags: []
+risks:
+  - id: template-mismatch
+    impact: medium
+    likelihood: medium
+    description: Host expects template names/vars that differ from WASM plugin.
+    mitigation: Template registry + versioned contracts.

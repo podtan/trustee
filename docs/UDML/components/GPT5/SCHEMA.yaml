@@ -1,0 +1,78 @@
+# UDML Schema (project-specific adaptation)
+# Rationale: YAML chosen for human diffability + comments; JSON superset for machine parsing.
+# Core sections correspond to the six data domains + meta + dependencies + risks.
+
+$schema: "https://example.com/udml.schema.v1"
+version: 1
+meta:
+  project: trustee
+  description: Unified Data Morphism representations of core runtime modules.
+  generated_at: 2025-11-10
+  format: udml.v1.yaml
+  authors: [automated]
+conventions:
+  id_style: kebab-case
+  ref_prefix: ref://
+
+# Each component file will conform to this shape.
+component_template:
+  id: example-component
+  layer: runtime|infrastructure|boundary|support|plugin
+  ownership: crate|wasm|external
+  summary: short sentence
+  provides: # Information domain (canonical data definitions)
+    information:
+      - id: data-shape-id
+        kind: struct|enum|alias|collection|blob|stream
+        schema: inline-or-ref
+        purpose: reason it exists
+        owners: [component-ids]
+  access:
+    rules:
+      - id: rule-id
+        target: information-id
+        read: selector|scope
+        constraints: [constraint-ids]
+        description: textual
+  manipulation:
+    mutations:
+      - id: mutation-id
+        target: information-id
+        kind: create|update|delete|invalidate
+        preconditions: [rule-ids]
+        postconditions: [rule-ids]
+        side_effects: [movement-route-ids]
+  extract:
+    transforms:
+      - id: transform-id
+        inputs: [information-ids]
+        output: information-id
+        method: algorithm|template|aggregation
+        description: why
+  movement:
+    routes:
+      - id: route-id
+        direction: in|out|bi
+        from: component-id|external
+        to: component-id|external
+        medium: memory|wasm-call|fs|network|process|stdout|stderr
+        payload: information-id|stream
+        trigger: event|schedule|mutation
+        reliability: best-effort|at-least-once|exactly-once|not-applicable
+  coordination:
+    primitives:
+      - id: coord-id
+        kind: orchestration|scheduling|locking|retry|checkpoint|classification
+        participants: [component-ids]
+        drives: [movement-route-ids]
+        description: text
+  dependencies:
+    runtime: [component-ids]
+    build: [component-ids]
+    feature_flags: [flags]
+  risks:
+    - id: risk-id
+      impact: low|medium|high
+      likelihood: low|medium|high
+      description: text
+      mitigation: text

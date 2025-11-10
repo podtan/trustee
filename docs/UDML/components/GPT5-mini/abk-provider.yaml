@@ -1,0 +1,49 @@
+# UDML for abk[provider] / ProviderFactory (LLM provider factory + trait)
+metadata:
+  name: abk[provider]
+  role: Provider factory and LlmProvider trait
+  version: 1.0
+information:
+  description: |
+    ProviderFactory constructs provider adapters from configuration. The LlmProvider trait defines the host<->provider contract for request formatting, transport, and response parsing. Providers can be native (HTTP) or WASM (Tanbal).
+  canonical_schemas:
+    - provider_config: { name: string, kind: ["wasm","http"], settings: map }
+    - request: { session_id, messages: [ChatML], metadata }
+    - response: { content | tool_calls | stream_events }
+access:
+  surface:
+    - ProviderFactory::create(config) -> Box<dyn LlmProvider>
+    - LlmProvider::generate(request) -> GenerateResponse
+    - LlmProvider::stream(request) -> StreamingResponse
+  auth:
+    - provider-specific credentials (API keys) resolved by abk[config]
+manipulation:
+  mutations:
+    - format_request(messages, cfg) -> provider_request (adapter-specific)
+    - parse_response(provider_response) -> UMF GenerateResponse
+  invariants:
+    - provider adapters must sanitize user-provided input before sending
+extract:
+  transforms:
+    - extract_tool_calls(response) -> UMF::ContentBlock::ToolUse
+movement:
+  routes:
+    - host -> provider (via WASM boundary or HTTP)
+    - provider -> host (response bodies, events)
+coordination:
+  responsibilities:
+    - hide provider heterogeneity behind LlmProvider trait
+    - manage timeouts, retries, and streaming semantics consistently across providers
+contracts:
+  trait LlmProvider:
+    - fn format_request(&self, messages: &[ChatML], cfg: &RequestConfig) -> Result<String>
+    - fn parse_response(&self, response: &str) -> Result<GenerateResponse>
+    - fn parse_stream_event(&self, event: &str) -> Result<StreamingDelta>
+  error_modes:
+    - format_error
+    - transport_error
+    - parse_error
+examples:
+  - provider_config: { name: "tanbal", kind: "wasm", settings: { module_path: "./providers/tanbal/" } }
+notes: |
+  ProviderFactory is the movement boundary owner for LLM request/response traffic. Keep provider adapters minimal and pure.

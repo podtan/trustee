@@ -1,0 +1,100 @@
+component: abk::cli
+description: "CLI/bootstrap utilities for command-line interface and agent initialization"
+
+information:
+  - name: CliArgs
+    description: "Parsed command-line arguments"
+    schema:
+      verbose: boolean
+      config_path: "Option<PathBuf>"
+      command: "CliCommand"
+
+  - name: CliCommand
+    description: "Available CLI subcommands"
+    schema:
+      run: "RunCommand"
+      test: "TestCommand"
+      list_sessions: "ListSessionsCommand"
+
+  - name: DefaultCommandContext
+    description: "Runtime context for CLI execution"
+    schema:
+      config_loader: "ConfigurationLoader"
+      agent_factory: "AgentFactory"
+      logger: "Logger"
+
+access:
+  - name: read_cli_args
+    description: "Parse command-line arguments from environment"
+    rules:
+      - source: "std::env::args()"
+      - method: "clap::Parser::parse()"
+      - visibility: "public"
+
+  - name: read_config_file
+    description: "Access configuration from TOML file"
+    rules:
+      - source: "abk::config::ConfigurationLoader"
+      - method: "load_from_file(path)"
+      - visibility: "internal"
+
+manipulation:
+  - name: create_command_context
+    description: "Create CLI execution context"
+    rules:
+      - input: "CliArgs"
+      - operation: "DefaultCommandContext::new(args)"
+      - validation: "config file exists and is valid"
+
+  - name: execute_cli_command
+    description: "Execute the parsed CLI command"
+    rules:
+      - input: "CliCommand"
+      - operation: "context.execute_command(command)"
+      - constraints: "handle errors gracefully"
+
+extract:
+  - name: derive_command_type
+    description: "Extract command type from CLI arguments"
+    rules:
+      - input: "CliArgs"
+      - transform: "match subcommand -> command_type"
+      - output: "CommandType"
+
+  - name: generate_help_text
+    description: "Extract help documentation from command structure"
+    rules:
+      - input: "CliCommand"
+      - transform: "extract_descriptions | format_markdown"
+      - output: "HelpText"
+
+movement:
+  - name: config_file_loading
+    description: "Load configuration from filesystem"
+    rules:
+      - from: "CLI args config_path"
+      - to: "ConfigurationLoader::load()"
+      - protocol: "TOML file path"
+      - boundaries: "filesystem boundary"
+
+  - name: agent_initialization
+    description: "Initialize agent from CLI context"
+    rules:
+      - from: "DefaultCommandContext"
+      - to: "Agent::new()"
+      - protocol: "ComponentRegistry"
+      - boundaries: "component wiring boundary"
+
+coordination:
+  - name: cli_lifecycle
+    description: "Coordinate CLI startup and execution"
+    primitives:
+      - parse: "parse_args() -> validate() -> create_context()"
+      - execute: "match_command() -> execute_subcommand() -> handle_result()"
+      - cleanup: "log_completion() -> exit_with_code()"
+
+  - name: error_handling
+    description: "Coordinate error handling and user feedback"
+    primitives:
+      - validation: "validate_args() -> show_errors() -> suggest_fixes()"
+      - recovery: "catch_panic() -> log_error() -> graceful_exit()"

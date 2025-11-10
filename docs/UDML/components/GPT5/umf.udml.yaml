@@ -1,0 +1,99 @@
+id: umf
+layer: runtime
+ownership: crate
+summary: Universal Message Format defining internal messages, content blocks, tool calls/results, and ChatML adapter utilities.
+provides:
+  information:
+    - id: internal-message
+      kind: struct
+      schema:
+        fields:
+          - id: role
+            type: enum{system,user,assistant,tool}
+          - id: content
+            type: list<content-block>
+          - id: metadata
+            type: map
+          - id: tool_call_id
+            type: string|null
+      purpose: Canonical message unit across provider/tools.
+      owners: [umf]
+    - id: content-block
+      kind: struct
+      schema:
+        fields:
+          - id: type
+            type: enum{text,tool_use,tool_result}
+          - id: text
+            type: string|null
+          - id: tool
+            type: object{name:string,input?:json,output?:json}
+      purpose: Unified representation of message content differences.
+      owners: [umf]
+    - id: tool-call
+      kind: struct
+      schema:
+        fields:
+          - id: id
+            type: string
+          - id: name
+            type: string
+          - id: input
+            type: json
+      purpose: Provider-emitted tool invocation request.
+      owners: [umf]
+    - id: tool-result
+      kind: struct
+      schema:
+        fields:
+          - id: id
+            type: string
+          - id: name
+            type: string
+          - id: success
+            type: bool
+          - id: output
+            type: json
+      purpose: Result of executed tool call.
+      owners: [umf]
+access:
+  rules:
+    - id: message-read
+      target: internal-message
+      read: all
+      constraints: []
+      description: All runtime components may inspect messages.
+extract:
+  transforms:
+    - id: chatml-format
+      inputs: [internal-message]
+      output: abk-provider:chatml-request
+      method: formatter
+      description: Convert messages to ChatML for provider consumption.
+movement:
+  routes:
+    - id: mv-message-provider
+      direction: out
+      from: umf
+      to: abk-provider
+      medium: memory
+      payload: abk-provider:chatml-request
+      trigger: event
+      reliability: best-effort
+coordination:
+  primitives:
+    - id: block-assembly
+      kind: orchestration
+      participants: [umf, abk-agent]
+      drives: [mv-message-provider]
+      description: Assemble content blocks into messages before provider calls.
+dependencies:
+  runtime: []
+  build: [umf]
+  feature_flags: []
+risks:
+  - id: schema-inconsistency
+    impact: high
+    likelihood: low
+    description: Divergent message schema breaks provider/tool adapters.
+    mitigation: Central schema + tests.

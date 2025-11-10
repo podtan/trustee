@@ -1,0 +1,355 @@
+---
+# UDML: abk[observability] — Logging/Telemetry
+# Structured logging and telemetry for sessions, LLM interactions, and errors
+
+metadata:
+  name: "abk[observability]"
+  version: "0.1.24"
+  owner: "ABK (Agent Builder Kit)"
+  responsibility: "Structured logging, telemetry, metrics collection, diagnostics"
+
+information:
+  # Log event structure
+  log_event:
+    - field: timestamp
+      type: Timestamp (ISO 8601)
+      semantics: "When event occurred"
+    
+    - field: level
+      type: LogLevel
+      enum: ["trace", "debug", "info", "warn", "error"]
+      semantics: "Event severity"
+    
+    - field: target
+      type: String
+      semantics: "Source module/component (e.g., 'trustee::agent', 'abk::provider')"
+    
+    - field: message
+      type: String
+      semantics: "Human-readable log message"
+    
+    - field: context
+      type: HashMap<String, Value>
+      semantics: "Structured context data (key-value pairs)"
+    
+    - field: span_id
+      type: Option<String>
+      semantics: "Trace span ID for request tracing"
+    
+    - field: span_parent_id
+      type: Option<String>
+      semantics: "Parent span ID for distributed tracing"
+
+  # Telemetry metric
+  metric_event:
+    - field: timestamp
+      type: Timestamp
+      semantics: "When metric was recorded"
+    
+    - field: metric_name
+      type: String
+      semantics: "Metric identifier (e.g., 'provider.request.duration_ms')"
+    
+    - field: metric_type
+      type: MetricType
+      enum: ["counter", "gauge", "histogram", "distribution"]
+      semantics: "Type of metric"
+    
+    - field: value
+      type: f64 or i64
+      semantics: "Metric value"
+    
+    - field: labels
+      type: HashMap<String, String>
+      semantics: "Metric tags (e.g., provider_type, model, agent_type)"
+    
+    - field: unit
+      type: String
+      semantics: "Metric unit (e.g., 'ms', 'bytes', 'count')"
+
+  # Logger configuration
+  logger_config:
+    - field: log_level
+      type: LogLevel
+      enum: ["off", "error", "warn", "info", "debug", "trace"]
+      semantics: "Global log level threshold"
+      default: "info"
+    
+    - field: log_file
+      type: Option<PathBuf>
+      semantics: "Optional file path for logging (or None for stdout/stderr)"
+    
+    - field: structured_logging
+      type: bool
+      semantics: "Enable JSON structured logging"
+      default: false
+    
+    - field: include_context
+      type: bool
+      semantics: "Include full context in each log"
+      default: true
+    
+    - field: max_log_file_size_mb
+      type: u64
+      semantics: "Rotate log file at size (0 = no rotation)"
+      default: 100
+    
+    - field: max_log_files
+      type: u32
+      semantics: "Keep N rotated log files"
+      default: 5
+    
+    - field: filter_rules
+      type: Vec<FilterRule>
+      semantics: "Module-specific log levels"
+
+  # Filter rule
+  filter_rule:
+    - field: module
+      type: String
+      semantics: "Module glob pattern (e.g., 'trustee::agent::*')"
+    
+    - field: level
+      type: LogLevel
+      semantics: "Log level for this module"
+
+access:
+  # Event logging
+  logging_access:
+    - query: "log_event(level: LogLevel, message: &str, context: HashMap<String, Value>)"
+      visibility: "Public"
+      semantics: "Log structured event"
+      examples:
+        - "log_event(info, 'Agent started', { session_id: '123', task: '...' })"
+        - "log_event(error, 'Provider timeout', { provider: 'openai', duration_ms: 30000 })"
+
+  # Metrics recording
+  metrics_access:
+    - query: "record_metric(name: &str, value: f64, labels: HashMap<String, String>)"
+      visibility: "Public"
+      semantics: "Record metric data point"
+      examples:
+        - "record_metric('provider.request.duration_ms', 1234.0, { provider: 'tanbal' })"
+        - "record_metric('tool.execution.count', 1.0, { tool_name: 'file_read' })"
+
+  # Trace span management
+  tracing_access:
+    - query: "start_span(name: &str, attributes: HashMap<String, Value>) -> SpanGuard"
+      visibility: "Public"
+      semantics: "Start distributed trace span"
+      returns:
+        - type: SpanGuard
+        - semantics: "Guard that records span end on drop"
+    
+    - query: "current_span_id() -> Option<String>"
+      visibility: "Public"
+      semantics: "Get current active span ID"
+
+  # Configuration
+  config_access:
+    - query: "get_logger_config() -> &LoggerConfig"
+      visibility: "Public (read-only)"
+      semantics: "Access logger configuration"
+
+manipulation:
+  # Logger initialization
+  initialization:
+    - operation: "initialize_logger(config: LoggerConfig) -> Result<(), Error>"
+      semantics: "Initialize logging system"
+      precondition: "Config is valid"
+      postcondition: "Logger ready for events"
+      logic: "Set up file handles, filters, outputs"
+    
+    - operation: "configure_log_filter(module: &str, level: LogLevel)"
+      semantics: "Set log level for specific module"
+      postcondition: "Module-specific filter applied"
+
+  # Event recording
+  recording_operations:
+    - operation: "record_log_event(event: LogEvent)"
+      semantics: "Record log event to configured output"
+      precondition: "Logger initialized"
+      postcondition: "Event written to log file/stdout/stderr"
+    
+    - operation: "record_metric_event(event: MetricEvent)"
+      semantics: "Record metric data point"
+      precondition: "Logger initialized"
+      postcondition: "Metric stored (exported or dropped per config)"
+
+  # Log rotation
+  rotation_operations:
+    - operation: "rotate_log_file()"
+      semantics: "Rotate current log file to archive"
+      postcondition: "New log file created, old file retained (up to max_log_files)"
+      logic: "Rename current log, increment counter, remove oldest if limit exceeded"
+
+  # Buffer flushing
+  flushing_operations:
+    - operation: "flush_logs()"
+      semantics: "Flush buffered logs to disk"
+      precondition: "Logger using buffered output"
+      postcondition: "All buffered events written"
+
+extract:
+  # Metrics aggregation
+  metrics_aggregation:
+    - extract: "aggregate_metrics(interval: Duration) -> MetricsSnapshot"
+      rule: "Collect and aggregate metrics over time window"
+      input_owner: "abk[observability]"
+      output_owner: "abk[observability] or monitoring system"
+      aggregation_types:
+        - "sum: sum of all counter increments"
+        - "avg: average of gauge/histogram values"
+        - "max/min: extremes of gauge/histogram"
+        - "p50/p95/p99: percentiles of histogram"
+
+  # Session summary extraction
+  session_summary:
+    - extract: "extract_session_summary(session_id: &str) -> SessionSummary"
+      rule: "Generate summary statistics from session logs"
+      input_owner: "abk[observability] (logs)"
+      output_owner: "abk[checkpoint] or reporting"
+      fields:
+        - "total_iterations"
+        - "total_duration"
+        - "provider_calls: count, total_time, errors"
+        - "tools_executed: count, total_time, errors"
+        - "checkpoints_saved"
+        - "error_count_by_type"
+
+  # Performance profiling
+  profiling_extraction:
+    - extract: "generate_performance_profile(session_id: &str) -> PerformanceProfile"
+      rule: "Analyze performance bottlenecks from timeline"
+      input_owner: "abk[observability] (span events)"
+      output_owner: "Diagnostics / reporting"
+      analysis:
+        - "Critical path (longest sequence of dependent operations)"
+        - "Component breakdown (time spent in each component)"
+        - "Parallelization efficiency (actual vs potential parallelism)"
+
+movement:
+  # Event emission flow
+  event_flow:
+    - from: "All components (abk::agent, CATS, abk[provider], etc.)"
+      to: "abk[observability]::Logger"
+      data: "log_event() or record_metric() call"
+      protocol: "Function call (fire-and-forget or buffered)"
+      semantics: "Components emit events"
+    
+    - from: "abk[observability]"
+      to: "Log file or stdout"
+      data: "Formatted log line (text or JSON)"
+      protocol: "IO write"
+      semantics: "Event persisted"
+
+  # Metrics export flow
+  metrics_export_flow:
+    - from: "abk[observability]"
+      to: "Metrics store (Prometheus, CloudWatch, etc.)"
+      data: "Metrics export (pull or push)"
+      protocol: "HTTP or custom protocol"
+      condition: "If monitoring integration enabled"
+      semantics: "Metrics exposed for monitoring"
+
+  # Trace propagation
+  trace_propagation:
+    - from: "abk::agent"
+      to: "CATS / abk[provider] / abk[executor]"
+      data: "span_id context variable"
+      protocol: "Context variable (thread-local or argument)"
+      semantics: "Span ID flows through call chain for distributed tracing"
+
+coordination:
+  # Logging lifecycle
+  lifecycle:
+    - phase: "Initialization"
+      action: "Logger::initialize() called during startup"
+      owner: "abk::cli"
+      semantics: "Set up log files, filters, outputs"
+    
+    - phase: "Event Emission"
+      action: "Components call log_event() and record_metric() during execution"
+      owner: "All components"
+      semantics: "Continuous event recording"
+    
+    - phase: "Buffer Management"
+      action: "Logs buffered in memory and flushed periodically or on demand"
+      owner: "abk[observability]"
+      frequency: "Every N ms or on explicit flush()"
+    
+    - phase: "Log Rotation"
+      action: "Log file rotated when size limit reached"
+      owner: "abk[observability]"
+      semantics: "Old log archived, new file created"
+    
+    - phase: "Metrics Export"
+      action: "Metrics aggregated and exported (if monitoring enabled)"
+      owner: "abk[observability]"
+      frequency: "Every N seconds"
+    
+    - phase: "Cleanup"
+      action: "Old log files deleted based on retention policy"
+      owner: "abk[observability]"
+      trigger: "On rotation or periodically"
+
+  # Context propagation
+  context_propagation:
+    - logic: "Session ID set at session creation, propagated to all child operations"
+    - logic: "Span ID generated at operation entry, included in all child logs"
+    - logic: "Context variables (module, component) set by emitting code"
+    - benefit: "Enables log tracing and correlation across call chains"
+
+  # Error logging
+  error_logging:
+    - error_type: "Component error (e.g., provider timeout)"
+      logging: "log_event(error, 'Provider timeout', { duration_ms: 30000, attempt: 2 })"
+      metric: "record_metric('provider.error.count', 1.0, { error_type: 'timeout' })"
+    
+    - error_type: "Retry initiated"
+      logging: "log_event(warn, 'Retrying provider call', { attempt: 2, backoff_ms: 1000 })"
+      metric: "record_metric('retry.count', 1.0, { component: 'provider' })"
+    
+    - error_type: "Critical failure (workflow abort)"
+      logging: "log_event(error, 'Workflow aborted', { reason: 'max_retries_exceeded' })"
+      metric: "record_metric('workflow.failure.count', 1.0, { reason: 'max_retries_exceeded' })"
+
+  # Performance monitoring
+  performance_monitoring:
+    - metric: "provider.request.duration_ms"
+      recorded_by: "abk[provider]"
+      use_case: "Monitor LLM latency"
+    
+    - metric: "tool.execution.duration_ms"
+      recorded_by: "abk[executor]"
+      use_case: "Monitor tool performance"
+    
+    - metric: "checkpoint.save.duration_ms"
+      recorded_by: "abk[checkpoint]"
+      use_case: "Monitor checkpoint performance"
+    
+    - metric: "workflow.total_duration_ms"
+      recorded_by: "abk[orchestration]"
+      use_case: "Monitor overall workflow performance"
+
+dependencies:
+  internal:
+    - "abk[config]" # Logger configuration
+  
+  external:
+    - "tracing" or "log" # Logging facade
+    - "serde_json" # Structured logging output
+    - "tokio" # Async log flushing
+
+notes: |
+  - abk[observability] provides structured logging and metrics collection.
+  - All events are recorded with timestamp, level, context, and optional trace span.
+  - Logging is asynchronous and buffered for performance.
+  - Metrics are typed (counter, gauge, histogram, distribution) and labeled.
+  - Log levels are configurable globally and per-module.
+  - Log files are rotated based on size and retention policy.
+  - Distributed tracing is supported via span IDs and parent IDs.
+  - Metrics can be exported to monitoring systems (Prometheus, CloudWatch, etc.).
+  - Error logging includes context (error type, component, attempt, etc.).
+  - Performance metrics enable post-mortem analysis and optimization.
+  - All logging operations are non-blocking; failures do not crash the agent.

@@ -1,0 +1,183 @@
+# UDML Specification for abk[executor] (Command Executor)
+# This component safely executes shell commands with timeout and validation
+
+information:
+  # Executor data structures
+  - name: ExecutionRequest
+    description: "Request to execute a shell command"
+    schema:
+      type: object
+      properties:
+        command: { type: string }
+        args: { type: array, items: { type: string } }
+        working_directory: { type: string }
+        environment: { type: object, additionalProperties: { type: string } }
+        timeout_seconds: { type: integer }
+        stdin_input: { type: string }
+
+  - name: ExecutionResult
+    description: "Result of command execution"
+    schema:
+      type: object
+      properties:
+        command: { type: string }
+        args: { type: array, items: { type: string } }
+        exit_code: { type: integer }
+        stdout: { type: string }
+        stderr: { type: string }
+        execution_time_ms: { type: integer }
+        success: { type: boolean }
+        timed_out: { type: boolean }
+
+  - name: CommandValidation
+    description: "Validation result for command safety"
+    schema:
+      type: object
+      properties:
+        is_safe: { type: boolean }
+        risk_level: { type: string, enum: [safe, moderate, high, dangerous] }
+        warnings: { type: array, items: { type: string } }
+        blocked_reasons: { type: array, items: { type: string } }
+
+access:
+  # Executor access patterns
+  - name: get_execution_history
+    description: "Get history of executed commands"
+    parameters:
+      limit: { type: integer, default: 100 }
+      session_id: { type: string }
+    returns:
+      type: array
+      items: { $ref: "#/definitions/ExecutionResult" }
+
+  - name: get_command_status
+    description: "Check status of running command"
+    parameters:
+      execution_id: { type: string }
+    returns:
+      type: object
+      properties:
+        status: { type: string, enum: [running, completed, failed, timed_out] }
+        pid: { type: integer }
+        start_time: { type: string, format: date-time }
+
+  - name: list_running_commands
+    description: "List all currently running commands"
+    returns:
+      type: array
+      items:
+        type: object
+        properties:
+          execution_id: { type: string }
+          command: { type: string }
+          start_time: { type: string, format: date-time }
+          timeout_remaining: { type: integer }
+
+manipulation:
+  # Executor operations
+  - name: execute_command
+    description: "Execute a shell command safely"
+    parameters: { $ref: "#/definitions/ExecutionRequest" }
+    creates: { $ref: "#/definitions/ExecutionResult" }
+
+  - name: kill_command
+    description: "Forcefully terminate running command"
+    parameters:
+      execution_id: { type: string }
+    modifies: { $ref: "#/definitions/ExecutionResult" }
+
+  - name: update_timeout
+    description: "Update timeout for running command"
+    parameters:
+      execution_id: { type: string }
+      new_timeout_seconds: { type: integer }
+    modifies: { $ref: "#/definitions/ExecutionRequest" }
+
+extract:
+  # Executor computations
+  - name: validate_command_safety
+    description: "Validate command for safety and security"
+    input: { $ref: "#/definitions/ExecutionRequest" }
+    output: { $ref: "#/definitions/CommandValidation" }
+
+  - name: parse_command_output
+    description: "Parse and structure command output"
+    input: { $ref: "#/definitions/ExecutionResult" }
+    output:
+      type: object
+      properties:
+        structured_data: { type: object }
+        error_patterns: { type: array, items: { type: string } }
+        success_indicators: { type: array, items: { type: string } }
+
+  - name: estimate_execution_time
+    description: "Estimate execution time for command"
+    input: { $ref: "#/definitions/ExecutionRequest" }
+    output:
+      type: object
+      properties:
+        estimated_time_ms: { type: integer }
+        confidence: { type: number }
+        based_on_history: { type: boolean }
+
+movement:
+  # Executor data flow
+  - name: command_execution
+    description: "Execute commands in system shell"
+    from: { $ref: "#/definitions/ExecutionRequest" }
+    to: "system_shell"
+    protocol: "process_spawn"
+    boundaries: ["memory_to_system_process"]
+
+  - name: output_capture
+    description: "Capture stdout/stderr from executed processes"
+    from: "running_processes"
+    to: { $ref: "#/definitions/ExecutionResult" }
+    protocol: "pipe_capture"
+    boundaries: ["system_process_to_memory"]
+
+  - name: signal_handling
+    description: "Handle process signals and termination"
+    from: "system_signals"
+    to: "execution_coordinator"
+    protocol: "signal_events"
+    boundaries: ["system_to_application"]
+
+  - name: resource_limits
+    description: "Enforce resource limits on processes"
+    from: "execution_policies"
+    to: "system_process_limits"
+    protocol: "resource_constraints"
+    boundaries: ["application_to_system"]
+
+coordination:
+  # Executor coordination
+  - name: process_lifecycle
+    description: "Manage process creation, monitoring, and cleanup"
+    primitives:
+      - type: "process_spawning"
+        description: "Safely spawn new processes with proper isolation"
+      - type: "resource_monitoring"
+        description: "Monitor process resource usage"
+      - type: "cleanup_coordination"
+        description: "Ensure proper cleanup of completed processes"
+
+  - name: timeout_management
+    description: "Handle command timeouts and cancellation"
+    primitives:
+      - type: "deadline_scheduling"
+        description: "Schedule timeouts for long-running commands"
+      - type: "graceful_termination"
+        description: "Attempt graceful shutdown before force kill"
+      - type: "timeout_escalation"
+        description: "Escalate timeout handling based on command type"
+
+  - name: security_enforcement
+    description: "Enforce security policies on command execution"
+    primitives:
+      - type: "command_whitelisting"
+        description: "Only allow pre-approved commands"
+      - type: "argument_validation"
+        description: "Validate command arguments for safety"
+      - type: "sandboxing"
+        description: "Execute commands in restricted environments"

@@ -1,0 +1,65 @@
+# UDML for UMF (Universal Message Format)
+metadata:
+  name: UMF
+  role: InternalMessage, ContentBlock, ToolCall/ToolResult, ChatML helpers
+  version: 1.0
+information:
+  description: |
+    UMF is the canonical internal message format used across Agent, Provider, Tools, and Lifecycles. It defines InternalMessage, ContentBlock types (text, tool_use, tool_result), and helpers for ChatML conversion.
+  canonical_schemas:
+    InternalMessage:
+      type: object
+      properties:
+        id: { type: string }
+        role: { type: string, enum: [system, user, assistant, tool] }
+        content: { anyOf: [ { type: string }, { $ref: "#/components/schemas/ContentBlock" } ] }
+        metadata: { type: object }
+        created_at: { type: string, format: date-time }
+    ContentBlock:
+      type: object
+      oneOf:
+        - { type: object, properties: { type: { const: "text" }, text: { type: string } } }
+        - { type: object, properties: { type: { const: "tool_use" }, id: { type: string }, name: { type: string }, input: { type: object } } }
+        - { type: object, properties: { type: { const: "tool_result" }, id: { type: string }, result: { type: object } } }
+    ToolCall:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        input: { type: object }
+    ToolResult:
+      type: object
+      properties:
+        id: { type: string }
+        success: { type: boolean }
+        output: { type: object }
+access:
+  surface:
+    - to_chatml(internal_message) -> ChatML string
+    - from_chatml(chatml) -> InternalMessage (best-effort)
+manipulation:
+  mutations:
+    - sanitize_content(message) to remove secrets/PII
+  invariants:
+    - tool_call ids are globally unique within a session
+extract:
+  transforms:
+    - content_block extraction -> structured tool_call/tool_result
+movement:
+  routes:
+    - UMF -> Provider (via ChatML string) when dispatching generate
+    - Provider -> UMF when parsing responses (tool_calls, text)
+coordination:
+  responsibilities:
+    - canonical schema for messages exchanged between components
+contracts:
+  inputs: [InternalMessage]
+  outputs: [ChatML string, ToolCall, ToolResult]
+  error_modes:
+    - invalid_schema
+    - unparsable_chatml
+examples:
+  - InternalMessage: { id: "m-1", role: "user", content: "Summarize this code" }
+  - ContentBlock(tool_use): { type: "tool_use", id: "tc-1", name: "run_command", input: { argv: ["ls"] } }
+notes: |
+  UMF is the project's canonical information model. Changes must be coordinated across providers, tools, and lifecycle templates.

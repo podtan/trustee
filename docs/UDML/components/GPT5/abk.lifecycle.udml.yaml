@@ -1,0 +1,77 @@
+id: abk-lifecycle
+layer: boundary
+ownership: crate
+summary: Lifecycle loading, classification, and template rendering via WASM plugins.
+provides:
+  information:
+    - id: lifecycle-template
+      kind: struct
+      schema:
+        fields:
+          - id: name
+            type: string
+          - id: content
+            type: string
+          - id: variables
+            type: list<string>
+      purpose: Template used to render prompts or summaries.
+      owners: [abk-lifecycle]
+    - id: classification-result
+      kind: struct
+      schema:
+        fields:
+          - id: agent-type
+            type: enum{coding,research,analysis,general}
+          - id: confidence
+            type: float
+      purpose: Determines which lifecycle path agent will follow.
+      owners: [abk-lifecycle]
+access:
+  rules:
+    - id: template-read
+      target: lifecycle-template
+      read: abk-agent|abk-orchestration
+      constraints: []
+      description: Agent can read templates for prompt construction.
+manipulation:
+  mutations:
+    - id: render-template
+      target: lifecycle-template
+      kind: extract
+      preconditions: []
+      postconditions: []
+      side_effects: []
+extract:
+  transforms:
+    - id: classify-task
+      inputs: [umf:internal-message]
+      output: classification-result
+      method: wasm-function
+      description: WASM lifecycle plugin classifies initial task.
+movement:
+  routes:
+    - id: mv-wasm-lifecycle
+      direction: bi
+      from: abk-lifecycle
+      to: lifecycle-wasm
+      medium: wasm-call
+      payload: lifecycle:template-io
+      trigger: event
+      reliability: best-effort
+coordination:
+  primitives:
+    - id: morph-agent
+      kind: classification
+      participants: [abk-lifecycle, abk-agent]
+      drives: [mv-wasm-lifecycle]
+      description: Adjust agent behavior based on classification-result.
+dependencies:
+  runtime: []
+  build: [abk]
+  feature_flags: [lifecycle]
+risks:
+  - id: template-drift
+    impact: medium
+    likelihood: medium
+    description: WASM templates change without host validation causing runtime errors.
+    mitigation: Template schema validation + version tags.

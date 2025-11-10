@@ -1,0 +1,43 @@
+# UDML for abk[orchestration] (Workflow coordinator)
+metadata:
+  name: abk[orchestration]
+  role: Workflow coordinator and scheduler
+  version: 1.0
+information:
+  description: |
+    Coordinates higher-level workflows: ordering provider calls, tool invocations, checkpointing and retries. Encodes policies for retries, backoff, and concurrency.
+  canonical_schemas:
+    - workflow_definition: { id: string, steps: [ { id, type, target, retry_policy } ] }
+    - workflow_instance: { id, definition_id, status, state }
+access:
+  surface:
+    - start_workflow(definition, input)
+    - stop_workflow(instance_id)
+    - query_workflow(instance_id)
+  auth:
+    - orchestration control restricted to host or admin APIs
+manipulation:
+  mutations:
+    - advance_workflow_step -> updates workflow_instance.state
+  invariants:
+    - idempotency of retryable steps
+extract:
+  transforms:
+    - decision logic -> next step
+movement:
+  routes:
+    - calls provider, tools, checkpoint according to step definitions
+coordination:
+  responsibilities:
+    - enforce retry/backoff policies
+    - maintain causal ordering across steps
+contracts:
+  inputs: [WorkflowDefinition]
+  outputs: [WorkflowInstanceStatus]
+  error_modes:
+    - step_failure
+    - unrecoverable_error
+examples:
+  - simple_workflow: { id: "wf-1", steps: [ { id: "s1", type: "provider_call" }, { id: "s2", type: "tool_call" } ] }
+notes: |
+  Orchestration is the coordination hub. It should be declarative, driven by data (workflow definitions) and implemented as a small engine.

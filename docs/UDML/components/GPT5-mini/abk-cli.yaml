@@ -1,0 +1,42 @@
+# UDML for abk::cli (CLI / bootstrap)
+metadata:
+  name: abk::cli
+  role: CLI / bootstrapper
+  version: 1.0
+information:
+  description: |
+    CLI entrypoint that bootstraps configuration, constructs the DefaultCommandContext and creates the Agent instance.
+  canonical_schemas:
+    - cli_args: { command: string, flags: map }
+    - default_command_context: { config_path: string, env: map }
+access:
+  surface:
+    - run_from_config(path)
+    - interactive_shell()
+  auth:
+    - local file system permissions for config and checkpoint directories
+manipulation:
+  mutations:
+    - parse config -> effective runtime settings
+    - call create_agent(context) -> agent instance
+extract:
+  transforms:
+    - config.tome -> runtime settings map
+movement:
+  routes:
+    - writes logs to observability backend
+    - invokes Agent::new with resolved settings
+coordination:
+  responsibilities:
+    - validate config before constructing Agent
+    - present CLI flags to modify runtime behavior (dry-run, log-level, provider overrides)
+contracts:
+  inputs: [config/trustee.toml, CLI args]
+  outputs: [Agent constructed, exit code]
+  error_modes:
+    - invalid_config
+    - missing_env_vars
+examples:
+  - run: { command: "cargo run -- run --config config/trustee.toml" }
+notes: |
+  Keep CLI thin: validation + wiring only. Heavy lifting belongs to Agent and abk[config] loader.

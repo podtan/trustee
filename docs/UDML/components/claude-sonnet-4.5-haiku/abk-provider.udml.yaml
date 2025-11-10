@@ -1,0 +1,414 @@
+---
+# UDML: abk[provider] / ProviderFactory — LLM Provider Factory & Trait
+# Abstract LLM provider interface and factory for creating concrete providers
+
+metadata:
+  name: "abk[provider]"
+  version: "0.1.24"
+  owner: "ABK (Agent Builder Kit)"
+  responsibility: "LLM provider abstraction, provider factory, provider lifecycle management"
+
+information:
+  # Provider trait definition
+  llm_provider_trait:
+    - method: "generate(config: GenerateConfig, messages: Vec<InternalMessage>) -> Result<GenerateResponse, ProviderError>"
+      semantics: "Request generation from LLM"
+      returns:
+        - field: "content"
+          type: "String"
+          semantics: "Generated text response"
+        - field: "tool_calls"
+          type: "Vec<ToolCall>"
+          semantics: "Tool calls requested by model"
+        - field: "finish_reason"
+          type: "FinishReason (stop|tool_calls|max_tokens|error)"
+          semantics: "Why generation stopped"
+    
+    - method: "stream(config: GenerateConfig, messages: Vec<InternalMessage>) -> Result<StreamingResponse, ProviderError>"
+      semantics: "Request streaming generation from LLM"
+      returns:
+        - type: "AsyncIterator<StreamingDelta>"
+          field: "delta"
+          semantics: "Incremental content chunks"
+    
+    - method: "is_available() -> bool"
+      semantics: "Check if provider is ready (authenticated, accessible)"
+    
+    - method: "list_models() -> Result<Vec<ModelDescriptor>, ProviderError>"
+      semantics: "List available models"
+    
+    - method: "validate_config(config: &ProviderConfig) -> Result<(), ValidationError>"
+      semantics: "Validate configuration before use"
+
+  # Provider configuration
+  provider_config:
+    - field: provider_type
+      type: String
+      enum: ["tanbal", "openai", "anthropic", "http"]
+      semantics: "Provider implementation type"
+    
+    - field: model
+      type: String
+      semantics: "Model identifier"
+    
+    - field: api_key
+      type: String
+      semantics: "Authentication token (from env or config)"
+    
+    - field: base_url
+      type: Option<String>
+      semantics: "Custom endpoint URL (if not using default)"
+    
+    - field: timeout_seconds
+      type: u64
+      semantics: "Request timeout"
+    
+    - field: max_retries
+      type: u32
+      semantics: "Retry count for transient failures"
+
+  # Generation configuration
+  generate_config:
+    - field: temperature
+      type: f32
+      range: "[0.0, 2.0]"
+      semantics: "Sampling temperature"
+    
+    - field: top_p
+      type: f32
+      range: "[0.0, 1.0]"
+      semantics: "Nucleus sampling parameter"
+    
+    - field: max_tokens
+      type: u32
+      semantics: "Maximum output tokens"
+    
+    - field: stop_sequences
+      type: Vec<String>
+      semantics: "Stop generation at these sequences"
+    
+    - field: tool_choice
+      type: ToolChoice
+      enum: ["auto", "required", "none", "specific"]
+      semantics: "How to handle tool calls"
+
+  # Streaming response state
+  streaming_response:
+    - field: stream
+      type: "AsyncIterator<StreamingDelta>"
+      semantics: "Incremental content stream"
+    
+    - field: accumulated_content
+      type: String
+      semantics: "Accumulated response so far"
+    
+    - field: accumulated_tool_calls
+      type: Vec<ToolCall>
+      semantics: "Accumulated tool calls (for streaming)"
+
+  # Model descriptor
+  model_descriptor:
+    - field: id
+      type: String
+      semantics: "Model identifier"
+    
+    - field: name
+      type: String
+      semantics: "Human-readable model name"
+    
+    - field: context_window
+      type: u32
+      semantics: "Maximum context length in tokens"
+    
+    - field: supports_tools
+      type: bool
+      semantics: "Whether model supports tool calls"
+    
+    - field: supports_streaming
+      type: bool
+      semantics: "Whether model supports streaming"
+
+access:
+  # Provider factory
+  factory_access:
+    - query: "ProviderFactory::create(config: ProviderConfig) -> Result<Box<dyn LlmProvider>, Error>"
+      visibility: "Public"
+      semantics: "Create a provider instance from configuration"
+      routing_logic: |
+        match config.provider_type {
+          "tanbal" -> load WASM provider from path
+          "openai" -> create OpenAI provider
+          "anthropic" -> create Anthropic provider
+          "http" -> create generic HTTP provider
+        }
+    
+    - query: "ProviderFactory::list_available_providers() -> Vec<String>"
+      visibility: "Public"
+      semantics: "List names of available provider types"
+
+  # Provider introspection
+  provider_query:
+    - query: "provider.is_available() -> bool"
+      visibility: "Public"
+      semantics: "Check if provider is ready (connection, auth, etc.)"
+    
+    - query: "provider.list_models() -> Result<Vec<ModelDescriptor>, Error>"
+      visibility: "Public"
+      semantics: "Query available models from provider"
+    
+    - query: "provider.validate_config(config: &ProviderConfig) -> Result<(), Error>"
+      visibility: "Public"
+      semantics: "Pre-flight validation of configuration"
+
+  # Generation interface
+  generation_access:
+    - query: "provider.generate(config: GenerateConfig, messages: Vec<InternalMessage>) -> Result<GenerateResponse, Error>"
+      visibility: "Public"
+      semantics: "Request text generation from LLM"
+    
+    - query: "provider.stream(config: GenerateConfig, messages: Vec<InternalMessage>) -> Result<StreamingResponse, Error>"
+      visibility: "Public"
+      semantics: "Request streaming text generation from LLM"
+
+manipulation:
+  # Provider initialization
+  initialization:
+    - operation: "ProviderFactory::new(config_source: ConfigSource) -> ProviderFactory"
+      semantics: "Create factory instance"
+      precondition: "Config source is accessible"
+      postcondition: "Factory ready to create providers"
+    
+    - operation: "load_wasm_provider(path: &Path) -> Result<WasmProvider, Error>"
+      semantics: "Load WASM provider from binary file"
+      precondition: "File exists, is valid WASM, has correct ABI"
+      postcondition: "WASM module loaded and instantiated"
+
+  # Provider state management
+  state_management:
+    - operation: "provider.authenticate(credentials: &str)"
+      semantics: "Perform authentication (if needed)"
+      precondition: "Credentials provided"
+      postcondition: "Provider marked as authenticated"
+    
+    - operation: "provider.refresh_session()"
+      semantics: "Refresh authentication tokens or connection"
+      postcondition: "Provider ready for new requests"
+    
+    - operation: "provider.shutdown()"
+      semantics: "Clean up provider resources"
+      postcondition: "Provider no longer available"
+
+extract:
+  # Provider response extraction
+  response_extraction:
+    - extract: "parse_generate_response(raw_response: String) -> GenerateResponse"
+      rule: "Parse provider-specific response format to GenerateResponse"
+      input_owner: "abk[provider] (HTTP/WASM)"
+      output_owner: "abk::agent"
+      logic: "Extract content, tool_calls, finish_reason from provider JSON"
+    
+    - extract: "extract_tool_calls(response: GenerateResponse) -> Vec<ToolCall>"
+      rule: "Extract tool call requests from response"
+      input_owner: "abk[provider]"
+      output_owner: "abk::agent"
+      output_format: "UMF ToolCall format"
+    
+    - extract: "extract_streaming_delta(event: StreamEvent) -> StreamingDelta"
+      rule: "Parse streaming event to delta update"
+      input_owner: "abk[provider] or UMF streaming"
+      output_owner: "abk::agent"
+      logic: "Handle SSE or other streaming format"
+
+  # Configuration metadata extraction
+  metadata_extraction:
+    - extract: "extract_model_capabilities(model_id: &str) -> ModelCapabilities"
+      rule: "Determine model capabilities (context window, tool support, etc.)"
+      input_owner: "Provider model list"
+      output_owner: "abk::agent"
+      logic: "Query provider or use cached descriptor"
+
+movement:
+  # Provider factory initialization
+  bootstrap_flow:
+    - from: "abk::agent"
+      to: "abk[provider]::ProviderFactory"
+      data: "ProviderConfig (from abk[config])"
+      protocol: "Function call (in-process)"
+      semantics: "Create provider instance"
+    
+    - from: "abk[provider]::ProviderFactory"
+      to: "filesystem or network"
+      data: "Request for provider binary (WASM or local)"
+      protocol: "File read or HTTP request"
+      semantics: "Load provider implementation"
+
+  # Provider response flow
+  generation_flow:
+    - from: "abk::agent"
+      to: "abk[provider]::LlmProvider"
+      data: "GenerateRequest { config, messages }"
+      protocol: "Function call (in-process)"
+      semantics: "Request generation"
+    
+    - from: "LlmProvider"
+      to: "HTTP API or WASM executor"
+      data: "Formatted request (JSON)"
+      protocol: "HTTP or WASM boundary"
+      semantics: "Send to backend"
+    
+    - from: "HTTP API or WASM"
+      to: "LlmProvider"
+      data: "Response body (JSON)"
+      protocol: "HTTP response or WASM return"
+      semantics: "Receive response"
+    
+    - from: "LlmProvider"
+      to: "abk::agent"
+      data: "GenerateResponse (content, tool_calls, finish_reason)"
+      protocol: "Function return (in-process)"
+      semantics: "Return to agent"
+
+  # Streaming flow
+  streaming_flow:
+    - from: "abk::agent"
+      to: "LlmProvider::stream()"
+      data: "GenerateRequest { config, messages }"
+      protocol: "Function call (in-process)"
+      semantics: "Request streaming generation"
+    
+    - from: "LlmProvider"
+      to: "HTTP SSE endpoint"
+      data: "HTTP request with streaming headers"
+      protocol: "HTTP (with Transfer-Encoding: chunked)"
+      semantics: "Open streaming connection"
+    
+    - from: "HTTP SSE endpoint"
+      to: "LlmProvider"
+      data: "SSE events (data: {...})"
+      protocol: "HTTP stream"
+      semantics: "Streaming content deltas"
+    
+    - from: "LlmProvider"
+      to: "abk::agent"
+      data: "AsyncIterator<StreamingDelta>"
+      protocol: "Async iterator (in-process)"
+      semantics: "Forward deltas to agent"
+
+  # WASM provider specifics
+  wasm_provider_flow:
+    - from: "abk[provider] (host)"
+      to: "WASM module"
+      data: "format-request(config_json, messages_json) call"
+      protocol: "WASM function call"
+      semantics: "Request formatting via WASM"
+    
+    - from: "WASM module"
+      to: "abk[provider] (host)"
+      data: "Formatted HTTP request (URL + headers + body)"
+      protocol: "WASM return"
+      semantics: "Receive formatted request"
+    
+    - from: "abk[provider] (host)"
+      to: "HTTP API"
+      data: "HTTP request (prepared by WASM)"
+      protocol: "HTTP"
+      semantics: "Execute request via host HTTP"
+    
+    - from: "HTTP API"
+      to: "abk[provider] (host)"
+      data: "HTTP response body"
+      protocol: "HTTP response"
+      semantics: "Receive raw response"
+    
+    - from: "abk[provider] (host)"
+      to: "WASM module"
+      data: "parse-response(response_body) call"
+      protocol: "WASM function call"
+      semantics: "Parse response via WASM"
+    
+    - from: "WASM module"
+      to: "abk[provider] (host)"
+      data: "GenerateResponse JSON"
+      protocol: "WASM return"
+      semantics: "Return parsed response"
+
+coordination:
+  # Provider lifecycle
+  provider_lifecycle:
+    - phase: "Creation"
+      action: "ProviderFactory::create() instantiates provider"
+      dependencies: "Config, credentials"
+      error_handling: "Validation errors raised, factory returns Err"
+    
+    - phase: "Validation"
+      action: "Provider::validate_config() checks compatibility"
+      dependencies: "Config schema"
+      error_handling: "Validation errors logged, provider marked unavailable"
+    
+    - phase: "Authentication"
+      action: "Provider authenticates with backend (implicit or explicit)"
+      dependencies: "Credentials (API key, token)"
+      error_handling: "Auth failures trigger retry logic or manual intervention"
+    
+    - phase: "Availability Check"
+      action: "abk::agent calls provider.is_available()"
+      dependencies: "Provider readiness"
+      error_handling: "If unavailable, agent may fail or retry"
+    
+    - phase: "Generation"
+      action: "Provider handles generate() or stream() calls"
+      dependencies: "Valid messages, config"
+      error_handling: "Rate limits, timeouts handled per provider implementation"
+    
+    - phase: "Shutdown"
+      action: "Provider released or explicitly shut down"
+      dependencies: "Session end"
+      error_handling: "Resource cleanup (close connections, free memory)"
+
+  # Error handling and retry
+  fault_tolerance:
+    - fault: "Rate limit (HTTP 429)"
+      handler: "Retry with exponential backoff (abk[orchestration])"
+      max_retries: 3
+      logging: "Via abk[observability]"
+    
+    - fault: "Timeout"
+      handler: "Retry or fail depending on configuration"
+      max_retries: "Configurable per provider"
+      logging: "Via abk[observability]"
+    
+    - fault: "Invalid API key"
+      handler: "Fail immediately, do not retry"
+      logging: "Via abk[observability]"
+    
+    - fault: "WASM module load error"
+      handler: "Fall back to HTTP provider or fail startup"
+      logging: "Via abk[observability]"
+
+  # Multi-provider coordination
+  provider_selection:
+    - logic: "If config specifies tanbal -> try WASM, fall back to HTTP"
+    - logic: "If WASM not available, retry with HTTP provider"
+    - logic: "If both unavailable, agent cannot proceed"
+
+dependencies:
+  internal:
+    - "UMF" # InternalMessage, ToolCall, ToolResult formats
+    - "abk[config]" # Provider configuration
+    - "abk[observability]" # Logging
+  
+  external:
+    - "reqwest" or "hyper" # HTTP client
+    - "serde_json" # JSON serialization
+    - "wasmtime" # WASM runtime
+    - "tokio" # Async runtime
+
+notes: |
+  - abk[provider] is a trait-based abstraction for LLM providers.
+  - ProviderFactory encapsulates provider creation and lifecycle.
+  - Providers can be WASM modules, HTTP-based, or local implementations.
+  - Configuration validation happens at creation time, before use.
+  - Streaming is async but handled through AsyncIterator; agent consumes synchronously or via tokio tasks.
+  - All provider-specific details (response parsing, retry logic) are encapsulated in concrete provider implementations.
+  - WASM providers bridge host and guest via format-request and parse-response functions.
+  - Error handling is delegated to concrete providers, but coordination errors are handled by abk::agent or abk[orchestration].

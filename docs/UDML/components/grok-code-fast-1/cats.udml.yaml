@@ -1,0 +1,122 @@
+component: cats
+description: "Code Agent Tool System providing LLM-facing tools for file operations, editing, and execution"
+
+information:
+  - name: ToolRegistry
+    description: "Registry of available tools"
+    schema:
+      tools: "HashMap<String, Box<dyn Tool>>"
+      tool_descriptions: "Vec<ToolDescription>"
+
+  - name: Tool
+    description: "Interface for executable tools"
+    schema:
+      name: string
+      description: string
+      parameters: "ToolParameters"
+      execute: "fn(ToolCall) -> ToolResult"
+
+  - name: ToolCall
+    description: "Request to execute a tool"
+    schema:
+      id: string
+      name: string
+      arguments: "HashMap<String, Value>"
+
+  - name: ToolResult
+    description: "Result of tool execution"
+    schema:
+      tool_call_id: string
+      content: "Vec<ContentBlock>"
+      success: boolean
+
+access:
+  - name: read_tool_definitions
+    description: "Access tool definitions and schemas"
+    rules:
+      - source: "ToolRegistry"
+      - method: "get_tool(name)"
+      - visibility: "public"
+
+  - name: read_execution_permissions
+    description: "Access tool execution permissions"
+    rules:
+      - source: "abk::config::ExecutionConfig"
+      - method: "get_allowed_tools()"
+      - visibility: "internal"
+
+manipulation:
+  - name: register_tool
+    description: "Register a new tool in the registry"
+    rules:
+      - input: "ToolImplementation"
+      - operation: "registry.register_tool(tool)"
+      - validation: "tool name unique, schema valid"
+
+  - name: create_tool_call
+    description: "Create tool call from LLM response"
+    rules:
+      - input: "ToolCallData"
+      - operation: "ToolCall::from_llm_response(data)"
+      - validation: "arguments match tool schema"
+
+  - name: execute_tool
+    description: "Execute a tool with given arguments"
+    rules:
+      - input: "ToolCall"
+      - operation: "tool.execute(call)"
+      - constraints: "respect timeouts and permissions"
+
+extract:
+  - name: derive_tool_schema
+    description: "Extract JSON schema from tool definition"
+    rules:
+      - input: "Tool"
+      - transform: "extract_parameters | generate_schema | validate_syntax"
+      - output: "ToolSchema"
+
+  - name: extract_execution_summary
+    description: "Extract summary from tool execution"
+    rules:
+      - input: "ToolResult"
+      - transform: "extract_success | extract_output_length | extract_timing"
+      - output: "ExecutionSummary"
+
+movement:
+  - name: tool_call_routing
+    description: "Route tool calls to appropriate implementations"
+    rules:
+      - from: "LLM ToolCall response"
+      - to: "Tool.execute()"
+      - protocol: "ToolCall struct"
+      - boundaries: "component boundary"
+
+  - name: result_formatting
+    description: "Format tool results for LLM consumption"
+    rules:
+      - from: "ToolResult"
+      - to: "UMF ContentBlocks"
+      - protocol: "structured content format"
+      - boundaries: "data transformation boundary"
+
+  - name: file_operation_routing
+    description: "Route file operations to filesystem"
+    rules:
+      - from: "file operation tools"
+      - to: "filesystem APIs"
+      - protocol: "file paths and content"
+      - boundaries: "filesystem boundary"
+
+coordination:
+  - name: tool_execution_pipeline
+    description: "Coordinate tool discovery and execution"
+    primitives:
+      - registration: "discover_tools() -> validate_schemas() -> register_all()"
+      - invocation: "parse_call() -> validate_permissions() -> execute_tool()"
+      - completion: "format_result() -> update_context() -> continue_workflow()"
+
+  - name: safety_coordination
+    description: "Coordinate tool safety and validation"
+    primitives:
+      - validation: "check_permissions() -> validate_arguments() -> sanitize_input()"
+      - monitoring: "track_execution() -> detect_abuse() -> enforce_limits()"

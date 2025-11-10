@@ -1,0 +1,30 @@
+name: abk::cli
+description: "CLI/bootstrap: bootstraps and runs the CLI, wiring adapter traits to the host environment."
+udml:
+  information:
+    - description: "Command-line arguments and options provided by the user."
+      schema:
+        type: object
+        properties:
+          task_description: { type: string }
+          config_path: { type: string }
+          resume_from: { type: string }
+
+  access:
+    - description: "Reads configuration files from the filesystem."
+    - description: "Reads environment variables."
+
+  manipulation:
+    - description: "Initializes the agent's working directory and environment."
+
+  extract:
+    - description: "Parses command-line arguments to determine the initial agent task and configuration."
+    - description: "Loads the `trustee.toml` configuration via `abk::config`."
+
+  movement:
+    - description: "Passes the parsed configuration and task to the `abk::agent` to start a session."
+    - description: "Outputs agent responses and logs to the standard output/error streams."
+
+  coordination:
+    - description: "Initiates the entire agent application lifecycle based on user input."
+    - description: "Constructs the `DefaultCommandContext` and triggers the agent run."

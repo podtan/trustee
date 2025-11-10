@@ -1,0 +1,60 @@
+# UDML for abk::agent (Agent runtime / wiring)
+# Format: YAML UDML
+metadata:
+  name: abk::agent
+  role: Agent runtime / wiring
+  version: 1.0
+  author: Trustee UDML generator
+information:
+  description: |
+    The Agent is the runtime orchestration object that wires providers, lifecycle plugins, tool registry, executor,
+    checkpoint manager, and observability into a coherent session that accepts UMF InternalMessages and
+    produces actions, tool calls, and provider requests.
+  canonical_schemas:
+    - session: { id: string, created_at: timestamp, user: string }
+    - internal_message: UMF::InternalMessage
+access:
+  surface:
+    - create_session(session_metadata)
+    - send_message(session_id, InternalMessage)
+    - get_session_state(session_id)
+    - shutdown(session_id)
+  auth:
+    - CLI-runner (host-bound)
+    - local-only Weyl: no external network access except via provider adapters
+manipulation:
+  mutations:
+    - create_session -> session persisted via checkpoint manager
+    - append_message -> session.message_log
+    - apply_tool_result -> session.state
+  invariants:
+    - messages are validated against UMF schema before processing
+    - only one active orchestrator per session
+extract:
+  transforms:
+    - render_template(template_name, context) -> prompt_text (via lifecycle plugin)
+    - messages -> ChatML via UMF chatml helpers
+movement:
+  routes:
+    - to_provider: (UMF ChatML) -> ProviderFactory -> Box<dyn LlmProvider>
+    - to_tools: (UMF ToolCall) -> CATS ToolRegistry -> CommandExecutor
+    - to_lifecycle: (classification/render) -> Lifecycle-WASM
+    - checkpoint_persistence -> abk::checkpoint (local disk or object store)
+coordination:
+  responsibilities:
+    - orchestrate steps: classification -> prompt generation -> provider invoke -> handle response -> tool calls -> checkpoint
+    - resolve tool concurrency and backpressure
+    - ensure ordered semantics for messages and tool calls
+contracts:
+  inputs: [UMF::InternalMessage]
+  outputs: [UMF::InternalMessage, ToolCall, Checkpoint]
+  error_modes:
+    - provider_timeout
+    - tool_execution_failure
+    - lifecycle_plugin_load_failure
+examples:
+  - create_session: { id: "s-123", user: "dev", created_at: "2025-11-10T00:00:00Z" }
+  - send_message: { session_id: "s-123", message: { role: "user", content: "Write a test" } }
+notes: |
+  The agent is a composition root. Keep side-effects isolated to adapters (provider, lifecycle, executor, checkpoint, observability).  
+  Enforce small, testable adapters to keep the Agent's logic declarative and UDML-centered.

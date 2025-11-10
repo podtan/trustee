@@ -1,0 +1,180 @@
+# UDML Specification for abk::agent (Agent Runtime / Wiring)
+# This component orchestrates the entire agent lifecycle, wiring together all other components
+
+information:
+  # Core agent state and configuration
+  - name: AgentConfig
+    description: "Runtime configuration for agent behavior, timeouts, and feature flags"
+    schema:
+      type: object
+      properties:
+        max_iterations: { type: integer }
+        enable_streaming: { type: boolean }
+        timeout_seconds: { type: integer }
+        session_id: { type: string }
+
+  - name: AgentState
+    description: "Current execution state of the agent including message history and session data"
+    schema:
+      type: object
+      properties:
+        messages: { type: array, items: { $ref: "#/definitions/InternalMessage" } }
+        session_id: { type: string }
+        iteration_count: { type: integer }
+        last_checkpoint: { type: string, format: date-time }
+
+  - name: ComponentRegistry
+    description: "Registry of wired components (provider, tools, lifecycle, etc.)"
+    schema:
+      type: object
+      properties:
+        provider: { type: string, description: "LLM provider instance" }
+        tool_registry: { type: string, description: "CATS tool registry" }
+        lifecycle: { type: string, description: "WASM lifecycle plugin" }
+        executor: { type: string, description: "Command executor" }
+        checkpoint_manager: { type: string, description: "Session checkpoint manager" }
+        orchestrator: { type: string, description: "Workflow coordinator" }
+        observability: { type: string, description: "Logging/telemetry system" }
+
+access:
+  # Read-only access to agent state
+  - name: get_agent_state
+    description: "Read current agent execution state"
+    parameters:
+      session_id: { type: string }
+    returns: { $ref: "#/definitions/AgentState" }
+
+  - name: get_component_status
+    description: "Check health/status of wired components"
+    parameters:
+      component_name: { type: string }
+    returns:
+      type: object
+      properties:
+        status: { type: string, enum: [healthy, degraded, failed] }
+        last_check: { type: string, format: date-time }
+
+  - name: list_active_sessions
+    description: "List all active agent sessions"
+    returns:
+      type: array
+      items:
+        type: object
+        properties:
+          session_id: { type: string }
+          start_time: { type: string, format: date-time }
+          status: { type: string, enum: [running, paused, completed, failed] }
+
+manipulation:
+  # Agent lifecycle operations
+  - name: create_agent
+    description: "Initialize new agent instance with wired components"
+    parameters:
+      config: { $ref: "#/definitions/AgentConfig" }
+      components: { $ref: "#/definitions/ComponentRegistry" }
+    creates: { $ref: "#/definitions/AgentState" }
+
+  - name: update_agent_config
+    description: "Modify agent configuration at runtime"
+    parameters:
+      session_id: { type: string }
+      config_updates: { type: object }
+    modifies: { $ref: "#/definitions/AgentConfig" }
+
+  - name: pause_agent
+    description: "Suspend agent execution and create checkpoint"
+    parameters:
+      session_id: { type: string }
+    modifies: { $ref: "#/definitions/AgentState" }
+
+  - name: resume_agent
+    description: "Resume agent from checkpoint"
+    parameters:
+      session_id: { type: string }
+      checkpoint_id: { type: string }
+    modifies: { $ref: "#/definitions/AgentState" }
+
+  - name: terminate_agent
+    description: "Clean shutdown of agent and save final state"
+    parameters:
+      session_id: { type: string }
+    deletes: { $ref: "#/definitions/AgentState" }
+
+extract:
+  # Derived data and computations
+  - name: generate_execution_summary
+    description: "Summarize agent execution metrics and outcomes"
+    input: { $ref: "#/definitions/AgentState" }
+    output:
+      type: object
+      properties:
+        total_iterations: { type: integer }
+        tools_used: { type: array, items: { type: string } }
+        llm_calls: { type: integer }
+        execution_time: { type: integer }
+        success_rate: { type: number }
+
+  - name: validate_component_wiring
+    description: "Check that all required components are properly wired"
+    input: { $ref: "#/definitions/ComponentRegistry" }
+    output:
+      type: object
+      properties:
+        is_valid: { type: boolean }
+        missing_components: { type: array, items: { type: string } }
+        warnings: { type: array, items: { type: string } }
+
+movement:
+  # Data flow patterns
+  - name: message_routing
+    description: "Route messages between components (LLM provider ↔ tools ↔ lifecycle)"
+    from: { type: string, enum: [llm_provider, tool_registry, lifecycle_plugin] }
+    to: { type: string, enum: [llm_provider, tool_registry, lifecycle_plugin] }
+    protocol: "UMF InternalMessage"
+    boundaries: ["component_interfaces", "wasm_boundaries"]
+
+  - name: session_persistence
+    description: "Move agent state to/from persistent storage"
+    from: { $ref: "#/definitions/AgentState" }
+    to: "checkpoint_storage"
+    protocol: "JSON serialization"
+    boundaries: ["memory_to_disk"]
+
+  - name: telemetry_export
+    description: "Export observability data to external systems"
+    from: "agent_metrics"
+    to: "logging_backend"
+    protocol: "structured_logs"
+    boundaries: ["process_boundaries"]
+
+coordination:
+  # Synchronization and orchestration
+  - name: execution_loop
+    description: "Main agent execution orchestration loop"
+    primitives:
+      - type: "sequence"
+        description: "Process messages in order"
+      - type: "conditional"
+        description: "Branch based on message type (tool_call, completion, error)"
+      - type: "parallel"
+        description: "Execute multiple tools concurrently when possible"
+
+  - name: component_lifecycle
+    description: "Manage startup/shutdown of wired components"
+    primitives:
+      - type: "startup_sequence"
+        description: "Initialize components in dependency order"
+      - type: "health_monitoring"
+        description: "Monitor component health and restart failed components"
+      - type: "graceful_shutdown"
+        description: "Clean shutdown with state preservation"
+
+  - name: error_recovery
+    description: "Handle failures and recovery coordination"
+    primitives:
+      - type: "retry_logic"
+        description: "Retry failed operations with backoff"
+      - type: "fallback_routing"
+        description: "Route to backup components on failure"
+      - type: "checkpoint_recovery"
+        description: "Resume from last good checkpoint"

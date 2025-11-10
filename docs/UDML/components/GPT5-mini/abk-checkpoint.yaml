@@ -1,0 +1,44 @@
+# UDML for abk[checkpoint] (Checkpoint / session manager)
+metadata:
+  name: abk[checkpoint]
+  role: Checkpoint and session persistence
+  version: 1.0
+information:
+  description: |
+    Responsible for persisting session state, listing available checkpoints, restoring sessions, and auto-checkpointing at configured intervals.
+  canonical_schemas:
+    - checkpoint: { id: string, session_id: string, created_at: timestamp, payload: json }
+    - session_snapshot: matches Agent session structure
+access:
+  surface:
+    - save_checkpoint(session_id, payload)
+    - load_checkpoint(checkpoint_id) -> payload
+    - list_checkpoints(session_id)
+  auth:
+    - file system or object storage credentials (resolved by abk[config])
+manipulation:
+  mutations:
+    - compress/encrypt payload before storage (configurable)
+  invariants:
+    - checkpoints are immutable once created
+extract:
+  transforms:
+    - snapshot -> serialized payload (json)
+movement:
+  routes:
+    - local disk path (default)
+    - optional S3/HTTP storage via configured adapters
+coordination:
+  responsibilities:
+    - coordinate with orchestration to provide save/restore points
+    - provide resume semantics for long-running workflows
+contracts:
+  inputs: [Session state]
+  outputs: [Checkpoint record]
+  error_modes:
+    - storage_unavailable
+    - serialization_error
+examples:
+  - save_checkpoint: { session_id: "s-1", payload: { messages: [...], context: {...} } }
+notes: |
+  Checkpoint manager is the canonical owner of persisted session state. Keep schema stable across versions or provide migrations.

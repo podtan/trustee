@@ -1,0 +1,27 @@
+name: abk::checkpoint
+description: "Checkpoint/session manager: manages session checkpoints by storing, listing, restoring, and resuming agent sessions."
+udml:
+  information:
+    - description: "A snapshot of the agent's session state, including conversation history and other metadata, typically in JSON format."
+      schema: { $ref: "abk_agent.yml#information[0].schema" }
+
+  access:
+    - description: "The checkpoint manager has read/write access to the checkpoint directory on the filesystem."
+    - description: "The `abk::agent` or `abk::orchestration` layer can request to save or load a checkpoint."
+
+  manipulation:
+    - description: "Saves (creates or overwrites) a checkpoint file for a given session ID."
+    - description: "Deletes old checkpoints."
+
+  extract:
+    - description: "Serializes the agent's session state into JSON for storage."
+    - description: "Deserializes JSON from a checkpoint file back into the agent's session state."
+    - description: "Compresses and decompresses checkpoint data."
+
+  movement:
+    - description: "Receives the agent session state from the `abk::agent`."
+    - description: "Writes the serialized state to a file in the checkpoint directory."
+    - description: "Reads a checkpoint file from the directory and returns the deserialized state to the `abk::agent` upon resume."
+
+  coordination:
+    - description: "Ensures agent state can survive interruptions and allows for long-running tasks to be resumed, providing fault tolerance."

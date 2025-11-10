@@ -1,0 +1,77 @@
+id: abk-config
+layer: support
+ownership: crate
+summary: Configuration loader that merges defaults, file, and environment into runtime settings.
+provides:
+  information:
+    - id: runtime-config
+      kind: struct
+      schema:
+        fields:
+          - id: llm
+            type: object{provider:string, model:string, streaming:bool, base_url?:string}
+          - id: execution
+            type: object{timeout_ms:int, retries:int, max_tokens?:int}
+          - id: checkpointing
+            type: object{enabled:bool, dir:string, interval:int}
+          - id: templates
+            type: object{paths:list<string>}
+      purpose: Canonical runtime settings used by the system.
+      owners: [abk-config]
+    - id: config-request
+      kind: struct
+      schema:
+        fields:
+          - id: path
+            type: string
+      purpose: Input to load configuration by path.
+      owners: [abk-config]
+access:
+  rules:
+    - id: config-read
+      target: runtime-config
+      read: abk-cli|abk-agent|abk-orchestration|abk-provider
+      constraints: []
+      description: Config is globally readable by core runtime.
+manipulation:
+  mutations:
+    - id: merge-hierarchy
+      target: runtime-config
+      kind: update
+      preconditions: []
+      postconditions: []
+      side_effects: []
+extract:
+  transforms:
+    - id: env-overlay
+      inputs: [runtime-config]
+      output: runtime-config
+      method: overlay
+      description: Apply environment variables over file config.
+movement:
+  routes:
+    - id: mv-read-toml
+      direction: in
+      from: external
+      to: abk-config
+      medium: fs
+      payload: file:toml
+      trigger: event
+      reliability: best-effort
+coordination:
+  primitives:
+    - id: config-validation
+      kind: orchestration
+      participants: [abk-config]
+      drives: []
+      description: Validate config shape and required fields.
+dependencies:
+  runtime: []
+  build: [abk]
+  feature_flags: [config]
+risks:
+  - id: drift
+    impact: medium
+    likelihood: low
+    description: Config schema drifts from code expectations.
+    mitigation: Schema validation + tests.

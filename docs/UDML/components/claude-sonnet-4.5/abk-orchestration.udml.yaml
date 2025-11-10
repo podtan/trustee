@@ -1,0 +1,211 @@
+# UDML Specification for abk[orchestration] (Workflow Coordinator)
+# This component coordinates multi-step workflows, tool invocation ordering, and runtime orchestration
+
+information:
+  # Orchestration data structures
+  - name: Workflow
+    description: "Definition of a multi-step workflow"
+    schema:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        steps: { type: array, items: { $ref: "#/definitions/WorkflowStep" } }
+        dependencies: { type: object, additionalProperties: { type: array, items: { type: string } } }
+        timeout_seconds: { type: integer }
+        retry_policy: { $ref: "#/definitions/RetryPolicy" }
+
+  - name: WorkflowStep
+    description: "Individual step in a workflow"
+    schema:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        type: { type: string, enum: [llm_call, tool_execution, conditional_branch, parallel_group] }
+        config: { type: object }
+        timeout_seconds: { type: integer }
+
+  - name: WorkflowExecution
+    description: "Runtime state of workflow execution"
+    schema:
+      type: object
+      properties:
+        workflow_id: { type: string }
+        execution_id: { type: string }
+        status: { type: string, enum: [pending, running, paused, completed, failed] }
+        current_step: { type: string }
+        completed_steps: { type: array, items: { type: string } }
+        failed_steps: { type: array, items: { type: string } }
+        start_time: { type: string, format: date-time }
+        results: { type: object, additionalProperties: { type: object } }
+
+  - name: RetryPolicy
+    description: "Policy for retrying failed operations"
+    schema:
+      type: object
+      properties:
+        max_attempts: { type: integer }
+        backoff_strategy: { type: string, enum: [fixed, exponential, linear] }
+        base_delay_seconds: { type: number }
+
+access:
+  # Orchestration access patterns
+  - name: list_active_workflows
+    description: "List currently executing workflows"
+    returns:
+      type: array
+      items: { $ref: "#/definitions/WorkflowExecution" }
+
+  - name: get_workflow_status
+    description: "Get detailed status of workflow execution"
+    parameters:
+      execution_id: { type: string }
+    returns: { $ref: "#/definitions/WorkflowExecution" }
+
+  - name: get_workflow_definition
+    description: "Get workflow definition by ID"
+    parameters:
+      workflow_id: { type: string }
+    returns: { $ref: "#/definitions/Workflow" }
+
+  - name: list_workflow_templates
+    description: "List available workflow templates"
+    returns:
+      type: array
+      items:
+        type: object
+        properties:
+          id: { type: string }
+          name: { type: string }
+          description: { type: string }
+          category: { type: string }
+
+manipulation:
+  # Orchestration operations
+  - name: start_workflow
+    description: "Begin execution of a workflow"
+    parameters:
+      workflow: { $ref: "#/definitions/Workflow" }
+      initial_context: { type: object }
+    creates: { $ref: "#/definitions/WorkflowExecution" }
+
+  - name: pause_workflow
+    description: "Pause execution of a running workflow"
+    parameters:
+      execution_id: { type: string }
+    modifies: { $ref: "#/definitions/WorkflowExecution" }
+
+  - name: resume_workflow
+    description: "Resume execution of a paused workflow"
+    parameters:
+      execution_id: { type: string }
+    modifies: { $ref: "#/definitions/WorkflowExecution" }
+
+  - name: cancel_workflow
+    description: "Cancel execution of a workflow"
+    parameters:
+      execution_id: { type: string }
+    modifies: { $ref: "#/definitions/WorkflowExecution" }
+
+  - name: update_workflow_context
+    description: "Update context data for running workflow"
+    parameters:
+      execution_id: { type: string }
+      context_updates: { type: object }
+    modifies: { $ref: "#/definitions/WorkflowExecution" }
+
+extract:
+  # Orchestration computations
+  - name: validate_workflow_definition
+    description: "Validate workflow definition for correctness"
+    input: { $ref: "#/definitions/Workflow" }
+    output:
+      type: object
+      properties:
+        is_valid: { type: boolean }
+        errors: { type: array, items: { type: string } }
+        warnings: { type: array, items: { type: string } }
+
+  - name: calculate_workflow_complexity
+    description: "Calculate complexity metrics for workflow"
+    input: { $ref: "#/definitions/Workflow" }
+    output:
+      type: object
+      properties:
+        step_count: { type: integer }
+        dependency_depth: { type: integer }
+        parallel_branches: { type: integer }
+        estimated_duration: { type: integer }
+
+  - name: generate_execution_plan
+    description: "Generate detailed execution plan for workflow"
+    input: { $ref: "#/definitions/Workflow" }
+    output:
+      type: object
+      properties:
+        execution_order: { type: array, items: { type: string } }
+        parallel_groups: { type: array, items: { type: array, items: { type: string } } }
+        critical_path: { type: array, items: { type: string } }
+
+movement:
+  # Orchestration data flow
+  - name: step_coordination
+    description: "Coordinate data flow between workflow steps"
+    from: "step_outputs"
+    to: "dependent_step_inputs"
+    protocol: "context_passing"
+    boundaries: ["step_to_step"]
+
+  - name: resource_allocation
+    description: "Allocate resources (tools, providers) to workflow steps"
+    from: "workflow_requirements"
+    to: "resource_assignments"
+    protocol: "resource_binding"
+    boundaries: ["workflow_to_resources"]
+
+  - name: result_aggregation
+    description: "Aggregate results from parallel workflow branches"
+    from: "parallel_step_results"
+    to: "aggregated_workflow_result"
+    protocol: "result_merging"
+    boundaries: ["parallel_to_sequential"]
+
+  - name: error_propagation
+    description: "Propagate errors through workflow dependency graph"
+    from: "failed_step_errors"
+    to: "dependent_step_cancellation"
+    protocol: "error_signaling"
+    boundaries: ["failure_propagation"]
+
+coordination:
+  # Orchestration coordination
+  - name: dependency_resolution
+    description: "Resolve and manage workflow step dependencies"
+    primitives:
+      - type: "topological_sorting"
+        description: "Order steps based on dependency graph"
+      - type: "cycle_detection"
+        description: "Detect circular dependencies in workflows"
+      - type: "dynamic_dependencies"
+        description: "Handle dependencies determined at runtime"
+
+  - name: parallel_execution
+    description: "Coordinate parallel execution of independent steps"
+    primitives:
+      - type: "concurrency_limits"
+        description: "Limit concurrent execution to prevent resource exhaustion"
+      - type: "load_balancing"
+        description: "Distribute work across available resources"
+      - type: "synchronization_points"
+        description: "Coordinate synchronization between parallel branches"
+
+  - name: error_handling_recovery
+    description: "Handle errors and coordinate recovery strategies"
+    primitives:
+      - type: "compensation_actions"
+        description: "Execute compensating actions for failed steps"
+      - type: "alternative_paths"
+        description: "Switch to alternative execution paths on failure"
+      - type: "graceful_degradation"
+        description: "Continue with reduced functionality when possible"

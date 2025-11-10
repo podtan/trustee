@@ -1,0 +1,30 @@
+name: abk::config
+description: "Configuration loader: loads configuration from TOML and environment variables and exposes runtime settings."
+udml:
+  information:
+    - description: "The application's configuration, loaded from `trustee.toml` and environment variables."
+      schema:
+        type: object
+        properties:
+          llm: { type: object }
+          execution: { type: object }
+          checkpointing: { type: object }
+          templates: { type: object }
+
+  access:
+    - description: "Reads the `trustee.toml` file from a specified path."
+    - description: "Reads environment variables (e.g., `OPENAI_API_KEY`)."
+    - description: "Exposes a type-safe configuration struct to the application, primarily the `abk::cli` and `abk::agent`."
+
+  manipulation:
+    - description: "Merges configuration from file and environment variables, with environment variables taking precedence."
+
+  extract:
+    - description: "Deserializes the TOML file into a Rust struct."
+    - description: "Resolves environment variables and merges them into the final configuration."
+
+  movement:
+    - description: "Provides the final, merged `Configuration` struct to the `abk::cli` component during bootstrap."
+
+  coordination:
+    - description: "Ensures that all parts of the application have consistent configuration by providing a single source of truth at startup."

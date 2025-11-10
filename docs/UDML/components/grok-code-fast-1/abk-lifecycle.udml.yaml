@@ -1,0 +1,108 @@
+component: abk::lifecycle
+description: "WASM lifecycle plugin integration for agent morphing and templates"
+
+information:
+  - name: LifecyclePlugin
+    description: "Interface to WASM lifecycle plugins"
+    schema:
+      classify_task: "fn(String) -> TaskType"
+      load_template: "fn(String) -> Template"
+      render_template: "fn(String, Context) -> String"
+
+  - name: TaskType
+    description: "Classification of agent task types"
+    schema:
+      coding: "CodingTask"
+      research: "ResearchTask"
+      analysis: "AnalysisTask"
+
+  - name: Template
+    description: "Template structure for rendering"
+    schema:
+      name: string
+      content: string
+      variables: "Vec<String>"
+
+access:
+  - name: read_wasm_plugins
+    description: "Access WASM lifecycle plugins from filesystem"
+    rules:
+      - source: "~/.trustee/lifecycles/ or ./lifecycles/"
+      - method: "wasmtime::Module::from_file()"
+      - visibility: "internal"
+
+  - name: read_template_definitions
+    description: "Access template definitions from plugins"
+    rules:
+      - source: "LifecyclePlugin"
+      - method: "load_template(name)"
+      - visibility: "internal"
+
+manipulation:
+  - name: load_lifecycle_plugin
+    description: "Load and instantiate WASM lifecycle plugin"
+    rules:
+      - input: "WasmFilePath"
+      - operation: "LifecyclePlugin::new(wasm_bytes)"
+      - validation: "WASM module is valid"
+
+  - name: register_templates
+    description: "Register templates from lifecycle plugin"
+    rules:
+      - input: "TemplateDefinitions"
+      - operation: "plugin.register_templates(templates)"
+      - constraints: "template names unique"
+
+extract:
+  - name: classify_task_type
+    description: "Extract task classification from user input"
+    rules:
+      - input: "String (task description)"
+      - transform: "plugin.classify_task()"
+      - output: "TaskType"
+
+  - name: render_action_template
+    description: "Extract rendered template for agent actions"
+    rules:
+      - input: "TemplateName + Context"
+      - transform: "plugin.render_template()"
+      - output: "RenderedString"
+
+movement:
+  - name: wasm_plugin_loading
+    description: "Load WASM plugins from filesystem"
+    rules:
+      - from: "filesystem paths"
+      - to: "wasmtime runtime"
+      - protocol: "WASM binary format"
+      - boundaries: "WASM runtime boundary"
+
+  - name: template_rendering
+    description: "Route template rendering requests to plugins"
+    rules:
+      - from: "template requests"
+      - to: "LifecyclePlugin.render_template()"
+      - protocol: "template_name + JSON context"
+      - boundaries: "WASM function call boundary"
+
+  - name: task_classification
+    description: "Route task classification to appropriate plugin"
+    rules:
+      - from: "task descriptions"
+      - to: "LifecyclePlugin.classify_task()"
+      - protocol: "string input"
+      - boundaries: "WASM function call boundary"
+
+coordination:
+  - name: plugin_lifecycle
+    description: "Coordinate WASM plugin loading and execution"
+    primitives:
+      - discovery: "scan_directory() -> validate_wasm() -> load_module()"
+      - initialization: "instantiate() -> configure() -> register_templates()"
+      - execution: "route_request() -> call_wasm() -> handle_response()"
+
+  - name: agent_morphing
+    description: "Coordinate agent behavior changes based on task type"
+    primitives:
+      - classification: "analyze_task() -> select_lifecycle() -> load_plugin()"
+      - adaptation: "switch_behavior() -> update_templates() -> reconfigure_tools()"

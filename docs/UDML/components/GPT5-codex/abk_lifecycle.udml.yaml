@@ -1,0 +1,96 @@
+format: UDML-YAML-0.1
+component: "abk[lifecycle]"
+summary: "Lifecycle host that loads WASM plugins for task classification, template rendering, and agent morphing."
+context:
+  crate: "abk"
+  feature_flags:
+    - lifecycle
+  upstream_interfaces:
+    - filesystem lifecycles/
+    - Lifecycle-WASM ABI
+    - abk::config
+  downstream_interfaces:
+    - abk::agent
+    - abk::orchestration
+
+domains:
+  information:
+    - name: lifecycle_manifest
+      ownership: abk[lifecycle]
+      description: "Metadata describing available lifecycle plugins, versions, supported agent types, and template catalogs."
+      shape: |
+        struct LifecycleManifest {
+          lifecycle_id: String,
+          version: SemVer,
+          supported_tasks: Vec<String>,
+          templates: Vec<TemplateDescriptor>,
+          classification_rules: Vec<ClassifierRule>
+        }
+    - name: lifecycle_context
+      ownership: abk[lifecycle]
+      description: "Runtime binding between session and lifecycle plugin including cached template handles."
+      shape: |
+        struct LifecycleContext {
+          lifecycle_id: String,
+          wasm_instance: WasmHandle,
+          default_templates: TemplateMap,
+          capabilities: LifecycleCapabilities
+        }
+  access:
+    - name: wasm_binary_access
+      subject: abk[lifecycle]
+      description: "Host may read lifecycle `.wasm` files from configured directories; execution occurs inside wasmtime sandbox."
+      rules:
+        - read-only file access
+        - integrity checked via optional hash
+    - name: template_access
+      subject: abk[lifecycle]
+      description: "Templates exposed by lifecycle can be rendered by agent but not modified."
+      rules:
+        - read access for rendering
+        - updates require new lifecycle version
+  manipulation:
+    - name: classification_binding
+      description: "Invoke lifecycle classify function to assign agent profile."
+      operations:
+        - classify_task
+        - select_template
+      invariants:
+        - classification returns known agent type or error
+    - name: template_render
+      description: "Render templates with provided slots (state, observations)."
+      operations:
+        - render_prompt
+        - render_observation
+        - render_summary
+  extract:
+    - name: capability_projection
+      description: "Derive lifecycle-provided capabilities (requires_tools, supports_checkpointing) for orchestration."
+      outputs:
+        - LifecycleCapabilities struct
+    - name: plan_generation
+      description: "Optional extraction of coarse task plan from lifecycle logic."
+      outputs:
+        - PlanArtifact
+  movement:
+    - name: wasm_host_calls
+      source: abk[lifecycle]
+      destination: Lifecycle-WASM
+      protocol: "wasmtime function invocations"
+      payload: JSON serialized requests (classification input, template context)
+      notes: "Responses returned as JSON strings for host to deserialize."
+    - name: manifest_broadcast
+      source: abk[lifecycle]
+      destination: abk::agent / orchestration
+      protocol: "Struct sharing"
+      payload: LifecycleContext handle
+  coordination:
+    - name: lifecycle_selection
+      participants:
+        - abk[lifecycle]
+        - abk::agent
+        - abk::orchestration
+      triggers:
+        - session_start
+        - reclassification_request
+      policy: "Initial classification locks lifecycle; reclassification requires explicit orchestration approval and lifecycle compatibility check."

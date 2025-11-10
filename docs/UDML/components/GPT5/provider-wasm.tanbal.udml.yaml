@@ -1,0 +1,79 @@
+id: provider-wasm-tanbal
+layer: plugin
+ownership: wasm
+summary: WASM provider that adapts multiple LLM backends (OpenAI, GitHub Copilot, Anthropic) via host calls.
+provides:
+  information:
+    - id: wasm-provider-request
+      kind: struct
+      schema:
+        fields:
+          - id: model
+            type: string
+          - id: messages
+            type: list<umf:internal-message>
+          - id: options
+            type: map
+      purpose: ABI payload for generate/stream within WASM.
+      owners: [provider-wasm-tanbal]
+    - id: wasm-provider-response
+      kind: struct
+      schema:
+        fields:
+          - id: content
+            type: list<umf:content-block>
+          - id: tool_calls
+            type: list<umf:tool-call>
+          - id: raw
+            type: json
+      purpose: Parsed provider output mapped to UMF.
+      owners: [provider-wasm-tanbal]
+access:
+  rules:
+    - id: host-call-allowed
+      target: wasm-provider-request
+      read: abk-provider
+      constraints: [abi-v1]
+      description: Host can call WASM provider using stable ABI.
+extract:
+  transforms:
+    - id: parse-stream-event
+      inputs: [raw:event]
+      output: wasm-provider-response
+      method: streaming-parser
+      description: Convert SSE/stream chunks to UMF content blocks.
+movement:
+  routes:
+    - id: mv-host-http
+      direction: bi
+      from: provider-wasm-tanbal
+      to: external
+      medium: network
+      payload: http-json
+      trigger: event
+      reliability: best-effort
+    - id: mv-host-call
+      direction: bi
+      from: abk-provider
+      to: provider-wasm-tanbal
+      medium: wasm-call
+      payload: wasm-provider-request
+      trigger: event
+      reliability: best-effort
+coordination:
+  primitives:
+    - id: backend-selection
+      kind: orchestration
+      participants: [provider-wasm-tanbal]
+      drives: [mv-host-http]
+      description: Choose backend endpoints based on env.
+dependencies:
+  runtime: [abk-provider, umf]
+  build: [tanbal-provider]
+  feature_flags: []
+risks:
+  - id: host-wasm-drift
+    impact: high
+    likelihood: medium
+    description: WIT/ABI mismatch between host and WASM.
+    mitigation: Version pinning and compatibility shims.

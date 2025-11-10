@@ -1,0 +1,356 @@
+---
+# UDML: abk[executor] — Command Executor
+# Safe command execution with timeouts, validation, and output capture
+
+metadata:
+  name: "abk[executor]"
+  version: "0.1.24"
+  owner: "ABK (Agent Builder Kit)"
+  responsibility: "Safe command execution, output capture, timeout enforcement, dangerous command validation"
+
+information:
+  # Command execution request
+  execution_request:
+    - field: command
+      type: String
+      semantics: "Shell command or executable path"
+    
+    - field: args
+      type: Vec<String>
+      semantics: "Command arguments"
+    
+    - field: working_directory
+      type: Option<PathBuf>
+      semantics: "Working directory for command (or current)"
+    
+    - field: environment
+      type: HashMap<String, String>
+      semantics: "Environment variables to pass"
+    
+    - field: timeout_seconds
+      type: u64
+      semantics: "Maximum execution time"
+    
+    - field: input
+      type: Option<String>
+      semantics: "Optional stdin data to provide to command"
+
+  # Execution result
+  execution_result:
+    - field: success
+      type: bool
+      semantics: "Whether command succeeded (exit code 0)"
+    
+    - field: exit_code
+      type: i32
+      semantics: "Process exit code"
+    
+    - field: stdout
+      type: String
+      semantics: "Captured standard output"
+      limits: "Truncated at max_output_bytes"
+    
+    - field: stderr
+      type: String
+      semantics: "Captured standard error"
+      limits: "Truncated at max_output_bytes"
+    
+    - field: execution_time_ms
+      type: u64
+      semantics: "Actual execution time in milliseconds"
+    
+    - field: timed_out
+      type: bool
+      semantics: "Whether command was terminated due to timeout"
+
+  # Dangerous command patterns
+  dangerous_commands:
+    - pattern: "rm -rf /"
+      risk: "CRITICAL - Deletion of entire filesystem"
+      mitigation: "Block unconditionally or require explicit confirmation"
+    
+    - pattern: "dd if=/dev/zero of=/dev/sda"
+      risk: "CRITICAL - Disk wipe"
+      mitigation: "Block or require approval"
+    
+    - pattern: ":(){ :|:& };:"
+      risk: "CRITICAL - Fork bomb"
+      mitigation: "Block regex pattern"
+    
+    - pattern: "chmod -R 777 /"
+      risk: "HIGH - Permission escalation"
+      mitigation: "Block or restrict scope"
+
+  # Executor configuration
+  executor_config:
+    - field: max_output_bytes
+      type: usize
+      semantics: "Maximum captured output size per stream"
+      default: 1_000_000
+    
+    - field: default_timeout_seconds
+      type: u64
+      semantics: "Default timeout if not specified"
+      default: 300
+    
+    - field: validate_dangerous_commands
+      type: bool
+      semantics: "Enable dangerous command detection"
+      default: true
+    
+    - field: sandbox_mode
+      type: bool
+      semantics: "Restrict operations to allowed directories"
+      default: true
+    
+    - field: allowed_directories
+      type: Vec<PathBuf>
+      semantics: "Directories permitted in sandbox mode"
+
+access:
+  # Command execution
+  execution_access:
+    - query: "execute(request: ExecutionRequest) -> Result<ExecutionResult, ExecutionError>"
+      visibility: "Public"
+      semantics: "Execute a command synchronously"
+      errors:
+        - "CommandNotFound"
+        - "PermissionDenied"
+        - "Timeout"
+        - "DangerousCommandBlocked"
+        - "IOError"
+
+  # Validation
+  validation_access:
+    - query: "validate_command(command: &str, args: &[String]) -> Result<(), ValidationError>"
+      visibility: "Public"
+      semantics: "Validate command before execution"
+      checks:
+        - "Command exists and is executable"
+        - "Command not in dangerous list (if validation enabled)"
+        - "Working directory in allowed list (if sandbox enabled)"
+
+  # Configuration
+  config_access:
+    - query: "get_config() -> &ExecutorConfig"
+      visibility: "Public (read-only)"
+      semantics: "Access executor configuration"
+
+manipulation:
+  # Command execution
+  execution_operations:
+    - operation: "execute_sync(request: ExecutionRequest) -> Result<ExecutionResult, Error>"
+      semantics: "Execute command synchronously and return result"
+      precondition: "Command is valid and passes validation"
+      postcondition: "ExecutionResult populated with exit code, stdout, stderr"
+      timeout_handling: "If execution exceeds timeout, process terminated and result.timed_out = true"
+
+  # Process management
+  process_operations:
+    - operation: "spawn_process(command: &str, args: &[String]) -> Result<Child, Error>"
+      semantics: "Spawn child process"
+      precondition: "Command exists, validation passes"
+      postcondition: "Child process spawned, handles available for IO"
+    
+    - operation: "capture_output(child: &mut Child, max_bytes: usize) -> Result<ProcessOutput, Error>"
+      semantics: "Capture stdout and stderr from running process"
+      postcondition: "Output captured up to max_bytes limit"
+    
+    - operation: "wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<ExitStatus, Error>"
+      semantics: "Wait for child process with timeout"
+      error_handling: "If timeout exceeded, kill child and return timeout error"
+
+  # Output handling
+  output_operations:
+    - operation: "truncate_output(output: String, max_bytes: usize) -> String"
+      semantics: "Truncate output to maximum size"
+      postcondition: "Output truncated with indicator message if needed"
+    
+    - operation: "sanitize_output(output: String) -> String"
+      semantics: "Remove or escape sensitive data from output"
+      examples:
+        - "Redact API keys matching pattern"
+        - "Remove secrets from environment output"
+
+extract:
+  # Command parsing
+  command_extraction:
+    - extract: "parse_command_string(cmd: &str) -> (String, Vec<String>)"
+      rule: "Parse shell command string into executable and arguments"
+      input_owner: "abk[executor] (command string)"
+      output_owner: "abk[executor]"
+      implementation: "Shell-like parsing (respects quotes, escapes)"
+
+  # Environment extraction
+  environment_extraction:
+    - extract: "extract_environment_variables(preserve: &[String]) -> HashMap<String, String>"
+      rule: "Capture current environment, optionally filtering to allowed vars"
+      input_owner: "OS environment"
+      output_owner: "ExecutionRequest"
+      logic: "If preserve list provided, only include those vars; else include all non-sensitive vars"
+
+  # Execution metrics
+  metrics_extraction:
+    - extract: "extract_execution_metrics(result: &ExecutionResult) -> ExecutionMetrics"
+      rule: "Derive metrics from execution result"
+      input_owner: "ExecutionResult"
+      output_owner: "abk[observability]"
+      metrics:
+        - "execution_time"
+        - "output_size (stdout + stderr)"
+        - "exit_code"
+        - "timeout_occurred"
+
+movement:
+  # Command execution flow
+  execution_flow:
+    - from: "CATS::ToolRegistry"
+      to: "abk[executor]::CommandExecutor"
+      data: "ExecutionRequest { command, args, timeout, ... }"
+      protocol: "Function call (in-process)"
+      semantics: "Tool requests command execution"
+    
+    - from: "abk[executor]"
+      to: "OS (fork/exec)"
+      data: "Process creation"
+      protocol: "OS syscall"
+      semantics: "Spawn child process"
+    
+    - from: "Child process"
+      to: "abk[executor]"
+      data: "stdout, stderr, exit code"
+      protocol: "Pipe IO + process wait"
+      semantics: "Capture process output"
+    
+    - from: "abk[executor]"
+      to: "CATS::ToolRegistry"
+      data: "ExecutionResult (success, exit_code, stdout, stderr)"
+      protocol: "Function return (in-process)"
+      semantics: "Return execution result"
+
+  # Timeout management
+  timeout_flow:
+    - from: "abk[executor]"
+      to: "Timer"
+      data: "Set timeout duration"
+      protocol: "System timer (tokio or std::time)"
+      semantics: "Start execution timer"
+    
+    - from: "Timer"
+      to: "abk[executor]"
+      data: "Timeout elapsed signal"
+      protocol: "Event or signal"
+      semantics: "Timeout reached"
+    
+    - from: "abk[executor]"
+      to: "Child process"
+      data: "SIGTERM (or SIGKILL if needed)"
+      protocol: "Signal"
+      semantics: "Terminate unresponsive process"
+
+coordination:
+  # Execution sequence
+  execution_sequence:
+    - step: 1
+      action: "Receive ExecutionRequest"
+      owner: "abk[executor]"
+      semantics: "Tool requests command execution"
+    
+    - step: 2
+      action: "Validate command"
+      owner: "abk[executor]"
+      checks:
+        - "Command exists (if not in PATH, full path required)"
+        - "Not in dangerous command list (if validation enabled)"
+        - "Working directory in allowed list (if sandbox enabled)"
+      error_handling: "If validation fails, return ExecutionError"
+    
+    - step: 3
+      action: "Prepare environment and IO pipes"
+      owner: "abk[executor]"
+      semantics: "Set up stdout/stderr capture, environment variables"
+    
+    - step: 4
+      action: "Spawn child process"
+      owner: "abk[executor]"
+      error_handling: "If spawn fails (e.g., permission denied), return error"
+    
+    - step: 5
+      action: "Start timeout timer"
+      owner: "abk[executor]"
+      semantics: "Begin execution timer"
+    
+    - step: 6
+      action: "Capture stdout and stderr"
+      owner: "abk[executor]"
+      semantics: "Read from pipes while process runs"
+      limits: "Stop capturing at max_output_bytes"
+    
+    - step: 7
+      action: "Wait for process or timeout"
+      owner: "abk[executor]"
+      condition: "Does process complete before timeout?"
+      yes_path: "Proceed to step 8"
+      no_path: "Proceed to step 9"
+    
+    - step: 8
+      action: "Collect exit code and finalize result"
+      owner: "abk[executor]"
+      semantics: "result.timed_out = false"
+    
+    - step: 9
+      action: "Kill process (SIGTERM or SIGKILL)"
+      owner: "abk[executor]"
+      semantics: "Enforce timeout"
+      postcondition: "result.timed_out = true"
+    
+    - step: 10
+      action: "Truncate output and return result"
+      owner: "abk[executor]"
+      semantics: "If output exceeds limit, truncate and log indicator"
+
+  # Dangerous command detection
+  danger_detection:
+    - logic: "Check command and args against dangerous patterns (regex, heuristics)"
+    - logic: "If match found and validation enabled, block and return error"
+    - logic: "If sandbox mode enabled, also check working directory and file paths"
+    - logging: "Log all blocked commands via abk[observability]"
+
+  # Error recovery
+  error_recovery:
+    - error: "Command not found"
+      handler: "Return clear error message"
+      logging: "Log to debug level"
+    
+    - error: "Timeout"
+      handler: "Kill process, return ExecutionResult with timed_out = true"
+      logging: "Log timeout event"
+    
+    - error: "Permission denied"
+      handler: "Return permission error"
+      logging: "Log security event"
+    
+    - error: "Output exceeded max_output_bytes"
+      handler: "Truncate, append '...[truncated]' indicator"
+      logging: "Log truncation warning"
+
+dependencies:
+  internal:
+    - "abk[config]" # Executor configuration
+    - "abk[observability]" # Logging and metrics
+  
+  external:
+    - "tokio" # Async runtime (for timeout handling)
+    - "nix" or "libc" # For process and signal management
+    - "regex" # For dangerous command pattern matching
+
+notes: |
+  - abk[executor] is a sandboxed command execution layer.
+  - All execution is synchronous (but uses tokio for timeout enforcement).
+  - Output is always captured and truncated at max_output_bytes limit.
+  - Dangerous command detection is configurable and can be disabled.
+  - Sandbox mode restricts file operations to allowed directories.
+  - Timeouts are enforced via signal (SIGTERM first, then SIGKILL).
+  - Execution metrics are extracted and logged via abk[observability].
+  - Environment variables can be explicitly passed or inherited from parent process.
+  - Working directory for command is validated against allowed directories if sandbox enabled.

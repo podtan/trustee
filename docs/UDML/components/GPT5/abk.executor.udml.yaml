@@ -1,0 +1,85 @@
+id: abk-executor
+layer: infrastructure
+ownership: crate
+summary: Safe command execution with timeouts and validation used by tools and agent.
+provides:
+  information:
+    - id: exec-request
+      kind: struct
+      schema:
+        fields:
+          - id: cmd
+            type: string
+          - id: args
+            type: list<string>
+          - id: cwd
+            type: string|null
+          - id: timeout_ms
+            type: int
+      purpose: Canonical request for executing a command.
+      owners: [abk-executor]
+    - id: exec-result
+      kind: struct
+      schema:
+        fields:
+          - id: stdout
+            type: bytes|text
+          - id: stderr
+            type: bytes|text
+          - id: exit_code
+            type: int
+          - id: success
+            type: bool
+          - id: duration_ms
+            type: int
+      purpose: Deterministic command outcome for tools and agent.
+      owners: [abk-executor]
+access:
+  rules:
+    - id: exec-access
+      target: exec-request
+      read: cats|abk-agent
+      constraints: [denylist]
+      description: Only tool system and agent can execute, with validation.
+manipulation:
+  mutations:
+    - id: run-process
+      target: exec-result
+      kind: create
+      preconditions: [denylist]
+      postconditions: []
+      side_effects: [mv-spawn-process]
+extract:
+  transforms:
+    - id: redact-secrets
+      inputs: [exec-result]
+      output: exec-result
+      method: filter
+      description: Remove sensitive data from logs.
+movement:
+  routes:
+    - id: mv-spawn-process
+      direction: out
+      from: abk-executor
+      to: external
+      medium: process
+      payload: exec-request
+      trigger: event
+      reliability: best-effort
+coordination:
+  primitives:
+    - id: timeout-retry
+      kind: retry
+      participants: [abk-executor]
+      drives: [mv-spawn-process]
+      description: Timeouts, retries and validation policies.
+dependencies:
+  runtime: []
+  build: [abk]
+  feature_flags: [executor]
+risks:
+  - id: command-injection
+    impact: high
+    likelihood: medium
+    description: Unvalidated args cause injection.
+    mitigation: Denylist/allowlist and quoting rules.

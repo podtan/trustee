@@ -1,0 +1,100 @@
+format: UDML-YAML-0.1
+component: "abk[observability]"
+summary: "Logging and telemetry subsystem capturing structured events across agent runtime."
+context:
+  crate: "abk"
+  feature_flags:
+    - observability
+  upstream_interfaces:
+    - abk::config::ObservabilityConfig
+    - tracing/log crates
+  downstream_interfaces:
+    - abk::agent
+    - abk::orchestration
+    - abk::executor
+    - host sinks (stdout, files)
+
+domains:
+  information:
+    - name: log_event_schema
+      ownership: abk[observability]
+      description: "Canonical schema for structured log events emitted by the agent."
+      shape: |
+        struct LogEvent {
+          timestamp: Timestamp,
+          level: LogLevel,
+          component: String,
+          message: String,
+          fields: HashMap<String, Value>,
+          span: Option<SpanId>
+        }
+    - name: metric_series
+      ownership: abk[observability]
+      description: "Timeseries definitions for counters, gauges, histograms captured during runtime."
+      shape: |
+        struct MetricSeries {
+          name: String,
+          kind: MetricKind,
+          labels: HashMap<String, String>
+        }
+  access:
+    - name: sink_access
+      subject: abk[observability]
+      description: "Controls access to output sinks (stdout, log files)."
+      rules:
+        - configure sinks at startup
+        - write-only; no reads from log files
+    - name: sensitive_field_handling
+      subject: emitting components
+      description: "Emitters must mark sensitive fields for redaction before logging."
+      rules:
+        - redaction applied prior to serialization
+        - secrets never logged in clear text
+  manipulation:
+    - name: event_annotation
+      description: "Augment incoming events with contextual fields (session id, turn id)."
+      operations:
+        - attach_session_context
+        - attach_lifecycle_id
+    - name: sampling_policy
+      description: "Adjust event emission rate based on configuration (e.g., sample debug logs)."
+      operations:
+        - should_sample
+        - drop_event
+  extract:
+    - name: telemetry_report
+      description: "Aggregate metrics into periodic reports for dashboards or CLI summaries."
+      outputs:
+        - ObservabilityReport
+    - name: anomaly_detection
+      description: "Identify unusual patterns (high error rates) from metric streams."
+      outputs:
+        - AlertEvent
+  movement:
+    - name: log_stream
+      source: abk[observability]
+      destination: configured sinks
+      protocol: "structured text or JSON"
+      payload: LogEvent
+    - name: metric_export
+      source: abk[observability]
+      destination: exporters (stdout, file, metrics backend)
+      protocol: "statsd/json/otlp depending on config"
+      payload: MetricPoint
+  coordination:
+    - name: span_lifecycle
+      participants:
+        - abk[observability]
+        - emitting components (agent, provider, executor)
+      triggers:
+        - span_start
+        - span_end
+      policy: "Components must open and close spans to correlate events; observability module maintains stack."
+    - name: alerting_policy
+      participants:
+        - abk[observability]
+        - abk::orchestration
+        - host operators
+      triggers:
+        - alert_event
+      policy: "Critical alerts escalate to orchestration for possible shutdown; informational alerts recorded only."

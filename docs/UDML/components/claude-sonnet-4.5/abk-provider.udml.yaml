@@ -1,0 +1,210 @@
+# UDML Specification for abk[provider] / ProviderFactory (LLM Provider Factory + Trait)
+# This component provides abstraction and factory for LLM providers (WASM and HTTP-based)
+
+information:
+  # Provider data structures
+  - name: LlmProvider
+    description: "Trait defining the interface for LLM providers"
+    schema:
+      type: object
+      properties:
+        generate: 
+          type: object
+          description: "Generate text completion"
+          parameters:
+            config: { $ref: "#/definitions/GenerateConfig" }
+          returns: { $ref: "#/definitions/GenerateResponse" }
+        stream:
+          type: object
+          description: "Generate streaming text completion"
+          parameters:
+            config: { $ref: "#/definitions/GenerateConfig" }
+          returns: { type: stream, items: { $ref: "#/definitions/StreamingResponse" } }
+        configure:
+          type: object
+          description: "Configure provider with settings"
+          parameters:
+            settings: { type: object }
+
+  - name: ProviderFactory
+    description: "Factory for creating LLM provider instances"
+    schema:
+      type: object
+      properties:
+        create_provider:
+          type: object
+          description: "Create provider instance based on configuration"
+          parameters:
+            config: { $ref: "#/definitions/ProviderConfig" }
+          returns: { $ref: "#/definitions/LlmProvider" }
+
+  - name: GenerateConfig
+    description: "Configuration for LLM generation requests"
+    schema:
+      type: object
+      properties:
+        messages: { type: array, items: { $ref: "#/definitions/InternalMessage" } }
+        model: { type: string }
+        temperature: { type: number }
+        max_tokens: { type: integer }
+        tool_choice: { $ref: "#/definitions/ToolChoice" }
+
+  - name: GenerateResponse
+    description: "Response from LLM generation"
+    schema:
+      type: object
+      properties:
+        content: { type: string }
+        tool_calls: { type: array, items: { $ref: "#/definitions/ToolCall" } }
+        usage: 
+          type: object
+          properties:
+            prompt_tokens: { type: integer }
+            completion_tokens: { type: integer }
+            total_tokens: { type: integer }
+
+access:
+  # Provider access patterns
+  - name: list_available_providers
+    description: "List all available provider implementations"
+    returns:
+      type: array
+      items:
+        type: object
+        properties:
+          name: { type: string }
+          type: { type: string, enum: [wasm, http] }
+          supported_models: { type: array, items: { type: string } }
+
+  - name: get_provider_capabilities
+    description: "Get capabilities of a specific provider"
+    parameters:
+      provider_name: { type: string }
+    returns:
+      type: object
+      properties:
+        supports_streaming: { type: boolean }
+        supports_tools: { type: boolean }
+        supported_models: { type: array, items: { type: string } }
+        rate_limits: { type: object }
+
+  - name: get_provider_status
+    description: "Check health and status of provider instance"
+    parameters:
+      provider_instance: { $ref: "#/definitions/LlmProvider" }
+    returns:
+      type: object
+      properties:
+        status: { type: string, enum: [ready, initializing, error] }
+        last_request_time: { type: string, format: date-time }
+        error_count: { type: integer }
+
+manipulation:
+  # Provider operations
+  - name: create_provider
+    description: "Create new provider instance"
+    parameters:
+      config: { $ref: "#/definitions/ProviderConfig" }
+    creates: { $ref: "#/definitions/LlmProvider" }
+
+  - name: configure_provider
+    description: "Configure existing provider instance"
+    parameters:
+      provider: { $ref: "#/definitions/LlmProvider" }
+      settings: { type: object }
+    modifies: { $ref: "#/definitions/LlmProvider" }
+
+  - name: destroy_provider
+    description: "Clean up provider instance"
+    parameters:
+      provider: { $ref: "#/definitions/LlmProvider" }
+    deletes: { $ref: "#/definitions/LlmProvider" }
+
+extract:
+  # Provider computations
+  - name: validate_provider_config
+    description: "Validate provider configuration"
+    input: { $ref: "#/definitions/ProviderConfig" }
+    output:
+      type: object
+      properties:
+        is_valid: { type: boolean }
+        errors: { type: array, items: { type: string } }
+        supported_features: { type: array, items: { type: string } }
+
+  - name: estimate_cost
+    description: "Estimate cost of LLM request"
+    input: { $ref: "#/definitions/GenerateConfig" }
+    output:
+      type: object
+      properties:
+        estimated_cost: { type: number }
+        currency: { type: string }
+        breakdown: { type: object }
+
+  - name: format_messages_for_provider
+    description: "Convert internal messages to provider-specific format"
+    input: { type: array, items: { $ref: "#/definitions/InternalMessage" } }
+    output: { type: string, description: "Provider-specific formatted messages" }
+
+movement:
+  # Provider data flow
+  - name: message_formatting
+    description: "Convert UMF messages to provider-specific format"
+    from: { type: array, items: { $ref: "#/definitions/InternalMessage" } }
+    to: "provider_request_format"
+    protocol: "ChatML_conversion"
+    boundaries: ["internal_to_external_format"]
+
+  - name: http_request_routing
+    description: "Route requests to external LLM APIs"
+    from: "formatted_request"
+    to: "llm_api_endpoints"
+    protocol: "HTTP/HTTPS"
+    boundaries: ["process_to_network"]
+
+  - name: wasm_boundary_crossing
+    description: "Cross WASM module boundaries for provider calls"
+    from: "host_process"
+    to: "wasm_module"
+    protocol: "WASI_interface"
+    boundaries: ["native_to_wasm"]
+
+  - name: response_parsing
+    description: "Parse provider responses back to internal format"
+    from: "provider_response"
+    to: { $ref: "#/definitions/GenerateResponse" }
+    protocol: "JSON_parsing"
+    boundaries: ["external_to_internal_format"]
+
+coordination:
+  # Provider coordination
+  - name: provider_selection
+    description: "Select appropriate provider based on requirements"
+    primitives:
+      - type: "capability_matching"
+        description: "Match required capabilities to provider features"
+      - type: "load_balancing"
+        description: "Distribute load across multiple provider instances"
+      - type: "fallback_routing"
+        description: "Route to backup providers on failure"
+
+  - name: request_rate_limiting
+    description: "Enforce rate limits across provider calls"
+    primitives:
+      - type: "token_bucket"
+        description: "Implement token bucket algorithm for rate limiting"
+      - type: "queue_management"
+        description: "Queue requests when rate limits are exceeded"
+      - type: "backoff_strategies"
+        description: "Implement exponential backoff for retries"
+
+  - name: streaming_coordination
+    description: "Handle streaming responses and backpressure"
+    primitives:
+      - type: "flow_control"
+        description: "Manage backpressure in streaming responses"
+      - type: "chunk_assembly"
+        description: "Assemble streaming chunks into complete responses"
+      - type: "timeout_handling"
+        description: "Handle timeouts in streaming connections"

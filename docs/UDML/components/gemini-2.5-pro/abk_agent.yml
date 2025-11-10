@@ -1,0 +1,34 @@
+name: abk::agent
+description: "Core agent runtime: wires components together, handles messages, tool-calls and sessions."
+udml:
+  information:
+    - description: "The agent's state, including the current conversation history (UMF messages), session ID, and status."
+      schema:
+        type: object
+        properties:
+          session_id: { type: string }
+          history: { type: array, items: { $ref: "umf.yml#InternalMessage" } }
+          status: { type: string, enum: ["running", "idle", "error"] }
+
+  access:
+    - description: "The agent's internal state is only accessible to the orchestration layer."
+
+  manipulation:
+    - description: "Append new messages (user, assistant, tool) to the conversation history."
+    - description: "Update the agent's status based on workflow events."
+
+  extract:
+    - description: "Extracts tool calls from the assistant's response (UMF `ContentBlock::ToolUse`)."
+    - description: "Extracts content from user messages to be used as input for tasks."
+
+  movement:
+    - description: "Receives configuration from `abk::cli`."
+    - description: "Sends messages to `abk::provider` for processing by an LLM."
+    - description: "Sends tool call requests to `CATS`."
+    - description: "Receives tool results from `CATS`."
+    - description: "Sends session data to `abk::checkpoint` for persistence."
+    - description: "Receives lifecycle instructions from `abk::lifecycle`."
+    - description: "Sends log events to `abk::observability`."
+
+  coordination:
+    - description: "Acts as the central hub, orchestrating the flow of data between all other components (`provider`, `CATS`, `lifecycle`, etc.) under the direction of `abk::orchestration`."

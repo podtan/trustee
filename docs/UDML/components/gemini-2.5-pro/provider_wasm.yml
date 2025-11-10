@@ -1,0 +1,27 @@
+name: Provider-WASM / Tanbal
+description: "WASM provider: a specific `LlmProvider` implementation that runs as a WASM module and can route requests to different backends like OpenAI, Anthropic, and GitHub Copilot."
+udml:
+  information:
+    - description: "Configuration for the backends it supports, read from environment variables (e.g., API keys, model names)."
+
+  access:
+    - description: "The WASM module is loaded by the host (`abk::provider`'s `WasmProvider`)."
+    - description: "It accesses host-provided functions for making HTTP requests and reading environment variables."
+
+  manipulation:
+    - description: "Does not directly manipulate host data, but creates requests to be sent to external APIs."
+
+  extract:
+    - description: "Formats a request from the host (a JSON representation of messages) into the specific format required by the target LLM backend (e.g., OpenAI API)."
+    - description: "Parses the HTTP response from the LLM backend into a standardized JSON format (representing UMF `GenerateResult`) to be returned to the host."
+    - description: "Handles streaming responses by parsing Server-Sent Events (SSE) and yielding JSON deltas."
+
+  movement:
+    - description: "Receives a request from the host (`abk::provider`) as a function call with JSON-serialized data."
+    - description: "Makes an outbound HTTP request to an LLM API via a host-provided function."
+    - description: "Receives the HTTP response body from the host."
+    - description: "Returns the parsed, standardized response to the host as a JSON string."
+
+  coordination:
+    - description: "Decouples the main agent executable from the specific logic and dependencies of various LLM clients. New backends can be added to the WASM provider without recompiling the agent."
+    - description: "Routes requests to the correct backend based on configuration."

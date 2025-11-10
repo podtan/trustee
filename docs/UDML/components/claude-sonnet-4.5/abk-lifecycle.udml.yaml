@@ -1,0 +1,209 @@
+# UDML Specification for abk[lifecycle] (WASM Lifecycle Templates & Classification)
+# This component manages WASM lifecycle plugins for agent morphing and template rendering
+
+information:
+  # Lifecycle data structures
+  - name: LifecyclePlugin
+    description: "WASM plugin interface for agent lifecycle management"
+    schema:
+      type: object
+      properties:
+        classify_task:
+          type: object
+          description: "Classify task to determine agent type"
+          parameters:
+            task_description: { type: string }
+          returns: { type: string, description: "Agent type identifier" }
+        load_template:
+          type: object
+          description: "Load template by name"
+          parameters:
+            template_name: { type: string }
+          returns: { type: string, description: "Template content" }
+        render_template:
+          type: object
+          description: "Render template with variables"
+          parameters:
+            template_name: { type: string }
+            variables: { type: object }
+          returns: { type: string, description: "Rendered content" }
+
+  - name: TemplateRegistry
+    description: "Registry of available templates in lifecycle plugins"
+    schema:
+      type: object
+      properties:
+        plugin_templates: 
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+        template_metadata:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              description: { type: string }
+              parameters: { type: array, items: { type: string } }
+              version: { type: string }
+
+  - name: TaskClassification
+    description: "Result of task classification for agent morphing"
+    schema:
+      type: object
+      properties:
+        agent_type: { type: string }
+        confidence_score: { type: number }
+        reasoning: { type: string }
+        required_capabilities: { type: array, items: { type: string } }
+
+access:
+  # Lifecycle access patterns
+  - name: list_available_lifecycles
+    description: "List all available lifecycle WASM plugins"
+    returns:
+      type: array
+      items:
+        type: object
+        properties:
+          name: { type: string }
+          version: { type: string }
+          supported_agent_types: { type: array, items: { type: string } }
+          path: { type: string }
+
+  - name: get_template_metadata
+    description: "Get metadata for a specific template"
+    parameters:
+      template_name: { type: string }
+    returns:
+      type: object
+      properties:
+        description: { type: string }
+        parameters: { type: array, items: { type: string } }
+        plugin_source: { type: string }
+
+  - name: get_lifecycle_status
+    description: "Check status of lifecycle plugin instance"
+    parameters:
+      lifecycle_instance: { $ref: "#/definitions/LifecyclePlugin" }
+    returns:
+      type: object
+      properties:
+        status: { type: string, enum: [loaded, running, error] }
+        loaded_templates: { type: integer }
+        last_classification_time: { type: string, format: date-time }
+
+manipulation:
+  # Lifecycle operations
+  - name: load_lifecycle_plugin
+    description: "Load WASM lifecycle plugin"
+    parameters:
+      plugin_path: { type: string }
+    creates: { $ref: "#/definitions/LifecyclePlugin" }
+
+  - name: unload_lifecycle_plugin
+    description: "Unload WASM lifecycle plugin"
+    parameters:
+      lifecycle: { $ref: "#/definitions/LifecyclePlugin" }
+    deletes: { $ref: "#/definitions/LifecyclePlugin" }
+
+  - name: register_template
+    description: "Register new template in lifecycle"
+    parameters:
+      lifecycle: { $ref: "#/definitions/LifecyclePlugin" }
+      template_name: { type: string }
+      template_content: { type: string }
+      metadata: { type: object }
+    modifies: { $ref: "#/definitions/TemplateRegistry" }
+
+extract:
+  # Lifecycle computations
+  - name: classify_task_type
+    description: "Determine appropriate agent type for task"
+    input: { type: string, description: "Task description" }
+    output: { $ref: "#/definitions/TaskClassification" }
+
+  - name: validate_template_syntax
+    description: "Validate template syntax and parameters"
+    input:
+      type: object
+      properties:
+        template_content: { type: string }
+        expected_parameters: { type: array, items: { type: string } }
+    output:
+      type: object
+      properties:
+        is_valid: { type: boolean }
+        errors: { type: array, items: { type: string } }
+        extracted_parameters: { type: array, items: { type: string } }
+
+  - name: generate_template_preview
+    description: "Generate preview of rendered template"
+    input:
+      type: object
+      properties:
+        template_name: { type: string }
+        sample_variables: { type: object }
+    output: { type: string }
+
+movement:
+  # Lifecycle data flow
+  - name: wasm_plugin_loading
+    description: "Load WASM modules into runtime"
+    from: "filesystem_wasm_files"
+    to: "runtime_plugin_instances"
+    protocol: "WASI_loading"
+    boundaries: ["filesystem_to_wasm_runtime"]
+
+  - name: template_data_flow
+    description: "Flow template content and variables across WASM boundary"
+    from: "host_template_requests"
+    to: "wasm_template_processing"
+    protocol: "WASM_function_calls"
+    boundaries: ["native_to_wasm_boundary"]
+
+  - name: classification_results
+    description: "Return classification results from WASM plugin"
+    from: "wasm_classification_logic"
+    to: "host_agent_selection"
+    protocol: "WASM_return_values"
+    boundaries: ["wasm_to_native_boundary"]
+
+  - name: rendered_content_flow
+    description: "Flow rendered template content back to host"
+    from: "wasm_template_engine"
+    to: "host_content_consumers"
+    protocol: "string_return"
+    boundaries: ["wasm_to_native_boundary"]
+
+coordination:
+  # Lifecycle coordination
+  - name: plugin_lifecycle_management
+    description: "Manage WASM plugin loading and unloading"
+    primitives:
+      - type: "plugin_discovery"
+        description: "Discover available WASM plugins in filesystem"
+      - type: "version_compatibility"
+        description: "Check plugin version compatibility"
+      - type: "resource_limits"
+        description: "Enforce resource limits on plugin execution"
+
+  - name: template_caching
+    description: "Cache loaded templates for performance"
+    primitives:
+      - type: "template_preloading"
+        description: "Preload frequently used templates"
+      - type: "cache_invalidation"
+        description: "Invalidate cache when templates change"
+      - type: "memory_management"
+        description: "Manage memory usage of cached templates"
+
+  - name: agent_morphing_coordination
+    description: "Coordinate agent type changes based on classification"
+    primitives:
+      - type: "state_preservation"
+        description: "Preserve agent state during morphing"
+      - type: "capability_switching"
+        description: "Switch available capabilities based on agent type"
+      - type: "template_transition"
+        description: "Transition to new template set for agent type"

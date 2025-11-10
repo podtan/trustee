@@ -1,0 +1,141 @@
+component: abk::agent
+description: "Core agent runtime that wires together all components and orchestrates the agent lifecycle"
+
+information:
+  - name: AgentConfig
+    description: "Runtime configuration for agent behavior (timeout, max_tokens, streaming)"
+    schema:
+      timeout_seconds: integer
+      max_tokens: integer
+      enable_streaming: boolean
+      session_id: string
+
+  - name: AgentState
+    description: "Current execution state of the agent"
+    schema:
+      messages: "Vec<InternalMessage>"
+      tool_results: "Vec<ToolResult>"
+      session_metadata: object
+
+  - name: ComponentRegistry
+    description: "Registry of wired components (provider, tools, lifecycle, etc.)"
+    schema:
+      provider: "Box<dyn LlmProvider>"
+      tool_registry: "ToolRegistry"
+      lifecycle_plugin: "LifecyclePlugin"
+      executor: "CommandExecutor"
+      checkpoint_manager: "CheckpointManager"
+      orchestrator: "WorkflowCoordinator"
+
+access:
+  - name: read_agent_config
+    description: "Access agent configuration from config loader"
+    rules:
+      - source: "abk::config::ConfigurationLoader"
+      - method: "get_agent_config()"
+      - visibility: "internal"
+
+  - name: read_session_state
+    description: "Access current session state for checkpointing"
+    rules:
+      - source: "abk::checkpoint::CheckpointManager"
+      - method: "load_session(session_id)"
+      - visibility: "internal"
+
+manipulation:
+  - name: create_agent
+    description: "Create new agent instance with wired components"
+    rules:
+      - input: "ComponentRegistry"
+      - operation: "Agent::new(components)"
+      - validation: "all components must be valid"
+
+  - name: update_agent_state
+    description: "Update agent state during execution"
+    rules:
+      - input: "InternalMessage | ToolResult"
+      - operation: "agent.state.messages.push(message)"
+      - constraints: "maintain message order"
+
+  - name: reset_agent_session
+    description: "Clear agent state for new session"
+    rules:
+      - operation: "agent.state = AgentState::default()"
+      - triggers: "session timeout | explicit reset"
+
+extract:
+  - name: derive_next_action
+    description: "Extract next action from LLM response"
+    rules:
+      - input: "GenerateResult"
+      - transform: "parse_tool_calls | extract_content"
+      - output: "ToolCall | FinalAnswer"
+
+  - name: summarize_execution
+    description: "Extract execution summary for observability"
+    rules:
+      - input: "ExecutionResult"
+      - transform: "extract_stdout | extract_stderr | extract_exit_code"
+      - output: "ToolResult"
+
+  - name: generate_session_summary
+    description: "Extract session metadata for checkpointing"
+    rules:
+      - input: "AgentState"
+      - transform: "count_messages | extract_duration | extract_tools_used"
+      - output: "SessionMetadata"
+
+movement:
+  - name: llm_request_routing
+    description: "Route messages to LLM provider"
+    rules:
+      - from: "Agent.messages"
+      - to: "LlmProvider.generate()"
+      - protocol: "UMF::ChatML formatted JSON"
+      - boundaries: "process boundary (WASM or HTTP)"
+
+  - name: tool_execution_routing
+    description: "Route tool calls to executor"
+    rules:
+      - from: "Agent.tool_calls"
+      - to: "CommandExecutor.execute()"
+      - protocol: "ToolCall struct"
+      - boundaries: "process boundary (shell execution)"
+
+  - name: lifecycle_template_routing
+    description: "Route template requests to lifecycle plugin"
+    rules:
+      - from: "Agent.template_requests"
+      - to: "LifecyclePlugin.render_template()"
+      - protocol: "template_name + context JSON"
+      - boundaries: "WASM plugin boundary"
+
+  - name: checkpoint_persistence
+    description: "Persist agent state to storage"
+    rules:
+      - from: "Agent.state"
+      - to: "CheckpointManager.save()"
+      - protocol: "serialized JSON"
+      - boundaries: "filesystem boundary"
+
+coordination:
+  - name: agent_lifecycle_coordination
+    description: "Coordinate agent initialization and execution phases"
+    primitives:
+      - init: "wire_components() -> validate() -> ready()"
+      - execute: "process_message() -> handle_tools() -> checkpoint()"
+      - cleanup: "save_state() -> cleanup_resources()"
+
+  - name: tool_orchestration
+    description: "Coordinate tool execution with LLM responses"
+    primitives:
+      - sequence: "llm_response -> extract_tools -> execute_tools -> collect_results -> continue"
+      - error_handling: "tool_failure -> log_error -> retry_or_continue"
+      - timeout: "execution_timeout -> cancel_tool -> report_error"
+
+  - name: session_management
+    description: "Coordinate session lifecycle and persistence"
+    primitives:
+      - resume: "load_checkpoint -> validate_state -> continue_execution"
+      - pause: "save_checkpoint -> release_resources"
+      - terminate: "final_checkpoint -> cleanup -> exit"

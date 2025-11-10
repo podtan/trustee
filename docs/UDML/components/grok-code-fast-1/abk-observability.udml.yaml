@@ -1,0 +1,119 @@
+component: abk::observability
+description: "Structured logging and telemetry for agent sessions and operations"
+
+information:
+  - name: LogEvent
+    description: "Structured log event"
+    schema:
+      timestamp: "DateTime<Utc>"
+      level: "LogLevel"
+      message: string
+      context: "HashMap<String, Value>"
+      session_id: "Option<String>"
+
+  - name: TelemetryData
+    description: "Telemetry metrics and traces"
+    schema:
+      operation: string
+      duration_ms: integer
+      success: boolean
+      metadata: "HashMap<String, Value>"
+
+  - name: ObservabilityConfig
+    description: "Configuration for logging and telemetry"
+    schema:
+      log_level: "LogLevel"
+      log_file: "Option<PathBuf>"
+      enable_telemetry: boolean
+
+access:
+  - name: read_log_config
+    description: "Access logging configuration"
+    rules:
+      - source: "abk::config::Configuration"
+      - method: "get_observability_config()"
+      - visibility: "internal"
+
+  - name: read_system_info
+    description: "Access system information for context"
+    rules:
+      - source: "system APIs"
+      - method: "get_hostname() | get_pid() | get_timestamp()"
+      - visibility: "internal"
+
+manipulation:
+  - name: create_log_event
+    description: "Create structured log event"
+    rules:
+      - input: "LogLevel + Message + Context"
+      - operation: "LogEvent::new(level, message, context)"
+      - constraints: "include session and timestamp"
+
+  - name: emit_log_event
+    description: "Emit log event to configured outputs"
+    rules:
+      - input: "LogEvent"
+      - operation: "logger.log(event)"
+      - validation: "output successful"
+
+  - name: record_telemetry
+    description: "Record telemetry data"
+    rules:
+      - input: "Operation + Duration + Success"
+      - operation: "telemetry.record(operation, duration, success)"
+      - constraints: "include relevant metadata"
+
+extract:
+  - name: extract_log_summary
+    description: "Extract summary from log events"
+    rules:
+      - input: "Vec<LogEvent>"
+      - transform: "count_by_level | extract_errors | calculate_duration"
+      - output: "LogSummary"
+
+  - name: derive_performance_metrics
+    description: "Extract performance metrics from telemetry"
+    rules:
+      - input: "TelemetryData"
+      - transform: "calculate_averages | identify_bottlenecks | detect_anomalies"
+      - output: "PerformanceMetrics"
+
+movement:
+  - name: log_output_routing
+    description: "Route log events to outputs"
+    rules:
+      - from: "LogEvent"
+      - to: "console or file or external service"
+      - protocol: "structured JSON or text format"
+      - boundaries: "output boundary (filesystem or network)"
+
+  - name: telemetry_collection
+    description: "Collect telemetry from components"
+    rules:
+      - from: "component operations"
+      - to: "TelemetryAggregator"
+      - protocol: "structured metrics"
+      - boundaries: "component communication boundary"
+
+  - name: context_propagation
+    description: "Propagate context across components"
+    rules:
+      - from: "parent context"
+      - to: "child operations"
+      - protocol: "context metadata"
+      - boundaries: "component call boundary"
+
+coordination:
+  - name: logging_pipeline
+    description: "Coordinate log event processing"
+    primitives:
+      - creation: "capture_event() -> add_context() -> structure_data()"
+      - routing: "determine_outputs() -> format_message() -> emit_to_destinations()"
+      - filtering: "check_log_level() -> apply_filters() -> suppress_if_needed()"
+
+  - name: telemetry_pipeline
+    description: "Coordinate telemetry data collection"
+    primitives:
+      - measurement: "start_timer() -> execute_operation() -> stop_timer()"
+      - aggregation: "collect_metrics() -> calculate_stats() -> store_data()"
+      - analysis: "detect_patterns() -> generate_alerts() -> report_anomalies()"

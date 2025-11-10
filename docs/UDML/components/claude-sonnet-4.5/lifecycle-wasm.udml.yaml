@@ -1,0 +1,207 @@
+# UDML Specification for Lifecycle-WASM (WASM Lifecycle Templates)
+# This component provides WASM lifecycle plugin that supplies templates, classification and rendering
+
+information:
+  # Lifecycle WASM data structures
+  - name: LifecycleWasm
+    description: "WASM module for agent lifecycle management"
+    schema:
+      type: object
+      properties:
+        module_path: { type: string }
+        instance: { type: string, description: "WASM instance handle" }
+        templates: { type: object, additionalProperties: { type: string } }
+        classification_rules: { type: object }
+        config: { type: object }
+
+  - name: TemplateDefinition
+    description: "Definition of a template with parameters and content"
+    schema:
+      type: object
+      properties:
+        name: { type: string }
+        content: { type: string }
+        parameters: { type: array, items: { type: string } }
+        description: { type: string }
+        category: { type: string }
+
+  - name: ClassificationResult
+    description: "Result of task classification for agent type selection"
+    schema:
+      type: object
+      properties:
+        agent_type: { type: string }
+        confidence: { type: number }
+        reasoning: { type: string }
+        required_templates: { type: array, items: { type: string } }
+        metadata: { type: object }
+
+  - name: RenderedContent
+    description: "Result of template rendering with variables"
+    schema:
+      type: object
+      properties:
+        template_name: { type: string }
+        content: { type: string }
+        variables_used: { type: object }
+        render_time_ms: { type: integer }
+
+access:
+  # Lifecycle WASM access patterns
+  - name: list_available_templates
+    description: "List all templates provided by lifecycle"
+    returns:
+      type: array
+      items: { $ref: "#/definitions/TemplateDefinition" }
+
+  - name: get_template_definition
+    description: "Get detailed definition of specific template"
+    parameters:
+      template_name: { type: string }
+    returns: { $ref: "#/definitions/TemplateDefinition" }
+
+  - name: get_lifecycle_capabilities
+    description: "Get capabilities and supported agent types"
+    returns:
+      type: object
+      properties:
+        supported_agent_types: { type: array, items: { type: string } }
+        available_templates: { type: integer }
+        classification_features: { type: array, items: { type: string } }
+
+  - name: get_lifecycle_status
+    description: "Get status of lifecycle WASM instance"
+    parameters:
+      lifecycle_instance: { $ref: "#/definitions/LifecycleWasm" }
+    returns:
+      type: object
+      properties:
+        status: { type: string, enum: [loaded, running, error] }
+        active_templates: { type: integer }
+        memory_usage: { type: integer }
+
+manipulation:
+  # Lifecycle WASM operations
+  - name: load_lifecycle_wasm
+    description: "Load lifecycle WASM module"
+    parameters:
+      module_path: { type: string }
+      config: { type: object }
+    creates: { $ref: "#/definitions/LifecycleWasm" }
+
+  - name: classify_task
+    description: "Classify task to determine agent type"
+    parameters:
+      lifecycle: { $ref: "#/definitions/LifecycleWasm" }
+      task_description: { type: string }
+      context: { type: object }
+    creates: { $ref: "#/definitions/ClassificationResult" }
+
+  - name: load_template
+    description: "Load template content by name"
+    parameters:
+      lifecycle: { $ref: "#/definitions/LifecycleWasm" }
+      template_name: { type: string }
+    creates: { type: string, description: "Template content" }
+
+  - name: render_template
+    description: "Render template with provided variables"
+    parameters:
+      lifecycle: { $ref: "#/definitions/LifecycleWasm" }
+      template_name: { type: string }
+      variables: { type: object }
+    creates: { $ref: "#/definitions/RenderedContent" }
+
+extract:
+  # Lifecycle WASM computations
+  - name: validate_template_syntax
+    description: "Validate template syntax and structure"
+    input: { $ref: "#/definitions/TemplateDefinition" }
+    output:
+      type: object
+      properties:
+        is_valid: { type: boolean }
+        errors: { type: array, items: { type: string } }
+        extracted_variables: { type: array, items: { type: string } }
+
+  - name: analyze_template_complexity
+    description: "Analyze complexity metrics of template"
+    input: { $ref: "#/definitions/TemplateDefinition" }
+    output:
+      type: object
+      properties:
+        variable_count: { type: integer }
+        nesting_depth: { type: integer }
+        estimated_render_time: { type: number }
+        complexity_score: { type: number }
+
+  - name: generate_template_preview
+    description: "Generate preview of template with sample data"
+    input:
+      type: object
+      properties:
+        template: { $ref: "#/definitions/TemplateDefinition" }
+        sample_variables: { type: object }
+    output: { type: string }
+
+movement:
+  # Lifecycle WASM data flow
+  - name: wasm_lifecycle_loading
+    description: "Load lifecycle WASM modules"
+    from: "filesystem_wasm_files"
+    to: "wasm_lifecycle_instances"
+    protocol: "WASI_loading"
+    boundaries: ["filesystem_to_wasm_runtime"]
+
+  - name: template_data_transfer
+    description: "Transfer template content across WASM boundary"
+    from: "wasm_template_storage"
+    to: "host_template_cache"
+    protocol: "string_transfer"
+    boundaries: ["wasm_to_native"]
+
+  - name: classification_request_routing
+    description: "Route classification requests to WASM logic"
+    from: "task_descriptions"
+    to: "wasm_classification_engine"
+    protocol: "function_calls"
+    boundaries: ["native_to_wasm"]
+
+  - name: rendered_content_return
+    description: "Return rendered template content to host"
+    from: "wasm_template_renderer"
+    to: "host_content_consumers"
+    protocol: "string_return"
+    boundaries: ["wasm_to_native"]
+
+coordination:
+  # Lifecycle WASM coordination
+  - name: template_management
+    description: "Manage template loading, caching, and rendering"
+    primitives:
+      - type: "template_caching"
+        description: "Cache frequently used templates in memory"
+      - type: "lazy_loading"
+        description: "Load templates on demand to reduce startup time"
+      - type: "template_versioning"
+        description: "Handle template versioning and compatibility"
+
+  - name: agent_type_coordination
+    description: "Coordinate agent type selection and morphing"
+    primitives:
+      - type: "classification_caching"
+        description: "Cache classification results for similar tasks"
+      - type: "confidence_thresholding"
+        description: "Apply confidence thresholds for classification"
+      - type: "fallback_classification"
+        description: "Provide fallback classification when uncertain"
+
+  - name: rendering_pipeline
+    description: "Coordinate template rendering with variable substitution"
+    primitives:
+      - type: "variable_validation"
+        description: "Validate provided variables against template requirements"
+      - type: "error_handling"
+        description: "Handle rendering errors gracefully"
+      - type: "performance_monitoring"
+        description: "Monitor rendering performance and resource usage"

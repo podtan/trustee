@@ -1,0 +1,421 @@
+---
+# UDML: CATS — Code Agent Tool System
+# Tool registry, implementations, and execution interface
+
+metadata:
+  name: "CATS"
+  version: "0.1.2"
+  owner: "Code Agent Tool System"
+  responsibility: "Tool registry management, tool implementations, tool execution interface"
+
+information:
+  # Tool definition
+  tool_definition:
+    - field: tool_id
+      type: String
+      semantics: "Unique tool identifier (e.g., 'file_read', 'run_command')"
+    
+    - field: name
+      type: String
+      semantics: "Human-readable tool name"
+    
+    - field: description
+      type: String
+      semantics: "Tool description (shown to LLM)"
+    
+    - field: parameters
+      type: JSONSchema
+      semantics: "JSON schema of tool input parameters"
+    
+    - field: returns
+      type: JSONSchema
+      semantics: "JSON schema of tool output/return value"
+    
+    - field: tags
+      type: Vec<String>
+      semantics: "Tool tags (e.g., 'file_system', 'execution', 'search')"
+    
+    - field: access_level
+      type: AccessLevel
+      enum: ["public", "internal", "admin"]
+      semantics: "Whether tool is callable by agents"
+
+  # Tool parameter schema
+  tool_parameter:
+    - field: name
+      type: String
+      semantics: "Parameter name"
+    
+    - field: type
+      type: String
+      enum: ["string", "number", "boolean", "array", "object"]
+      semantics: "Parameter type"
+    
+    - field: description
+      type: String
+      semantics: "Parameter description"
+    
+    - field: required
+      type: bool
+      semantics: "Whether parameter is required"
+    
+    - field: default
+      type: Option<Value>
+      semantics: "Default value if not provided"
+    
+    - field: enum_values
+      type: Option<Vec<Value>>
+      semantics: "Allowed values (if restricted)"
+
+  # Tool execution call
+  tool_call:
+    - field: tool_id
+      type: String
+      semantics: "Which tool to call"
+    
+    - field: call_id
+      type: String
+      semantics: "Unique ID for this invocation (used in results)"
+    
+    - field: input
+      type: Value (JSON)
+      semantics: "Tool input parameters (validated against schema)"
+
+  # Tool execution result
+  tool_result:
+    - field: call_id
+      type: String
+      semantics: "Links to original tool_call"
+    
+    - field: success
+      type: bool
+      semantics: "Whether execution succeeded"
+    
+    - field: output
+      type: Value (JSON)
+      semantics: "Tool output (or null if error)"
+    
+    - field: error
+      type: Option<String>
+      semantics: "Error message if failed"
+    
+    - field: execution_time_ms
+      type: u64
+      semantics: "How long execution took"
+
+  # Tool categories
+  tool_category:
+    - category: "File Navigation"
+      tools:
+        - "open - Open and display file with line numbers"
+        - "goto - Jump to specific line in file"
+        - "scroll_up - Scroll up in current file view"
+        - "scroll_down - Scroll down in current file view"
+    
+    - category: "Search"
+      tools:
+        - "find_file - Search for files by name or pattern"
+        - "search_file - Search content within a file"
+        - "search_dir - Recursively search directory contents"
+    
+    - category: "Editing"
+      tools:
+        - "create_file - Create new file with content"
+        - "replace_text - Replace text in existing file"
+        - "insert_text - Insert text at specific location"
+        - "delete_text - Delete text range from file"
+        - "delete_line - Delete specific line"
+        - "overwrite_file - Overwrite entire file content"
+        - "delete_function - Delete function from file (Rust-aware)"
+    
+    - category: "File Management"
+      tools:
+        - "delete_path - Delete file or directory"
+        - "move_path - Move or rename file/directory"
+        - "copy_path - Copy file or directory"
+        - "create_directory - Create directory"
+    
+    - category: "Execution"
+      tools:
+        - "run_command - Execute shell command safely"
+    
+    - category: "System"
+      tools:
+        - "filemap - Show directory structure"
+
+  # Tool registry state
+  tool_registry:
+    - field: tools
+      type: HashMap<String, ToolDefinition>
+      semantics: "All registered tools by ID"
+    
+    - field: enabled_tools
+      type: HashSet<String>
+      semantics: "Tools allowed to be called (subset of registered)"
+    
+    - field: disabled_tools
+      type: HashSet<String>
+      semantics: "Tools disabled for this session"
+    
+    - field: tool_execution_limits
+      type: HashMap<String, ExecutionLimit>
+      semantics: "Per-tool execution limits (timeout, max_calls, etc.)"
+
+access:
+  # Tool discovery
+  discovery_access:
+    - query: "list_tools() -> Vec<ToolDefinition>"
+      visibility: "Public"
+      semantics: "Get all available tools"
+    
+    - query: "list_enabled_tools() -> Vec<ToolDefinition>"
+      visibility: "Public"
+      semantics: "Get tools callable in current session"
+    
+    - query: "get_tool(tool_id: &str) -> Option<&ToolDefinition>"
+      visibility: "Public"
+      semantics: "Get specific tool definition"
+    
+    - query: "find_tools_by_tag(tag: &str) -> Vec<ToolDefinition>"
+      visibility: "Public"
+      semantics: "Find tools matching tag"
+
+  # Tool execution
+  execution_access:
+    - query: "execute_tool(call: &ToolCall) -> Result<ToolResult, ExecutionError>"
+      visibility: "Public"
+      semantics: "Execute tool call and return result"
+      errors:
+        - "ToolNotFound"
+        - "ToolDisabled"
+        - "InvalidInput (schema validation failure)"
+        - "ExecutionError (tool execution failed)"
+        - "Timeout"
+
+  # Tool validation
+  validation_access:
+    - query: "validate_tool_input(tool_id: &str, input: &Value) -> Result<(), ValidationError>"
+      visibility: "Public"
+      semantics: "Validate input against tool schema"
+
+manipulation:
+  # Tool registration
+  registration_operations:
+    - operation: "register_tool(definition: ToolDefinition) -> Result<(), Error>"
+      semantics: "Register new tool with registry"
+      precondition: "Tool ID is unique, schema is valid"
+      postcondition: "Tool available in registry"
+    
+    - operation: "unregister_tool(tool_id: &str) -> Result<(), Error>"
+      semantics: "Remove tool from registry"
+      postcondition: "Tool no longer available"
+
+  # Tool enablement
+  enablement_operations:
+    - operation: "enable_tool(tool_id: &str) -> Result<(), Error>"
+      semantics: "Allow tool to be called"
+      precondition: "Tool is registered"
+      postcondition: "Tool in enabled set"
+    
+    - operation: "disable_tool(tool_id: &str) -> Result<(), Error>"
+      semantics: "Prevent tool from being called"
+      precondition: "Tool is registered"
+      postcondition: "Tool in disabled set"
+
+  # Tool execution
+  execution_operations:
+    - operation: "execute_tool_sync(call: &ToolCall) -> Result<ToolResult, Error>"
+      semantics: "Execute tool call synchronously"
+      precondition: "Tool is enabled, input is valid"
+      postcondition: "ToolResult with output or error"
+      timeout: "Enforced via abk[executor] (for run_command) or per-tool limit"
+
+extract:
+  # Tool input extraction
+  input_extraction:
+    - extract: "extract_tool_parameters(call: &ToolCall) -> HashMap<String, Value>"
+      rule: "Parse and validate tool call input against schema"
+      input_owner: "CATS (tool call)"
+      output_owner: "Tool implementation"
+      logic: "Deserialize JSON input, validate against schema, extract individual parameters"
+
+  # Tool output extraction
+  output_extraction:
+    - extract: "extract_tool_output(raw_output: Value) -> Value"
+      rule: "Extract relevant output from tool execution"
+      input_owner: "Tool implementation"
+      output_owner: "CATS"
+      logic: "Format tool result according to tool schema"
+
+  # Tool metadata extraction
+  metadata_extraction:
+    - extract: "extract_tool_capabilities() -> Vec<CapabilityDescriptor>"
+      rule: "Enumerate tool capabilities for agent planning"
+      input_owner: "CATS (tool registry)"
+      output_owner: "abk::agent (for task planning)"
+      capabilities:
+        - "category: File navigation, search, editing, etc."
+        - "parameters: input schema"
+        - "constraints: limitations, safety rules"
+
+movement:
+  # Tool invocation flow
+  invocation_flow:
+    - from: "abk::agent"
+      to: "CATS::ToolRegistry"
+      data: "ToolCall (tool_id, input, call_id)"
+      protocol: "Function call (in-process)"
+      semantics: "Agent requests tool execution"
+    
+    - from: "CATS"
+      to: "CATS"
+      data: "Validate input against schema"
+      protocol: "In-process validation"
+      semantics: "Ensure input conforms to tool spec"
+    
+    - from: "CATS"
+      to: "Tool implementation"
+      data: "Validated parameters"
+      protocol: "Function call (in-process)"
+      semantics: "Execute tool"
+
+  # Tool result flow
+  result_flow:
+    - from: "Tool implementation"
+      to: "CATS"
+      data: "Tool output (JSON or structured data)"
+      protocol: "Function return or error"
+      semantics: "Tool returns result"
+    
+    - from: "CATS"
+      to: "abk::agent"
+      data: "ToolResult (call_id, success, output, execution_time)"
+      protocol: "Function return (in-process)"
+      semantics: "Agent receives tool result"
+
+  # Execution delegation
+  delegation_flow:
+    - from: "CATS::run_command tool"
+      to: "abk[executor]::CommandExecutor"
+      data: "ExecutionRequest (command, args, timeout)"
+      protocol: "Function call (in-process)"
+      semantics: "run_command delegates to executor for safe execution"
+    
+    - from: "abk[executor]"
+      to: "CATS"
+      data: "ExecutionResult (exit_code, stdout, stderr)"
+      protocol: "Function return (in-process)"
+      semantics: "Return result to tool registry"
+
+coordination:
+  # Tool execution lifecycle
+  lifecycle:
+    - phase: "Tool Discovery"
+      action: "Agent determines available tools"
+      owner: "CATS"
+      semantics: "Agent lists enabled tools via list_enabled_tools()"
+    
+    - phase: "Tool Selection"
+      action: "LLM provider selects tool to call (if tool_choice enabled)"
+      owner: "abk[provider]"
+      semantics: "Provider returns tool call in response"
+    
+    - phase: "Input Validation"
+      action: "Validate tool input against schema"
+      owner: "CATS"
+      error_handling: "If invalid, return validation error (don't execute)"
+    
+    - phase: "Tool Execution"
+      action: "Execute tool (delegate to implementation)"
+      owner: "CATS (dispatcher) + Tool implementation"
+      timeout: "Enforced per tool or globally"
+    
+    - phase: "Result Formatting"
+      action: "Format tool result as ToolResult"
+      owner: "CATS"
+      semantics: "Include call_id, success flag, output, execution_time"
+    
+    - phase: "Result Integration"
+      action: "Add tool result to agent context"
+      owner: "abk::agent"
+      semantics: "Result included in next LLM message"
+
+  # Tool categories and capabilities
+  tool_organization:
+    - category: "File Navigation"
+      purpose: "Safe bounded file viewing (windowed)"
+      use_case: "Explore codebase without loading entire files"
+    
+    - category: "Search"
+      purpose: "Find files and content"
+      use_case: "Locate relevant code, understand structure"
+    
+    - category: "Editing"
+      purpose: "Modify files safely with constraints"
+      use_case: "Make targeted changes, avoid accidental overwrites"
+    
+    - category: "File Management"
+      purpose: "Create, move, delete files/dirs"
+      use_case: "Organize code, create new modules"
+    
+    - category: "Execution"
+      purpose: "Run commands safely in sandbox"
+      use_case: "Test code, run builds, execute scripts"
+    
+    - category: "System"
+      purpose: "System information and utilities"
+      use_case: "Understand project structure"
+
+  # Error handling
+  error_handling:
+    - error: "Tool not found"
+      handler: "Return ToolNotFound error"
+      logging: "Log warning (LLM may have hallucinated tool)"
+    
+    - error: "Tool disabled"
+      handler: "Return ToolDisabled error"
+      logging: "Log debug (tool disabled by policy)"
+    
+    - error: "Invalid input schema"
+      handler: "Return ValidationError with schema mismatch details"
+      logging: "Log debug (LLM input error)"
+    
+    - error: "Tool execution fails"
+      handler: "Capture error message and return ToolResult with error"
+      logging: "Log error via abk[observability]"
+    
+    - error: "Tool timeout"
+      handler: "Terminate tool execution and return Timeout error"
+      logging: "Log warning via abk[observability]"
+
+  # Tool result usage
+  result_usage:
+    - logic: "If tool succeeds, add ToolResult to agent context"
+    - logic: "Agent prepares next message with tool result"
+    - logic: "abk[lifecycle] may render observation template (format result)"
+    - logic: "Next LLM request includes tool result"
+    - logic: "LLM can decide to call more tools or finish"
+
+dependencies:
+  internal:
+    - "UMF" # ToolCall and ToolResult format
+    - "abk[executor]" # For run_command tool
+    - "abk[config]" # Tool configuration
+    - "abk[observability]" # Logging and metrics
+  
+  external:
+    - "serde_json" # JSON schema validation
+    - "jsonschema" # Schema validation library
+
+notes: |
+  - CATS is the tool registry and execution system for agents.
+  - All tools are defined via schema (JSON schema for parameters and returns).
+  - Tools are registered at startup and can be enabled/disabled per session.
+  - Tool execution is synchronous but delegated to implementations.
+  - run_command tool delegates to abk[executor] for safe sandboxed execution.
+  - Tool results include metadata (execution time, success flag) for observability.
+  - Input validation is strict; invalid inputs are rejected before execution.
+  - Tool timeout is enforced per tool or globally via abk[executor].
+  - Tool categories organize tools by functionality (file, search, edit, execute, etc.).
+  - LLM receives tool schema and can request tool calls in responses.
+  - Tool results are formatted and integrated into agent context for next iteration.

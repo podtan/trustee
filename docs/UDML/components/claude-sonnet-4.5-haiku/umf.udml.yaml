@@ -1,0 +1,455 @@
+---
+# UDML: UMF — Universal Message Format
+# Internal message format, content blocks, tool calls/results, ChatML helpers
+
+metadata:
+  name: "UMF"
+  version: "0.1.3"
+  owner: "Universal Message Format"
+  responsibility: "Message representation, content blocks, ChatML formatting, streaming support"
+
+information:
+  # Internal message structure
+  internal_message:
+    - field: id
+      type: String
+      semantics: "Unique message identifier"
+    
+    - field: role
+      type: Role
+      enum: ["user", "assistant", "system", "tool"]
+      semantics: "Message originator"
+    
+    - field: content
+      type: MessageContent
+      enum: ["Text", "Blocks", "ToolCall", "ToolResult"]
+      semantics: "Message content (flexible representation)"
+    
+    - field: metadata
+      type: HashMap<String, Value>
+      semantics: "Optional metadata (model, tokens, timestamp, etc.)"
+    
+    - field: tool_call_id
+      type: Option<String>
+      semantics: "If this message is a tool result, ID of original tool call"
+    
+    - field: tool_name
+      type: Option<String>
+      semantics: "If this message is a tool result, name of tool"
+
+  # Message content types
+  message_content_text:
+    - field: value
+      type: String
+      semantics: "Plain text content"
+
+  message_content_blocks:
+    - field: blocks
+      type: Vec<ContentBlock>
+      semantics: "Structured content blocks (mixed types)"
+
+  message_content_tool_call:
+    - field: tool_calls
+      type: Vec<ToolCall>
+      semantics: "Tool invocation requests"
+
+  message_content_tool_result:
+    - field: results
+      type: Vec<ToolResult>
+      semantics: "Tool execution results"
+
+  # Content block
+  content_block:
+    - block_type: "Text"
+      fields:
+        - field: text
+          type: String
+          semantics: "Text content"
+    
+    - block_type: "ToolUse"
+      fields:
+        - field: id
+          type: String
+          semantics: "Unique tool call ID"
+        - field: name
+          type: String
+          semantics: "Tool name"
+        - field: input
+          type: Value (JSON)
+          semantics: "Tool parameters (JSON object)"
+    
+    - block_type: "ToolResult"
+      fields:
+        - field: tool_use_id
+          type: String
+          semantics: "ID of original ToolUse block"
+        - field: content
+          type: String
+          semantics: "Tool result output"
+        - field: is_error
+          type: bool
+          semantics: "Whether result is an error"
+
+  # Tool call structure
+  tool_call:
+    - field: id
+      type: String
+      semantics: "Unique identifier for this tool invocation"
+    
+    - field: name
+      type: String
+      semantics: "Tool name (e.g., 'file_read')"
+    
+    - field: input
+      type: Value (JSON object)
+      semantics: "Tool parameters"
+
+  # Tool result structure
+  tool_result:
+    - field: tool_use_id
+      type: String
+      semantics: "ID linking to original ToolCall"
+    
+    - field: content
+      type: String
+      semantics: "Tool execution result (stdout, file contents, etc.)"
+    
+    - field: is_error
+      type: bool
+      semantics: "Whether result is an error message"
+
+  # ChatML string format (provider-ready)
+  chatml_format:
+    - format: |
+        <|im_start|>system
+        {system_instruction}
+        <|im_end|>
+        <|im_start|>user
+        {user_message}
+        <|im_end|>
+        <|im_start|>assistant
+        {assistant_response}
+        <|im_end|>
+    
+    - semantics: "Standard ChatML format for LLM providers"
+    - note: "Tool calls and results are encoded as JSON blocks within message content"
+
+  # Streaming delta
+  streaming_delta:
+    - field: delta_type
+      type: DeltaType
+      enum: ["text", "tool_call_start", "tool_call_input", "tool_call_end", "stop"]
+      semantics: "Type of streaming update"
+    
+    - field: content
+      type: Option<String>
+      semantics: "Text content (for text deltas)"
+    
+    - field: tool_call_id
+      type: Option<String>
+      semantics: "For tool_call_* deltas, tool call ID"
+    
+    - field: tool_name
+      type: Option<String>
+      semantics: "For tool_call_start, tool name"
+    
+    - field: finish_reason
+      type: Option<FinishReason>
+      semantics: "For stop delta, why generation ended"
+
+access:
+  # Message creation
+  message_creation:
+    - query: "Message::user(content: &str) -> Message"
+      visibility: "Public"
+      semantics: "Create user message"
+    
+    - query: "Message::assistant(content: &str) -> Message"
+      visibility: "Public"
+      semantics: "Create assistant message"
+    
+    - query: "Message::system(content: &str) -> Message"
+      visibility: "Public"
+      semantics: "Create system message"
+    
+    - query: "Message::tool_result(tool_use_id: &str, content: &str, is_error: bool) -> Message"
+      visibility: "Public"
+      semantics: "Create tool result message"
+
+  # Message formatting
+  formatting_access:
+    - query: "ChatMLFormatter::format_messages(messages: &[Message]) -> String"
+      visibility: "Public"
+      semantics: "Convert messages to ChatML string for provider"
+    
+    - query: "ChatMLFormatter::parse_chatml(text: &str) -> Result<Vec<Message>, ParseError>"
+      visibility: "Public"
+      semantics: "Parse ChatML string back to messages"
+
+  # Content block operations
+  content_access:
+    - query: "ContentBlock::text(text: &str) -> ContentBlock"
+      visibility: "Public"
+      semantics: "Create text block"
+    
+    - query: "ContentBlock::tool_use(id: &str, name: &str, input: Value) -> ContentBlock"
+      visibility: "Public"
+      semantics: "Create tool use block"
+    
+    - query: "ContentBlock::tool_result(tool_use_id: &str, content: &str) -> ContentBlock"
+      visibility: "Public"
+      semantics: "Create tool result block"
+
+  # Streaming operations
+  streaming_access:
+    - query: "StreamingResponse::from_sse_event(event: &str) -> Result<StreamingDelta, ParseError>"
+      visibility: "Public"
+      semantics: "Parse SSE event to streaming delta"
+    
+    - query: "StreamingDelta::accumulate(deltas: &[StreamingDelta]) -> Message"
+      visibility: "Public"
+      semantics: "Accumulate deltas into complete message"
+
+manipulation:
+  # Message construction
+  message_building:
+    - operation: "builder.with_text(content: &str) -> MessageBuilder"
+      semantics: "Add text content to message"
+    
+    - operation: "builder.with_tool_call(id: &str, name: &str, input: Value) -> MessageBuilder"
+      semantics: "Add tool call to message"
+    
+    - operation: "builder.with_metadata(key: &str, value: Value) -> MessageBuilder"
+      semantics: "Add metadata to message"
+    
+    - operation: "builder.build() -> Message"
+      semantics: "Build final message"
+
+  # Content block mutation
+  block_mutation:
+    - operation: "message.add_block(block: ContentBlock)"
+      semantics: "Append content block to message"
+    
+    - operation: "message.set_metadata(key: &str, value: Value)"
+      semantics: "Set message metadata"
+
+extract:
+  # Tool call extraction
+  tool_extraction:
+    - extract: "extract_tool_calls(message: &Message) -> Vec<ToolCall>"
+      rule: "Extract all tool calls from message content"
+      input_owner: "UMF (message)"
+      output_owner: "abk::agent or CATS"
+      logic: "Search for ToolUse blocks or parse JSON tool_calls section"
+    
+    - extract: "extract_tool_results(message: &Message) -> Vec<ToolResult>"
+      rule: "Extract all tool results from message content"
+      input_owner: "UMF (message)"
+      output_owner: "abk::agent"
+      logic: "Search for ToolResult blocks or parse JSON tool_results section"
+
+  # Text extraction
+  text_extraction:
+    - extract: "extract_text_content(message: &Message) -> String"
+      rule: "Concatenate all text from message"
+      input_owner: "UMF (message)"
+      output_owner: "Agent or UI"
+      logic: "Join text blocks and extract text from mixed-block messages"
+
+  # Streaming accumulation
+  streaming_extraction:
+    - extract: "accumulate_streaming_response(deltas: Vec<StreamingDelta>) -> Message"
+      rule: "Reconstruct message from streaming deltas"
+      input_owner: "Stream of StreamingDelta events"
+      output_owner: "abk::agent"
+      logic: |
+        Initialize empty message
+        For each delta:
+          - If text delta, append to text_buffer
+          - If tool_call_start, begin new tool call
+          - If tool_call_input, append to current tool call input
+          - If tool_call_end, finalize tool call
+          - If stop, mark complete
+        Return reconstructed message
+
+movement:
+  # Message flow through system
+  message_flow:
+    - from: "abk::agent"
+      to: "UMF::ChatMLFormatter"
+      data: "Vec<InternalMessage>"
+      protocol: "Function call (in-process)"
+      semantics: "Format conversation for provider"
+    
+    - from: "UMF::ChatMLFormatter"
+      to: "abk[provider]"
+      data: "ChatML string (provider-ready format)"
+      protocol: "Function call (in-process)"
+      semantics: "Provider receives formatted messages"
+    
+    - from: "abk[provider]"
+      to: "UMF::ChatMLFormatter"
+      data: "GenerateResponse or SSE stream"
+      protocol: "Function return or streaming"
+      semantics: "Provider returns response"
+    
+    - from: "UMF"
+      to: "abk::agent"
+      data: "Parsed InternalMessage (with tool calls or text)"
+      protocol: "Function return (in-process)"
+      semantics: "Agent receives message"
+
+  # Tool call flow
+  tool_call_flow:
+    - from: "abk::agent"
+      to: "CATS::ToolRegistry"
+      data: "ToolCall (extracted from message)"
+      protocol: "Function call (in-process)"
+      semantics: "Execute tool from message"
+    
+    - from: "CATS"
+      to: "UMF"
+      data: "ToolResult"
+      protocol: "Structured data"
+      semantics: "Tool result formatted for message integration"
+    
+    - from: "abk::agent"
+      to: "abk[lifecycle]::LifecycleLoader"
+      data: "ToolResult + template context"
+      protocol: "Function call (in-process)"
+      condition: "If using lifecycle templates"
+      semantics: "Render observation template"
+
+  # Streaming flow
+  streaming_flow:
+    - from: "abk[provider]"
+      to: "HTTP stream (SSE)"
+      data: "streaming enabled in config"
+      protocol: "HTTP Connection with streaming"
+      semantics: "Provider streams response"
+    
+    - from: "HTTP stream"
+      to: "UMF::StreamingResponse"
+      data: "SSE events (data: {...})"
+      protocol: "HTTP stream"
+      semantics: "Receive SSE events"
+    
+    - from: "UMF::StreamingResponse"
+      to: "abk::agent"
+      data: "AsyncIterator<StreamingDelta>"
+      protocol: "Async iterator"
+      semantics: "Agent consumes deltas incrementally"
+
+coordination:
+  # Message lifecycle
+  lifecycle:
+    - phase: "Message Creation"
+      action: "Agent creates messages (user input, tool results)"
+      owner: "abk::agent"
+      output: "InternalMessage objects"
+    
+    - phase: "Message Accumulation"
+      action: "Collect messages into conversation history"
+      owner: "abk::agent"
+      semantics: "Build context for next provider call"
+    
+    - phase: "ChatML Formatting"
+      action: "Convert messages to ChatML string"
+      owner: "UMF::ChatMLFormatter"
+      input: "Vec<InternalMessage>"
+      output: "ChatML string"
+    
+    - phase: "Provider Request"
+      action: "Send ChatML to LLM provider"
+      owner: "abk[provider]"
+      semantics: "Provider handles format-specific encoding"
+    
+    - phase: "Response Parsing"
+      action: "Parse provider response to InternalMessage"
+      owner: "UMF (or Provider)"
+      semantics: "Extract content and tool calls"
+    
+    - phase: "Message Integration"
+      action: "Add response to conversation history"
+      owner: "abk::agent"
+      semantics: "Ready for next iteration or checkpointing"
+
+  # Tool call handling
+  tool_call_workflow:
+    - step: 1
+      action: "LLM response contains tool calls"
+      owner: "abk[provider]"
+    
+    - step: 2
+      action: "Extract tool calls from message"
+      owner: "UMF or abk::agent"
+      output: "Vec<ToolCall>"
+    
+    - step: 3
+      action: "For each tool call, execute tool"
+      owner: "CATS::ToolRegistry"
+      loop: "Execute tool, collect ToolResult"
+    
+    - step: 4
+      action: "Format tool results as ToolResult messages"
+      owner: "UMF or abk::agent"
+      semantics: "Create message with tool results"
+    
+    - step: 5
+      action: "Add tool results to conversation history"
+      owner: "abk::agent"
+    
+    - step: 6
+      action: "Next LLM request includes tool results"
+      owner: "abk::agent"
+      semantics: "LLM can see outcomes and continue"
+
+  # Streaming accumulation
+  streaming_workflow:
+    - step: 1
+      action: "Enable streaming in config"
+      owner: "abk[config]"
+    
+    - step: 2
+      action: "Provider returns AsyncIterator<StreamingDelta>"
+      owner: "abk[provider]"
+    
+    - step: 3
+      action: "Agent consumes deltas one by one"
+      owner: "abk::agent"
+      semantics: "Real-time response generation"
+    
+    - step: 4
+      action: "Accumulate deltas into buffers"
+      owner: "UMF::StreamingResponse"
+      logic: "text_buffer for text, tool_calls for tool_call_* deltas"
+    
+    - step: 5
+      action: "When stream ends (stop delta), reconstruct message"
+      owner: "UMF"
+      output: "Complete InternalMessage"
+    
+    - step: 6
+      action: "Add to conversation history"
+      owner: "abk::agent"
+
+dependencies:
+  internal:
+    - None (UMF is foundational)
+  
+  external:
+    - "serde" # Serialization/deserialization
+    - "serde_json" # JSON encoding
+    - "uuid" # Message ID generation
+
+notes: |
+  - UMF is the canonical internal message format for all components.
+  - Messages are immutable after creation; content is built via builder pattern.
+  - ChatML formatting standardizes message exchange with LLM providers.
+  - Tool calls and results are represented as content blocks for rich structure.
+  - Streaming is optional and accumulates deltas into complete messages.
+  - Message metadata captures auxiliary info (model, tokens, timestamps).
+  - Tool call and result IDs enable tracking across iterations.
+  - UMF provides conversion between internal format and ChatML string representation.
+  - Streaming deltas are incrementally accumulated for real-time responsiveness.
+  - All message types (text, tool calls, results) are unified in single Message struct.

@@ -1,0 +1,165 @@
+# UDML Specification for abk::cli (CLI/Bootstrap)
+# This component handles command-line interface and initial application bootstrap
+
+information:
+  # CLI state and configuration
+  - name: CliConfig
+    description: "Command-line arguments and bootstrap configuration"
+    schema:
+      type: object
+      properties:
+        command: { type: string, enum: [run, list, resume, config] }
+        task_description: { type: string }
+        config_path: { type: string }
+        session_id: { type: string }
+        verbose: { type: boolean }
+        dry_run: { type: boolean }
+
+  - name: CommandContext
+    description: "Runtime context for command execution including environment and dependencies"
+    schema:
+      type: object
+      properties:
+        working_directory: { type: string }
+        environment_variables: { type: object, additionalProperties: { type: string } }
+        config_loader: { type: string, description: "Reference to configuration loader" }
+        agent_factory: { type: string, description: "Factory for creating agents" }
+
+  - name: BootstrapState
+    description: "State during application bootstrap and initialization"
+    schema:
+      type: object
+      properties:
+        phase: { type: string, enum: [loading_config, initializing_components, starting_agent, running] }
+        loaded_modules: { type: array, items: { type: string } }
+        errors: { type: array, items: { type: string } }
+
+access:
+  # CLI state access
+  - name: get_cli_args
+    description: "Access parsed command-line arguments"
+    returns: { $ref: "#/definitions/CliConfig" }
+
+  - name: get_command_context
+    description: "Access current command execution context"
+    returns: { $ref: "#/definitions/CommandContext" }
+
+  - name: list_available_commands
+    description: "List all supported CLI commands and their descriptions"
+    returns:
+      type: array
+      items:
+        type: object
+        properties:
+          name: { type: string }
+          description: { type: string }
+          arguments: { type: array, items: { type: string } }
+
+manipulation:
+  # CLI operations
+  - name: parse_cli_args
+    description: "Parse command-line arguments into structured config"
+    parameters:
+      args: { type: array, items: { type: string } }
+    creates: { $ref: "#/definitions/CliConfig" }
+
+  - name: create_command_context
+    description: "Initialize command execution context"
+    parameters:
+      config: { $ref: "#/definitions/CliConfig" }
+    creates: { $ref: "#/definitions/CommandContext" }
+
+  - name: bootstrap_application
+    description: "Initialize all application components and dependencies"
+    parameters:
+      context: { $ref: "#/definitions/CommandContext" }
+    creates: { $ref: "#/definitions/BootstrapState" }
+
+  - name: execute_command
+    description: "Execute the specified CLI command"
+    parameters:
+      config: { $ref: "#/definitions/CliConfig" }
+      context: { $ref: "#/definitions/CommandContext" }
+    modifies: { $ref: "#/definitions/BootstrapState" }
+
+extract:
+  # CLI computations and derivations
+  - name: validate_cli_config
+    description: "Validate CLI configuration and arguments"
+    input: { $ref: "#/definitions/CliConfig" }
+    output:
+      type: object
+      properties:
+        is_valid: { type: boolean }
+        errors: { type: array, items: { type: string } }
+        warnings: { type: array, items: { type: string } }
+
+  - name: generate_help_text
+    description: "Generate formatted help text for commands"
+    input: { $ref: "#/definitions/CliConfig" }
+    output:
+      type: object
+      properties:
+        usage: { type: string }
+        commands: { type: object, additionalProperties: { type: string } }
+        examples: { type: array, items: { type: string } }
+
+  - name: resolve_config_path
+    description: "Resolve configuration file path from CLI args or defaults"
+    input: { $ref: "#/definitions/CliConfig" }
+    output: { type: string }
+
+movement:
+  # CLI data flow
+  - name: argument_parsing
+    description: "Parse raw command-line strings into structured data"
+    from: "raw_cli_args"
+    to: { $ref: "#/definitions/CliConfig" }
+    protocol: "clap_parser"
+    boundaries: ["string_to_struct"]
+
+  - name: config_loading
+    description: "Load configuration from file system"
+    from: "config_file_path"
+    to: "configuration_loader"
+    protocol: "TOML_parser"
+    boundaries: ["filesystem_to_memory"]
+
+  - name: bootstrap_output
+    description: "Output bootstrap progress and results"
+    from: { $ref: "#/definitions/BootstrapState" }
+    to: "stdout_stderr"
+    protocol: "formatted_text"
+    boundaries: ["memory_to_console"]
+
+coordination:
+  # CLI orchestration
+  - name: command_dispatch
+    description: "Route CLI commands to appropriate handlers"
+    primitives:
+      - type: "command_router"
+        description: "Map command names to execution functions"
+      - type: "argument_validation"
+        description: "Validate arguments before execution"
+      - type: "error_handling"
+        description: "Handle command execution errors gracefully"
+
+  - name: bootstrap_sequence
+    description: "Orchestrate application bootstrap phases"
+    primitives:
+      - type: "dependency_resolution"
+        description: "Resolve component dependencies in correct order"
+      - type: "initialization_order"
+        description: "Initialize components following dependency graph"
+      - type: "health_checks"
+        description: "Verify component health after initialization"
+
+  - name: interactive_mode
+    description: "Handle interactive CLI sessions"
+    primitives:
+      - type: "input_reading"
+        description: "Read user input from stdin"
+      - type: "command_completion"
+        description: "Provide command completion suggestions"
+      - type: "session_management"
+        description: "Manage interactive session state"

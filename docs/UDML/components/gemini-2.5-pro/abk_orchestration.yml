@@ -1,0 +1,25 @@
+name: abk::orchestration
+description: "Workflow coordinator: coordinates multi-step workflows, tool invocation ordering, and runtime orchestration."
+udml:
+  information:
+    - description: "The overall plan or state of a complex task, which may involve multiple LLM calls and tool uses."
+
+  access:
+    - description: "Has access to all the major components of the agent runtime (`provider`, `tools`, `checkpoint`, `lifecycle`)."
+
+  manipulation:
+    - description: "Manages the state of the current workflow, deciding the next step (e.g., call LLM, execute tool, finish)."
+
+  extract:
+    - description: "Interprets the agent's output to decide the next action. For example, if the agent returns a tool call, the orchestrator extracts it and prepares it for execution."
+
+  movement:
+    - description: "Invokes the LLM provider with the current message history."
+    - description: "Dispatches tool calls to the `CATS` tool registry."
+    - description: "Requests checkpoints from the `abk::checkpoint` manager at key moments."
+    - description: "Uses the `abk::lifecycle` component to render observations into messages for the LLM."
+
+  coordination:
+    - description: "The primary coordinator of the agent's internal 'act-observe-think' loop."
+    - description: "Manages the sequence of operations for complex tasks that require multiple steps, ensuring that tool results are fed back into the agent's context correctly."
+    - description: "Handles retries and error conditions during the workflow."

@@ -1,0 +1,109 @@
+id: abk-agent
+layer: runtime
+ownership: crate
+summary: Core agent runtime wiring messages, tools, providers, lifecycle, checkpoints, and orchestration.
+provides:
+  information:
+    - id: session-state
+      kind: struct
+      schema:
+        fields:
+          - id: messages
+            type: list<umf:internal-message>
+          - id: phase
+            type: enum{init, classify, plan, act, reflect, done, error}
+          - id: tool-context
+            type: map
+          - id: checkpoint-id
+            type: string|null
+      purpose: Holds the current agent conversation and control state.
+      owners: [abk-agent]
+    - id: action-request
+      kind: struct
+      schema:
+        fields:
+          - id: input
+            type: umf:internal-message
+          - id: tool_calls
+            type: list<umf:tool-call>
+      purpose: Normalized request to orchestrate provider/tool execution for a single turn.
+      owners: [abk-agent]
+access:
+  rules:
+    - id: read-session
+      target: session-state
+      read: self|orchestration|checkpoint
+      constraints: []
+      description: Agent and orchestration loop can read/inspect session state.
+manipulation:
+  mutations:
+    - id: append-message
+      target: session-state
+      kind: update
+      preconditions: []
+      postconditions: []
+      side_effects: [mv-checkpoint-write]
+    - id: update-phase
+      target: session-state
+      kind: update
+      preconditions: []
+      postconditions: []
+      side_effects: []
+extract:
+  transforms:
+    - id: session-to-chatml
+      inputs: [session-state]
+      output: provider:chatml-request
+      method: formatter
+      description: Uses UMF ChatML helpers to convert messages to provider input.
+movement:
+  routes:
+    - id: mv-provider-generate
+      direction: out
+      from: abk-agent
+      to: abk-provider
+      medium: wasm-call|memory
+      payload: provider:chatml-request
+      trigger: event
+      reliability: best-effort
+    - id: mv-tools-exec
+      direction: out
+      from: abk-agent
+      to: cats
+      medium: memory
+      payload: umf:tool-call
+      trigger: event
+      reliability: best-effort
+    - id: mv-checkpoint-write
+      direction: out
+      from: abk-agent
+      to: abk-checkpoint
+      medium: fs
+      payload: session-state
+      trigger: mutation
+      reliability: at-least-once
+    - id: mv-lifecycle-template
+      direction: bi
+      from: abk-agent
+      to: abk-lifecycle
+      medium: wasm-call
+      payload: lifecycle:template-io
+      trigger: event
+      reliability: best-effort
+coordination:
+  primitives:
+    - id: orch-turn-loop
+      kind: orchestration
+      participants: [abk-agent, abk-orchestration, abk-provider, cats, abk-checkpoint, abk-lifecycle]
+      drives: [mv-provider-generate, mv-tools-exec, mv-checkpoint-write, mv-lifecycle-template]
+      description: One iteration of the agent turn loop across provider and tools with checkpointing.
+dependencies:
+  runtime: [abk-orchestration, abk-provider, abk-lifecycle, cats, abk-executor, abk-checkpoint, abk-observability, umf]
+  build: [abk]
+  feature_flags: [agent]
+risks:
+  - id: hidden-coupling
+    impact: medium
+    likelihood: medium
+    description: Static construction of tool registry and provider increases coupling.
+    mitigation: Runtime adapters + plugin boundaries.

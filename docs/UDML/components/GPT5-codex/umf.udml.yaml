@@ -1,0 +1,102 @@
+format: UDML-YAML-0.1
+component: "UMF"
+summary: "Universal Message Format providing canonical message, tool call, and streaming structures plus ChatML helpers."
+context:
+  crate: "umf"
+  feature_flags:
+    - streaming
+  upstream_interfaces:
+    - serde
+    - ChatML specification
+  downstream_interfaces:
+    - abk::agent
+    - abk::provider
+    - CATS
+
+domains:
+  information:
+    - name: internal_message
+      ownership: UMF
+      description: "Primary message type used across agent, provider, and tools."
+      shape: |
+        struct InternalMessage {
+          role: Role,
+          name: Option<String>,
+          content: Vec<ContentBlock>,
+          metadata: HashMap<String, Value>,
+          tool_call_id: Option<String>
+        }
+    - name: content_block
+      ownership: UMF
+      description: "Variants for text, tool use, tool result, and observations."
+      shape: |
+        enum ContentBlock {
+          Text { text: String },
+          ToolUse { id: String, name: String, input: serde_json::Value },
+          ToolResult { id: String, content: serde_json::Value, status: ToolStatus },
+          Observation { label: String, data: serde_json::Value }
+        }
+    - name: streaming_event
+      ownership: UMF
+      description: "Intermediate representation for streaming responses (delta chunks, tool events)."
+      shape: |
+        struct StreamingEvent {
+          sequence: u64,
+          event_type: StreamingEventType,
+          payload: serde_json::Value
+        }
+  access:
+    - name: message_access
+      subject: downstream consumers
+      description: "Consumers may read message content; mutations must respect invariant order."
+      rules:
+        - messages append-only in chronological order
+        - tool_result must reference existing tool call id
+    - name: schema_extension
+      subject: UMF
+      description: "Only UMF crate may add new content block variants; downstream must handle gracefully."
+      rules:
+        - versioning via semver
+  manipulation:
+    - name: message_builder
+      description: "Helper APIs mutate message vectors (push, replace, annotate)."
+      operations:
+        - push_text
+        - push_tool_use
+        - push_tool_result
+        - annotate_metadata
+    - name: streaming_merge
+      description: "Combine streaming delta events into final InternalMessage content."
+      operations:
+        - apply_delta
+        - finalize_message
+  extract:
+    - name: chatml_render
+      description: "Convert InternalMessage sequences to ChatML strings for providers."
+      outputs:
+        - String
+    - name: summary_projection
+      description: "Optional summarizers reduce message history for context window management."
+      outputs:
+        - SummarizedTranscript
+  movement:
+    - name: serialization
+      source: UMF
+      destination: other components
+      protocol: "serde_json/serde_yaml"
+      payload: InternalMessage, ContentBlock, ToolCall, ToolResult
+    - name: streaming_event_flow
+      source: provider adapters
+      destination: UMF streaming parser
+      protocol: "SSE/JSON"
+      payload: StreamingEvent
+  coordination:
+    - name: schema_versioning
+      participants:
+        - UMF
+        - abk::agent
+        - Provider-WASM
+        - Lifecycle-WASM
+      triggers:
+        - crate_update
+      policy: "Version compatibility negotiated via semver; breaking changes require coordinated rollout across components."

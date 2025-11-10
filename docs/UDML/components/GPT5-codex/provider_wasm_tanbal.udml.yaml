@@ -1,0 +1,94 @@
+format: UDML-YAML-0.1
+component: "Provider-WASM (Tanbal)"
+summary: "WebAssembly provider module that formats LLM requests and parses responses for multiple backend APIs."
+context:
+  crate: "tanbal-provider"
+  upstream_interfaces:
+    - abk::provider host ABI
+    - backend HTTP adapters
+  downstream_interfaces:
+    - abk::provider (host)
+    - remote LLM APIs
+
+domains:
+  information:
+    - name: wasm_manifest
+      ownership: Provider-WASM
+      description: "Metadata embedded in WASM (supported providers, versions, capabilities)."
+      shape: |
+        struct ProviderWasmManifest {
+          version: SemVer,
+          supported_backends: Vec<String>,
+          requires_host_capabilities: Vec<String>
+        }
+    - name: request_contract
+      ownership: Provider-WASM
+      description: "JSON schema describing request/response payload exchange between host and WASM."
+      shape: |
+        struct WasmRequest {
+          op: "format" | "parse" | "parse_stream",
+          config: serde_json::Value,
+          body: serde_json::Value
+        }
+  access:
+    - name: host_call_access
+      subject: Provider-WASM
+      description: "WASM may call back into host for HTTP execution via limited capability interface."
+      rules:
+        - only exposed functions allowed (http_request, log)
+        - no direct filesystem access
+    - name: secret_handling
+      subject: host runtime
+      description: "Secrets remain on host; WASM receives tokens only in request body with least privilege."
+      rules:
+        - host strips unused keys
+        - WASM prohibited from persisting tokens
+  manipulation:
+    - name: request_format
+      description: "Transform host GenerateRequest into backend-specific payload."
+      operations:
+        - build_openai_payload
+        - build_anthropic_payload
+        - build_github_payload
+    - name: response_parse
+      description: "Normalize backend response (stream or batch) into UMF-aligned JSON."
+      operations:
+        - parse_chat_completion
+        - parse_tool_calls
+        - parse_stream_delta
+  extract:
+    - name: token_accounting
+      description: "Extract token usage from backend responses for host metrics."
+      outputs:
+        - TokenUsage
+    - name: capability_flags
+      description: "Expose capability bits (tool_support, streaming_support) to host."
+      outputs:
+        - CapabilityFlags
+  movement:
+    - name: wasm_host_exchange
+      source: Provider-WASM
+      destination: host
+      protocol: "wasmtime ABI"
+      payload: WasmRequest/WasmResponse JSON strings
+    - name: backend_http_exchange
+      source: host (on behalf of WASM)
+      destination: remote APIs
+      protocol: "HTTPS JSON/SSE"
+      payload: backend request body
+      notes: "Host executes HTTP; WASM orchestrates formatting/parsing."
+  coordination:
+    - name: capability_registration
+      participants:
+        - Provider-WASM
+        - abk::provider host
+      triggers:
+        - module_load
+      policy: "Upon instantiation, WASM publishes manifest; host registers capabilities with ProviderFactory."
+    - name: streaming_cooperation
+      participants:
+        - Provider-WASM
+        - host streaming loop
+      triggers:
+        - sse_event
+      policy: "Host forwards SSE events to WASM parser; WASM emits normalized deltas back to host."

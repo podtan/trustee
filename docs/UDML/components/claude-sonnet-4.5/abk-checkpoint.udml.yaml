@@ -1,0 +1,194 @@
+# UDML Specification for abk[checkpoint] (Checkpoint/Session Manager)
+# This component manages session checkpoints for agent state persistence and resume
+
+information:
+  # Checkpoint data structures
+  - name: Checkpoint
+    description: "Snapshot of agent state at a point in time"
+    schema:
+      type: object
+      properties:
+        id: { type: string }
+        session_id: { type: string }
+        timestamp: { type: string, format: date-time }
+        agent_state: { type: object, description: "Complete agent state snapshot" }
+        message_history: { type: array, items: { $ref: "#/definitions/InternalMessage" } }
+        iteration_count: { type: integer }
+        metadata: { type: object }
+
+  - name: SessionMetadata
+    description: "Metadata about an agent session"
+    schema:
+      type: object
+      properties:
+        session_id: { type: string }
+        start_time: { type: string, format: date-time }
+        last_checkpoint_time: { type: string, format: date-time }
+        total_iterations: { type: integer }
+        status: { type: string, enum: [active, paused, completed, failed] }
+        checkpoint_count: { type: integer }
+
+  - name: CheckpointConfig
+    description: "Configuration for checkpoint behavior"
+    schema:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        directory: { type: string }
+        max_checkpoints_per_session: { type: integer }
+        compression_enabled: { type: boolean }
+        auto_checkpoint_interval: { type: integer }
+
+access:
+  # Checkpoint access patterns
+  - name: list_sessions
+    description: "List all available sessions"
+    returns:
+      type: array
+      items: { $ref: "#/definitions/SessionMetadata" }
+
+  - name: list_checkpoints
+    description: "List checkpoints for a session"
+    parameters:
+      session_id: { type: string }
+    returns:
+      type: array
+      items: { $ref: "#/definitions/Checkpoint" }
+
+  - name: get_checkpoint
+    description: "Retrieve specific checkpoint data"
+    parameters:
+      checkpoint_id: { type: string }
+    returns: { $ref: "#/definitions/Checkpoint" }
+
+  - name: get_latest_checkpoint
+    description: "Get most recent checkpoint for session"
+    parameters:
+      session_id: { type: string }
+    returns: { $ref: "#/definitions/Checkpoint" }
+
+manipulation:
+  # Checkpoint operations
+  - name: create_checkpoint
+    description: "Create new checkpoint from current agent state"
+    parameters:
+      session_id: { type: string }
+      agent_state: { type: object }
+      metadata: { type: object }
+    creates: { $ref: "#/definitions/Checkpoint" }
+
+  - name: restore_checkpoint
+    description: "Restore agent state from checkpoint"
+    parameters:
+      checkpoint_id: { type: string }
+    modifies: { type: object, description: "Agent state" }
+
+  - name: delete_checkpoint
+    description: "Remove checkpoint from storage"
+    parameters:
+      checkpoint_id: { type: string }
+    deletes: { $ref: "#/definitions/Checkpoint" }
+
+  - name: prune_checkpoints
+    description: "Remove old checkpoints to manage storage"
+    parameters:
+      session_id: { type: string }
+      keep_count: { type: integer }
+    modifies: { type: array, items: { $ref: "#/definitions/Checkpoint" } }
+
+extract:
+  # Checkpoint computations
+  - name: validate_checkpoint_integrity
+    description: "Validate checkpoint data integrity"
+    input: { $ref: "#/definitions/Checkpoint" }
+    output:
+      type: object
+      properties:
+        is_valid: { type: boolean }
+        corruption_detected: { type: boolean }
+        errors: { type: array, items: { type: string } }
+
+  - name: calculate_checkpoint_size
+    description: "Calculate storage size of checkpoint"
+    input: { $ref: "#/definitions/Checkpoint" }
+    output:
+      type: object
+      properties:
+        uncompressed_size: { type: integer }
+        compressed_size: { type: integer }
+        compression_ratio: { type: number }
+
+  - name: generate_session_summary
+    description: "Generate summary of session from checkpoints"
+    input:
+      type: array
+      items: { $ref: "#/definitions/Checkpoint" }
+    output:
+      type: object
+      properties:
+        duration: { type: integer }
+        total_iterations: { type: integer }
+        checkpoint_frequency: { type: number }
+        state_changes: { type: array, items: { type: string } }
+
+movement:
+  # Checkpoint data flow
+  - name: state_serialization
+    description: "Convert agent state to serializable format"
+    from: { type: object, description: "In-memory agent state" }
+    to: "serialized_data"
+    protocol: "JSON_serialization"
+    boundaries: ["memory_to_serialized"]
+
+  - name: checkpoint_storage
+    description: "Store checkpoints to persistent storage"
+    from: "serialized_checkpoints"
+    to: "filesystem_storage"
+    protocol: "file_writing"
+    boundaries: ["memory_to_disk"]
+
+  - name: checkpoint_compression
+    description: "Compress checkpoints for storage efficiency"
+    from: "serialized_data"
+    to: "compressed_data"
+    protocol: "compression_algorithm"
+    boundaries: ["uncompressed_to_compressed"]
+
+  - name: checkpoint_restoration
+    description: "Load checkpoints from storage and deserialize"
+    from: "filesystem_storage"
+    to: { type: object, description: "In-memory agent state" }
+    protocol: "JSON_deserialization"
+    boundaries: ["disk_to_memory"]
+
+coordination:
+  # Checkpoint coordination
+  - name: auto_checkpointing
+    description: "Automatically create checkpoints at intervals"
+    primitives:
+      - type: "interval_scheduling"
+        description: "Schedule checkpoints based on time or iteration count"
+      - type: "state_change_detection"
+        description: "Create checkpoints when significant state changes occur"
+      - type: "background_processing"
+        description: "Perform checkpointing without blocking main execution"
+
+  - name: storage_management
+    description: "Manage checkpoint storage and cleanup"
+    primitives:
+      - type: "retention_policies"
+        description: "Apply policies for checkpoint retention and deletion"
+      - type: "storage_quota"
+        description: "Enforce storage limits and cleanup when exceeded"
+      - type: "compression_scheduling"
+        description: "Schedule compression of old checkpoints"
+
+  - name: session_recovery
+    description: "Handle session restoration and error recovery"
+    primitives:
+      - type: "checkpoint_validation"
+        description: "Validate checkpoints before restoration"
+      - type: "partial_recovery"
+        description: "Recover from partially corrupted checkpoints"
+      - type: "rollback_coordination"
+        description: "Coordinate rollback to previous good state"

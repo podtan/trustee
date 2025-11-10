@@ -1,0 +1,422 @@
+---
+# UDML: abk[orchestration] — Workflow Coordinator
+# Coordinates multi-step workflows, tool invocation ordering, and runtime orchestration
+
+metadata:
+  name: "abk[orchestration]"
+  version: "0.1.24"
+  owner: "ABK (Agent Builder Kit)"
+  responsibility: "Multi-step workflow coordination, tool ordering, retry logic, dependency resolution"
+
+information:
+  # Workflow definition
+  workflow_definition:
+    - field: workflow_id
+      type: String
+      semantics: "Unique workflow identifier"
+    
+    - field: steps
+      type: Vec<WorkflowStep>
+      semantics: "Ordered list of workflow steps"
+    
+    - field: dependencies
+      type: HashMap<StepId, Vec<StepId>>
+      semantics: "Step dependency graph (step -> prerequisites)"
+    
+    - field: configuration
+      type: WorkflowConfig
+      semantics: "Workflow runtime configuration"
+
+  # Workflow step
+  workflow_step:
+    - field: step_id
+      type: String
+      semantics: "Unique step identifier (e.g., 'provider_call', 'tool_exec_0')"
+    
+    - field: step_type
+      type: StepType
+      enum: ["provider_call", "tool_execution", "checkpoint", "observation_generation", "classification", "termination_check"]
+      semantics: "Type of workflow step"
+    
+    - field: action
+      type: StepAction
+      semantics: "Action to perform (varies by step type)"
+    
+    - field: preconditions
+      type: Vec<Condition>
+      semantics: "Conditions that must be true to execute step"
+    
+    - field: timeout_seconds
+      type: u64
+      semantics: "Maximum execution time for this step"
+    
+    - field: retry_policy
+      type: RetryPolicy
+      semantics: "Retry configuration (max attempts, backoff)"
+    
+    - field: on_success
+      type: Vec<String>
+      semantics: "Step IDs to execute on success"
+    
+    - field: on_failure
+      type: Vec<String>
+      semantics: "Step IDs to execute on failure (fallback steps)"
+
+  # Retry policy
+  retry_policy:
+    - field: max_attempts
+      type: u32
+      semantics: "Maximum retry attempts"
+    
+    - field: backoff_strategy
+      type: BackoffStrategy
+      enum: ["none", "fixed", "exponential", "linear"]
+      semantics: "Delay strategy between retries"
+    
+    - field: initial_delay_ms
+      type: u64
+      semantics: "Initial delay before first retry"
+    
+    - field: max_delay_ms
+      type: u64
+      semantics: "Maximum delay between retries"
+    
+    - field: retryable_errors
+      type: Vec<String>
+      semantics: "Error types to retry on (timeout, rate_limit, etc.)"
+
+  # Workflow state
+  workflow_execution_state:
+    - field: workflow_id
+      type: String
+      semantics: "Workflow identifier"
+    
+    - field: current_step
+      type: String
+      semantics: "Currently executing step ID"
+    
+    - field: step_results
+      type: HashMap<StepId, StepResult>
+      semantics: "Results of completed steps"
+    
+    - field: execution_timeline
+      type: Vec<ExecutionEvent>
+      semantics: "Timeline of step executions and transitions"
+    
+    - field: error_context
+      type: Option<ErrorContext>
+      semantics: "Current error if workflow failed"
+
+  # Execution event
+  execution_event:
+    - field: timestamp
+      type: Timestamp
+      semantics: "When event occurred"
+    
+    - field: step_id
+      type: String
+      semantics: "Which step"
+    
+    - field: event_type
+      type: EventType
+      enum: ["started", "completed", "failed", "retrying", "skipped"]
+      semantics: "Type of event"
+    
+    - field: result
+      type: Option<Value>
+      semantics: "Step result (if completed)"
+    
+    - field: error
+      type: Option<String>
+      semantics: "Error message (if failed)"
+    
+    - field: duration_ms
+      type: u64
+      semantics: "Execution duration in milliseconds"
+
+access:
+  # Workflow execution
+  execution_access:
+    - query: "execute_workflow(workflow: &Workflow) -> Result<WorkflowResult, Error>"
+      visibility: "Public"
+      semantics: "Execute workflow to completion or failure"
+      returns:
+        - field: success
+          type: bool
+          semantics: "Whether workflow completed successfully"
+        - field: results
+          type: HashMap<StepId, StepResult>
+          semantics: "Results of all steps"
+        - field: timeline
+          type: Vec<ExecutionEvent>
+          semantics: "Complete execution timeline"
+
+  # Step introspection
+  step_access:
+    - query: "get_step_result(workflow_id: &str, step_id: &str) -> Option<StepResult>"
+      visibility: "Public"
+      semantics: "Query result of specific step"
+    
+    - query: "get_pending_steps() -> Vec<StepId>"
+      visibility: "Public"
+      semantics: "List steps ready to execute"
+
+  # Workflow state
+  state_access:
+    - query: "get_workflow_state(workflow_id: &str) -> WorkflowExecutionState"
+      visibility: "Public"
+      semantics: "Get complete workflow state"
+
+manipulation:
+  # Workflow construction
+  workflow_construction:
+    - operation: "build_agent_workflow() -> Workflow"
+      semantics: "Construct standard agent workflow from agent session"
+      postcondition: "Workflow steps and dependencies defined"
+      logic: |
+        Step 1: provider_call (invoke LLM)
+        Step 2: extract_tool_calls (parse response)
+        Step 3a-n: tool_execution (parallel if independent)
+        Step 4: observation_generation (format tool results)
+        Step 5: termination_check (did agent succeed?)
+        Step 6: decision_point -> loop to Step 1 or exit
+
+  # Workflow execution
+  execution_operations:
+    - operation: "run_step(step: &WorkflowStep) -> Result<StepResult, StepError>"
+      semantics: "Execute a single workflow step"
+      precondition: "Step preconditions met, dependencies completed"
+      postcondition: "StepResult recorded, next steps queued"
+
+  # Step dependency resolution
+  dependency_resolution:
+    - operation: "resolve_ready_steps(state: &WorkflowExecutionState) -> Vec<StepId>"
+      semantics: "Identify steps ready to execute (all dependencies done)"
+      logic: "For each step, check if all prerequisite steps completed successfully"
+
+  # Retry coordination
+  retry_operations:
+    - operation: "attempt_step_retry(step: &WorkflowStep, attempt: u32, last_error: &Error) -> Result<(), Error>"
+      semantics: "Determine if step should be retried based on policy"
+      precondition: "attempt < max_attempts, error in retryable_errors"
+      logic: "Compute backoff delay, apply it, return Ok if should retry"
+
+  # Workflow state mutation
+  state_mutation:
+    - operation: "record_step_result(workflow_id: &str, step_id: &str, result: StepResult)"
+      semantics: "Record step result and update workflow state"
+      postcondition: "StepResult stored, timeline updated, next steps identified"
+
+extract:
+  # Workflow topology extraction
+  topology_extraction:
+    - extract: "extract_dependency_graph(workflow: &Workflow) -> DependencyGraph"
+      rule: "Build directed acyclic graph from workflow dependencies"
+      input_owner: "abk[orchestration] (workflow definition)"
+      output_owner: "abk[orchestration]"
+      use_case: "Identify parallelizable steps"
+
+  # Parallel execution opportunities
+  parallelization_extraction:
+    - extract: "identify_parallel_steps() -> Vec<Vec<StepId>>"
+      rule: "Group steps into phases that can execute in parallel"
+      input_owner: "Dependency graph"
+      output_owner: "abk[orchestration]"
+      logic: "Steps with no interdependencies can run in parallel (e.g., independent tool calls)"
+
+  # Execution metrics extraction
+  metrics_extraction:
+    - extract: "compute_execution_metrics(state: &WorkflowExecutionState) -> ExecutionMetrics"
+      rule: "Derive metrics from workflow execution timeline"
+      input_owner: "abk[orchestration]"
+      output_owner: "abk[observability]"
+      metrics:
+        - "total_duration"
+        - "step_durations (breakdown)"
+        - "retry_count"
+        - "parallelization_factor"
+        - "critical_path_length"
+
+movement:
+  # Workflow invocation
+  invocation_flow:
+    - from: "abk::agent"
+      to: "abk[orchestration]::WorkflowCoordinator"
+      data: "Workflow definition (steps, dependencies)"
+      protocol: "Function call (in-process)"
+      semantics: "Agent requests workflow execution"
+    
+    - from: "abk[orchestration]"
+      to: "abk[orchestration]"
+      data: "Resolve ready steps based on dependencies"
+      protocol: "In-process dependency graph traversal"
+      semantics: "Identify executable steps"
+
+  # Step execution flow
+  step_execution_flow:
+    - from: "abk[orchestration]"
+      to: "Provider / CATS / abk[lifecycle] / abk[checkpoint]"
+      data: "Delegation to appropriate component for step type"
+      protocol: "Function call (in-process)"
+      semantics: "Execute step action"
+    
+    - from: "Component"
+      to: "abk[orchestration]"
+      data: "StepResult (success, failure, output)"
+      protocol: "Function return"
+      semantics: "Receive step result"
+
+  # Parallel execution
+  parallel_execution_flow:
+    - from: "abk[orchestration]"
+      to: "tokio tasks"
+      data: "Spawn async tasks for parallelizable steps"
+      protocol: "Async task spawning"
+      semantics: "Execute independent steps concurrently"
+    
+    - from: "tokio tasks"
+      to: "abk[orchestration]"
+      data: "StepResult from each task"
+      protocol: "Channel or wait handle"
+      semantics: "Join results from parallel execution"
+
+  # Retry flow
+  retry_flow:
+    - from: "abk[orchestration]"
+      to: "Backoff timer"
+      data: "Sleep duration (based on retry policy)"
+      protocol: "tokio::time::sleep()"
+      semantics: "Apply backoff delay"
+    
+    - from: "abk[orchestration]"
+      to: "Step component"
+      data: "Re-execute step"
+      protocol: "Function call (retry attempt)"
+      semantics: "Retry step after backoff"
+
+coordination:
+  # Workflow execution phases
+  execution_phases:
+    - phase: "Workflow Construction"
+      action: "Build workflow from agent session (define steps, dependencies)"
+      owner: "abk[orchestration] or abk::agent"
+      output: "Workflow object with all steps and dependencies"
+    
+    - phase: "Dependency Resolution"
+      action: "Identify initially ready steps (no prerequisites)"
+      owner: "abk[orchestration]"
+      output: "Queue of ready steps"
+    
+    - phase: "Step Execution"
+      action: "Execute ready steps (serially or in parallel)"
+      owner: "abk[orchestration] + delegated components"
+      iteration: "For each ready step, execute and record result"
+    
+    - phase: "Barrier Synchronization"
+      action: "Wait for all in-flight steps to complete (if parallelized)"
+      owner: "abk[orchestration]"
+      logic: "If using tokio tasks, join all pending tasks"
+    
+    - phase: "Next Wave Identification"
+      action: "Identify next batch of ready steps"
+      owner: "abk[orchestration]"
+      logic: "Traverse dependency graph, find steps with all prerequisites done"
+    
+    - phase: "Completion Check"
+      action: "Have all steps completed successfully?"
+      owner: "abk[orchestration]"
+      yes_path: "Return WorkflowResult (success)"
+      no_path: "Any step failed? -> Error handling"
+
+  # Retry coordination
+  retry_logic:
+    - step: 1
+      action: "Step fails with error"
+      owner: "Component (Provider, ToolRegistry, etc.)"
+    
+    - step: 2
+      action: "abk[orchestration] receives error"
+      owner: "abk[orchestration]"
+    
+    - step: 3
+      action: "Check if error is retryable and attempt < max_attempts"
+      owner: "abk[orchestration]"
+      condition: "Is error in step.retry_policy.retryable_errors?"
+      yes_path: "Proceed to step 4"
+      no_path: "Fail step (no retry)"
+    
+    - step: 4
+      action: "Compute backoff delay (based on retry policy)"
+      owner: "abk[orchestration]"
+      formula: |
+        fixed -> initial_delay_ms
+        exponential -> min(initial_delay_ms * 2^attempt, max_delay_ms)
+        linear -> min(initial_delay_ms * attempt, max_delay_ms)
+    
+    - step: 5
+      action: "Sleep for backoff duration"
+      owner: "abk[orchestration]"
+    
+    - step: 6
+      action: "Re-execute step"
+      owner: "abk[orchestration] (delegate to component)"
+    
+    - step: 7
+      action: "Record retry event in timeline"
+      owner: "abk[orchestration]"
+
+  # Parallelization strategy
+  parallelization:
+    - strategy: "Batch-by-dependency"
+      logic: |
+        Phase 1: All steps with no dependencies
+        Phase 2: All steps whose dependencies are satisfied after phase 1
+        Phase N: Continue until completion
+      implementation: "Use tokio::spawn for independent steps in same phase"
+    
+    - example: "Tool execution"
+      logic: |
+        If provider response includes 3 tool calls and none depend on each other:
+        - Spawn 3 tokio tasks, each calling abk[executor]
+        - Wait for all 3 to complete (join)
+        - Proceed to observation generation (which depends on all 3 results)
+
+  # Error handling and recovery
+  fault_handling:
+    - fault: "Step timeout"
+      handler: "Abort step, check if retryable"
+      recovery: "Retry if in retryable_errors, else fail workflow"
+      logging: "Log timeout event via abk[observability]"
+    
+    - fault: "Step execution error"
+      handler: "Catch error, check retry policy"
+      recovery: "Retry with backoff or fail depending on policy"
+      logging: "Log error and retry attempts via abk[observability]"
+    
+    - fault: "Dependency not satisfied"
+      handler: "Log error, mark workflow as failed"
+      recovery: "Workflow cannot proceed (broken dependency)"
+      logging: "Log as critical error (should not occur if dependencies correct)"
+
+dependencies:
+  internal:
+    - "abk[provider]" # For provider_call steps
+    - "CATS" # For tool_execution steps
+    - "abk[lifecycle]" # For classification steps
+    - "abk[checkpoint]" # For checkpoint steps
+    - "abk[observability]" # Logging and metrics
+  
+  external:
+    - "tokio" # Async runtime, task spawning
+    - "dashmap" # Thread-safe HashMap for step results
+
+notes: |
+  - abk[orchestration] coordinates multi-step workflows with dependency resolution.
+  - Workflows are DAG-structured; cycles not supported (would cause infinite loops).
+  - Steps can be parallelized if they have no interdependencies.
+  - Retry logic is configurable per step (max attempts, backoff strategy, retryable errors).
+  - Step execution is delegated to appropriate components (provider, tools, etc.); orchestration only coordinates.
+  - Parallelization uses tokio tasks for async concurrent execution.
+  - Workflow execution is not paused between steps; all steps execute as fast as dependencies allow.
+  - Timeline recording enables post-mortem analysis and observability.
+  - Workflow definitions are immutable after creation; state updates are isolated.

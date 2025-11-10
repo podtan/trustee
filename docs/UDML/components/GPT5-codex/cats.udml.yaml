@@ -1,0 +1,102 @@
+format: UDML-YAML-0.1
+component: "CATS"
+summary: "Code Agent Tool System providing structured tool definitions and execution adapters."
+context:
+  crate: "cats"
+  upstream_interfaces:
+    - filesystem
+    - abk::executor
+    - UMF tool schemas
+  downstream_interfaces:
+    - abk::agent
+    - Provider tool registry descriptors
+
+domains:
+  information:
+    - name: tool_registry
+      ownership: CATS
+      description: "Catalog of available tools, their signatures, and capability metadata."
+      shape: |
+        struct ToolRegistry {
+          tools: HashMap<String, ToolDefinition>,
+          default_window_size: usize
+        }
+    - name: tool_definition
+      ownership: CATS
+      description: "Structured description for each tool including arguments, permissions, and execution handler."
+      shape: |
+        struct ToolDefinition {
+          name: String,
+          description: String,
+          arguments: JsonSchema,
+          handler: ToolHandler,
+          permissions: PermissionSet
+        }
+  access:
+    - name: tool_lookup
+      subject: abk::agent
+      description: "Agent queries registry for tool metadata; registry read-only at runtime."
+      rules:
+        - reads allowed for registered tools
+        - modification only during initialization
+    - name: host_resource_access
+      subject: tool_handlers
+      description: "Individual tools declare access to filesystem or executor; enforcement delegated to executor."
+      rules:
+        - tools must specify required capabilities
+        - unauthorized access denied at execution time
+  manipulation:
+    - name: tool_registration
+      description: "Build registry by inserting ToolDefinition instances."
+      operations:
+        - register_tool
+        - register_alias
+    - name: result_wrapping
+      description: "Transform raw execution output into UMF ToolResult blocks."
+      operations:
+        - wrap_success
+        - wrap_error
+  extract:
+    - name: tool_schema_projection
+      description: "Generate provider-compatible tool JSON schemas."
+      outputs:
+        - ProviderToolSpec list
+    - name: usage_statistics
+      description: "Summarize tool usage counts for observability."
+      outputs:
+        - ToolUsageReport
+  movement:
+    - name: tool_execution_request
+      source: abk::agent / orchestration
+      destination: CATS tool handler
+      protocol: "ToolExecutionRequest struct"
+      payload: tool name, arguments, session context
+    - name: execution_delegation
+      source: CATS
+      destination: abk::executor or internal handler
+      protocol: "CommandExec or function call"
+      payload: ExecutionPlan
+      notes: "File operations may bypass executor when implemented directly in Rust with permission checks."
+    - name: tool_result_delivery
+      source: CATS
+      destination: abk::agent
+      protocol: "UMF ToolResult"
+      payload: result payload, content blocks
+  coordination:
+    - name: capability_sync
+      participants:
+        - CATS
+        - abk::provider
+        - abk::agent
+      triggers:
+        - session_start
+        - tool_registry_change
+      policy: "Registry provides tool schemas to provider when tools enabled; provider acknowledges support for tool calls."
+    - name: execution_quorum
+      participants:
+        - CATS
+        - abk::executor
+        - abk::orchestration
+      triggers:
+        - tool_request
+      policy: "For external commands, CATS obtains executor approval before run; orchestration may veto based on policy."

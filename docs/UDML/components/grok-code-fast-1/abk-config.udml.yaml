@@ -1,0 +1,101 @@
+component: abk::config
+description: "Configuration loader for TOML files and environment variables"
+
+information:
+  - name: Configuration
+    description: "Complete configuration structure"
+    schema:
+      llm: "LlmConfig"
+      execution: "ExecutionConfig"
+      checkpointing: "CheckpointConfig"
+      templates: "TemplateConfig"
+
+  - name: LlmConfig
+    description: "LLM provider configuration"
+    schema:
+      provider: string
+      endpoint: "Option<String>"
+      streaming: boolean
+      timeout: integer
+
+  - name: ExecutionConfig
+    description: "Command execution settings"
+    schema:
+      timeout_seconds: integer
+      max_concurrent: integer
+      allowed_commands: "Vec<String>"
+
+access:
+  - name: read_toml_file
+    description: "Read configuration from TOML file"
+    rules:
+      - source: "filesystem"
+      - method: "toml::from_str(file_contents)"
+      - visibility: "internal"
+
+  - name: read_environment_variables
+    description: "Read configuration from environment"
+    rules:
+      - source: "std::env"
+      - method: "env::var(key)"
+      - visibility: "internal"
+
+manipulation:
+  - name: merge_configurations
+    description: "Merge file and environment configurations"
+    rules:
+      - input: "FileConfig + EnvConfig"
+      - operation: "deep_merge_with_override"
+      - constraints: "environment overrides file"
+
+  - name: validate_configuration
+    description: "Validate configuration completeness"
+    rules:
+      - input: "Configuration"
+      - operation: "validate_required_fields()"
+      - validation: "all required fields present"
+
+extract:
+  - name: derive_provider_config
+    description: "Extract provider-specific configuration"
+    rules:
+      - input: "Configuration"
+      - transform: "match provider_type -> provider_config"
+      - output: "ProviderConfig"
+
+  - name: generate_config_summary
+    description: "Extract configuration summary for logging"
+    rules:
+      - input: "Configuration"
+      - transform: "extract_provider | extract_timeouts | extract_features"
+      - output: "ConfigSummary"
+
+movement:
+  - name: file_config_loading
+    description: "Load configuration from TOML files"
+    rules:
+      - from: "config/trustee.toml"
+      - to: "ConfigurationLoader"
+      - protocol: "TOML format"
+      - boundaries: "filesystem boundary"
+
+  - name: environment_override
+    description: "Apply environment variable overrides"
+    rules:
+      - from: "process environment"
+      - to: "Configuration"
+      - protocol: "env var key-value pairs"
+      - boundaries: "process boundary"
+
+coordination:
+  - name: config_loading_pipeline
+    description: "Coordinate configuration loading phases"
+    primitives:
+      - load: "read_file() -> parse_toml() -> read_env() -> merge()"
+      - validate: "check_required() -> check_types() -> check_ranges()"
+      - apply: "set_defaults() -> override_env() -> finalize()"
+
+  - name: config_change_handling
+    description: "Handle configuration changes"
+    primitives:
+      - reload: "detect_change() -> reload_file() -> revalidate() -> notify_listeners()"

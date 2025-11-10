@@ -1,0 +1,328 @@
+---
+# UDML: abk::agent — Agent Runtime / Wiring
+# Core agent orchestration that wires together all components
+
+metadata:
+  name: "abk::agent"
+  version: "0.1.24"
+  owner: "ABK (Agent Builder Kit)"
+  responsibility: "Core agent runtime, component wiring, message flow coordination"
+
+information:
+  # Agent session state
+  agent_session:
+    - field: session_id
+      type: String
+      semantics: "Unique identifier for an agent session"
+    - field: messages
+      type: Vec<InternalMessage>
+      semantics: "Conversation history in UMF format"
+      owner: "UMF"
+    - field: context
+      type: HashMap<String, Value>
+      semantics: "Runtime context passed to all components"
+
+  # Agent configuration
+  agent_config:
+    - field: model
+      type: String
+      semantics: "LLM model name"
+    - field: max_iterations
+      type: u32
+      semantics: "Maximum workflow iterations"
+    - field: temperature
+      type: f32
+      semantics: "LLM temperature for sampling"
+
+  # Tool execution state
+  tool_execution_state:
+    - field: pending_tools
+      type: Vec<ToolCall>
+      semantics: "Pending tool invocations"
+      owner: "CATS"
+    - field: tool_results
+      type: Vec<ToolResult>
+      semantics: "Results from executed tools"
+      owner: "CATS"
+
+access:
+  # Agent state visibility
+  agent_query_interface:
+    - query: "get_session_messages() -> Vec<InternalMessage>"
+      visibility: "Public (read-only)"
+      semantics: "Retrieve conversation history"
+    
+    - query: "get_context(key: &str) -> Option<&Value>"
+      visibility: "Public (read-only)"
+      semantics: "Query runtime context"
+
+  # Component introspection
+  component_status:
+    - query: "get_provider_status() -> ProviderStatus"
+      visibility: "Public"
+      semantics: "Check LLM provider availability"
+    
+    - query: "get_tool_registry() -> &ToolRegistry"
+      visibility: "Public (read-only)"
+      semantics: "Access available tools"
+
+manipulation:
+  # Session lifecycle
+  session_lifecycle:
+    - operation: "create_session(config: AgentConfig) -> Session"
+      semantics: "Initialize new agent session"
+      precondition: "Config is valid"
+      postcondition: "Session ready for workflow"
+    
+    - operation: "add_message(msg: InternalMessage)"
+      semantics: "Add message to session history"
+      precondition: "Message is well-formed (UMF)"
+      postcondition: "Message appended to history"
+
+  # Workflow state mutation
+  workflow_mutation:
+    - operation: "invoke_provider(messages: Vec<InternalMessage>) -> GenerateResponse"
+      semantics: "Request generation from LLM provider"
+      precondition: "Provider is available and configured"
+      postcondition: "Response added to session"
+    
+    - operation: "execute_tool_call(tool_call: ToolCall) -> ExecutionResult"
+      semantics: "Execute a tool from CATS registry"
+      precondition: "Tool exists and is callable"
+      postcondition: "Result stored in session"
+
+  # Session termination
+  session_termination:
+    - operation: "finalize_session() -> SessionSummary"
+      semantics: "Close session and return summary"
+      precondition: "Session is active"
+      postcondition: "Session marked completed"
+
+extract:
+  # Message formatting and transformation
+  message_extraction:
+    - extract: "format_for_provider(messages: Vec<InternalMessage>) -> String"
+      rule: "Convert InternalMessage list to ChatML string via UMF formatter"
+      input_owner: "abk::agent (session history)"
+      output_owner: "abk[provider]"
+      implementation: "UMF::ChatMLFormatter"
+
+  # Tool call extraction
+  tool_call_extraction:
+    - extract: "extract_tool_calls(response: GenerateResponse) -> Vec<ToolCall>"
+      rule: "Parse provider response for tool invocation requests"
+      input_owner: "abk[provider]"
+      output_owner: "abk::agent, CATS"
+      implementation: "Provider-specific response parser"
+
+  # Agent observation extraction
+  observation_extraction:
+    - extract: "render_observation(result: ExecutionResult, template: &str) -> ContentBlock"
+      rule: "Transform tool result into observation message via lifecycle templates"
+      input_owner: "abk[executor]"
+      output_owner: "abk::agent"
+      input_template_owner: "Lifecycle-WASM"
+
+  # Session checkpoint extraction
+  checkpoint_extraction:
+    - extract: "serialize_session() -> CheckpointData"
+      rule: "Extract session state for persistence"
+      input_owner: "abk::agent"
+      output_owner: "abk[checkpoint]"
+
+movement:
+  # Component initialization
+  bootstrap_flow:
+    - from: "main.rs"
+      to: "abk[cli]"
+      data: "CLI arguments, config path"
+      semantics: "Bootstrap phase"
+    
+    - from: "abk[cli]"
+      to: "abk::agent"
+      data: "AgentConfig (loaded from abk[config])"
+      semantics: "Agent construction phase"
+
+  # Message flow during execution
+  message_flow:
+    - from: "abk::agent"
+      to: "UMF::ChatMLFormatter"
+      data: "Vec<InternalMessage>"
+      protocol: "Direct function call (in-process)"
+      semantics: "Format messages for LLM"
+    
+    - from: "UMF::ChatMLFormatter"
+      to: "abk[provider]"
+      data: "ChatML string"
+      protocol: "Function call (in-process)"
+      semantics: "Provider receives formatted prompt"
+    
+    - from: "abk[provider]"
+      to: "abk::agent"
+      data: "GenerateResponse (content or tool_calls)"
+      protocol: "Function call + InternalMessage envelope"
+      semantics: "Provider response integration"
+
+  # Tool execution flow
+  tool_flow:
+    - from: "abk::agent"
+      to: "CATS::ToolRegistry"
+      data: "ToolCall (name, input, id)"
+      protocol: "Direct function call (in-process)"
+      semantics: "Tool dispatch"
+    
+    - from: "CATS::ToolRegistry"
+      to: "abk[executor]"
+      data: "ExecutionRequest (command, args)"
+      protocol: "Function call (in-process)"
+      semantics: "Command execution dispatch"
+    
+    - from: "abk[executor]"
+      to: "CATS::ToolRegistry"
+      data: "ExecutionResult (stdout, stderr, code)"
+      protocol: "Function call (in-process)"
+      semantics: "Command result collection"
+    
+    - from: "CATS::ToolRegistry"
+      to: "abk::agent"
+      data: "ToolResult (formatted via templates)"
+      protocol: "Function call + InternalMessage"
+      semantics: "Tool result integration"
+
+  # Lifecycle template requests
+  lifecycle_flow:
+    - from: "abk::agent"
+      to: "abk[lifecycle]"
+      data: "TemplateRequest (name, context)"
+      protocol: "Function call to WASM plugin"
+      semantics: "Request template rendering"
+    
+    - from: "abk[lifecycle]"
+      to: "abk::agent"
+      data: "RenderedTemplate (string or JSON)"
+      protocol: "Function return (WASM boundary crossing)"
+      semantics: "Rendered template response"
+
+  # Checkpoint flow
+  checkpoint_flow:
+    - from: "abk::agent"
+      to: "abk[checkpoint]"
+      data: "CheckpointData (messages, context, state)"
+      protocol: "Function call (in-process)"
+      semantics: "Save session for resume"
+    
+    - from: "abk[checkpoint]"
+      to: "abk::agent"
+      data: "RestoredSession (messages, context)"
+      protocol: "Function call (in-process)"
+      semantics: "Restore session from checkpoint"
+
+  # Observability flow
+  observability_flow:
+    - from: "abk::agent"
+      to: "abk[observability]"
+      data: "LogEvent (level, message, metadata)"
+      protocol: "Function call (fire-and-forget or buffered)"
+      semantics: "Async logging"
+
+coordination:
+  # Workflow orchestration
+  workflow_loop:
+    - step: 1
+      action: "Load session (from checkpoint or create new)"
+      owner: "abk::agent"
+      dependencies: "abk[checkpoint] if resuming"
+    
+    - step: 2
+      action: "Format messages and invoke provider"
+      owner: "abk::agent"
+      dependencies: "UMF formatter, abk[provider]"
+    
+    - step: 3
+      action: "Check for tool calls in response"
+      owner: "abk::agent"
+      condition: "response.has_tool_calls()"
+      yes_path: "Proceed to step 4"
+      no_path: "Jump to step 5"
+    
+    - step: 4
+      action: "Execute tools via CATS registry"
+      owner: "abk::agent"
+      dependencies: "CATS, abk[executor]"
+      loop: "For each tool call"
+      barrier: "Wait for all tools to complete before next provider call"
+    
+    - step: 5
+      action: "Check termination condition"
+      owner: "abk::agent"
+      condition: "response.is_final() OR iteration >= max_iterations"
+      yes_path: "Jump to step 7"
+      no_path: "Jump to step 2"
+    
+    - step: 6
+      action: "Checkpoint session (periodic or on completion)"
+      owner: "abk::agent"
+      dependencies: "abk[checkpoint]"
+    
+    - step: 7
+      action: "Return final session summary"
+      owner: "abk::agent"
+
+  # Component synchronization
+  component_readiness:
+    - component: "abk[provider]"
+      required_before: "First invoke"
+      check: "Provider::is_ready() -> bool"
+    
+    - component: "abk[lifecycle]"
+      required_before: "Template rendering"
+      check: "Lifecycle::is_loaded() -> bool"
+    
+    - component: "CATS::ToolRegistry"
+      required_before: "Tool execution"
+      check: "ToolRegistry::has_tools() -> bool"
+    
+    - component: "abk[executor]"
+      required_before: "Command execution"
+      check: "Executor::is_available() -> bool"
+
+  # Error handling and retry
+  fault_tolerance:
+    - fault: "Provider timeout"
+      handler: "Retry with backoff (via abk[orchestration])"
+      max_retries: 3
+      logging: "Via abk[observability]"
+    
+    - fault: "Tool execution failure"
+      handler: "Capture error, report to agent, continue"
+      logging: "Via abk[observability]"
+    
+    - fault: "Checkpoint failure"
+      handler: "Log warning, continue (session state in memory)"
+      logging: "Via abk[observability]"
+
+dependencies:
+  internal:
+    - "UMF" # InternalMessage, ContentBlock, ToolCall, ToolResult
+    - "CATS" # ToolRegistry, ToolCall execution
+    - "abk[provider]" # Provider trait and factory
+    - "abk[lifecycle]" # Lifecycle plugin loading
+    - "abk[executor]" # Command execution
+    - "abk[checkpoint]" # Session persistence
+    - "abk[orchestration]" # Workflow coordination
+    - "abk[observability]" # Logging and telemetry
+    - "abk[config]" # Configuration
+
+  external:
+    - "tokio" # Async runtime
+    - "serde_json" # JSON serialization
+    - "wasmtime" # WASM plugin loading (via abk[lifecycle])
+
+notes: |
+  - abk::agent is the central runtime orchestrator.
+  - It does NOT implement provider logic, tool execution, lifecycle rendering, or checkpointing;
+    it coordinates calls to these components.
+  - Message flow is synchronous (in-process function calls).
+  - All coordination of async/parallel execution is delegated to abk[orchestration].
+  - Session state is the primary shared mutable resource; all components work on a shared session object.
+  - Component readiness is checked during agent construction, not during workflow execution.

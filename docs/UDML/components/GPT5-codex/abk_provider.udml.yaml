@@ -1,0 +1,111 @@
+format: UDML-YAML-0.1
+component: "abk[provider]"
+summary: "ProviderFactory and LlmProvider trait implementations that adapt agent messages into backend-specific requests."
+context:
+  crate: "abk"
+  feature_flags:
+    - provider
+  upstream_interfaces:
+    - UMF ChatML adapters
+    - abk::config::ProviderConfig
+    - Provider-WASM
+    - HTTP clients
+  downstream_interfaces:
+    - abk::agent
+    - abk::orchestration
+
+domains:
+  information:
+    - name: provider_config
+      ownership: abk[provider]
+      description: "Typed configuration describing backend endpoints, models, auth tokens, timeout policies, and streaming preferences."
+      shape: |
+        struct ProviderConfig {
+          backend: BackendKind,
+          model: String,
+          auth: AuthStrategy,
+          streaming: bool,
+          timeouts: TimeoutPolicy,
+          request_limits: RequestLimits
+        }
+    - name: generate_request
+      ownership: abk[provider]
+      description: "Canonical request payload sent to providers after ChatML formatting."
+      shape: |
+        struct GenerateRequest {
+          messages: Vec<ChatMLMessage>,
+          tools: Vec<ProviderToolSpec>,
+          temperature: f32,
+          max_tokens: Option<u32>,
+          metadata: HashMap<String, String>
+        }
+  access:
+    - name: credential_access
+      subject: abk[provider]
+      description: "Access to secrets loaded from environment or config for provider auth."
+      rules:
+        - read-once into in-memory Secret type
+        - redact on logs via observability hooks
+    - name: wasm_module_access
+      subject: ProviderFactory
+      description: "May read provider WASM binaries from providers/ directories; execution sandboxed via wasmtime."
+      rules:
+        - read-only file access
+        - instantiate with capability-limited imports
+  manipulation:
+    - name: request_enrichment
+      description: "Mutate GenerateRequest with backend-specific fields (e.g., stop sequences, tool choice)."
+      operations:
+        - attach_tool_schema
+        - set_streaming_flags
+        - patch_temperature
+    - name: response_normalization
+      description: "Convert backend responses into UMF-aligned GenerateResponse structures."
+      operations:
+        - map_delta_events
+        - recover_tool_calls
+        - coerce_metadata
+  extract:
+    - name: provider_capabilities_projection
+      description: "Derive capability set (supports_tools, supports_streaming) from backend descriptors for orchestration."
+      outputs:
+        - ProviderCapabilities struct
+    - name: cost_estimation
+      description: "Estimate token usage or cost based on provider metrics."
+      outputs:
+        - CostEstimate
+  movement:
+    - name: transport_http
+      source: abk[provider]
+      destination: remote LLM HTTP APIs
+      protocol: "HTTPS JSON"
+      payload: backend-specific request body
+      notes: "Executed when backend is http-native."
+    - name: transport_wasm
+      source: abk[provider]
+      destination: Provider-WASM
+      protocol: "wasmtime::Func call"
+      payload: serialized GenerateRequest and streaming events
+      notes: "WASM returns normalized JSON; host handles actual network."
+    - name: capability_broadcast
+      source: ProviderFactory
+      destination: abk::agent / orchestration
+      protocol: "Struct return"
+      payload: ProviderCapabilities
+  coordination:
+    - name: provider_selection
+      participants:
+        - ProviderFactory
+        - abk::config
+        - Lifecycle-WASM (optional hints)
+      triggers:
+        - session_start
+      policy: "Factory chooses backend implementation (WASM vs native) based on config & lifecycle hints; decision cached per session."
+    - name: streaming_loop
+      participants:
+        - abk[provider]
+        - abk::orchestration
+        - UMF streaming adapters
+      triggers:
+        - stream_event
+      policy: "Provider emits streaming deltas; orchestration yields control to agent for partial updates."

@@ -1,0 +1,94 @@
+format: UDML-YAML-0.1
+component: "abk::cli"
+summary: "Bootstrap entry that parses arguments, loads configuration, and instantiates agent contexts."
+context:
+  crate: "abk"
+  feature_flags:
+    - cli
+    - config
+    - observability
+  upstream_interfaces:
+    - std::env
+    - abk::config
+    - abk::agent
+  downstream_interfaces:
+    - host stdout/stderr
+    - config/trustee.toml
+
+domains:
+  information:
+    - name: cli_arguments
+      ownership: abk::cli
+      description: "Structured representation of command line arguments, env overrides, and task payloads."
+      shape: |
+        struct CliInvocation {
+          command: String,
+          task: Option<String>,
+          config_path: Option<PathBuf>,
+          flags: HashMap<String, String>
+        }
+    - name: runtime_context
+      ownership: abk::cli
+      description: "Context object passed into agent creation containing resolved config, logging sinks, and filesystem roots."
+      shape: |
+        struct DefaultCommandContext {
+          config: abk::config::Configuration,
+          environment: EnvSnapshot,
+          io: HostIo,
+          logging: LoggerHandle
+        }
+  access:
+    - name: config_read
+      subject: abk::cli
+      description: "CLI reads configuration files and environment variables via abk[config]; it cannot mutate persisted config."
+      rules:
+        - read-only on file system paths provided
+        - environment lookups filtered through whitelist
+    - name: stdout_stderr_access
+      subject: abk::cli
+      description: "CLI owns process stdout/stderr; other modules must log through provided handles."
+      rules:
+        - direct writes limited to CLI progress and fatal errors
+  manipulation:
+    - name: argument_parsing
+      description: "Parse raw argv into CliInvocation using clap-style parsers."
+      operations:
+        - parse_args
+        - validate_flags
+    - name: context_materialization
+      description: "Construct DefaultCommandContext with config loaders and logging wiring."
+      operations:
+        - load_config
+        - attach_logger
+        - prepare_agent_builder
+  extract:
+    - name: help_generation
+      description: "Render help/usage text from command schema."
+      outputs:
+        - usage_text
+    - name: task_template_projection
+      description: "For templated commands, extract lifecycle template metadata for display."
+      outputs:
+        - list_of_templates
+  movement:
+    - name: config_loading
+      source: abk::cli
+      destination: filesystem + abk::config
+      protocol: "File read + TOML parse"
+      payload: config/trustee.toml, env overrides
+      notes: "Delegates to abk[config] for merge logic."
+    - name: agent_construction_call
+      source: abk::cli
+      destination: abk::agent
+      protocol: "Rust constructor call"
+      payload: DefaultCommandContext
+  coordination:
+    - name: process_lifecycle
+      participants:
+        - abk::cli
+        - abk::agent
+        - host process
+      triggers:
+        - command_invoked
+        - agent_exit
+      policy: "CLI owns top-level error handling; ensures agent termination returns appropriate exit codes."

@@ -1,0 +1,118 @@
+component: lifecycle-wasm
+description: "WASM lifecycle plugins providing agent morphing, task classification, and template rendering"
+
+information:
+  - name: LifecycleWasm
+    description: "WASM module interface for lifecycle management"
+    schema:
+      classify_task: "fn(String) -> String"
+      load_template: "fn(String) -> String"
+      render_template: "fn(String, String) -> String"
+      get_agent_config: "fn() -> String"
+
+  - name: TaskClassification
+    description: "Result of task classification"
+    schema:
+      task_type: string
+      confidence: float
+      suggested_tools: "Vec<String>"
+
+  - name: TemplateDefinition
+    description: "Template structure for rendering"
+    schema:
+      name: string
+      content: string
+      variables: "Vec<String>"
+      context_requirements: "Vec<String>"
+
+access:
+  - name: read_wasm_lifecycle
+    description: "Access compiled lifecycle WASM modules"
+    rules:
+      - source: "filesystem (~/.trustee/lifecycles/)"
+      - method: "wasmtime::Module::from_file()"
+      - visibility: "internal"
+
+  - name: read_template_definitions
+    description: "Access template definitions from lifecycle"
+    rules:
+      - source: "LifecycleWasm"
+      - method: "load_template(name)"
+      - visibility: "internal"
+
+manipulation:
+  - name: instantiate_lifecycle
+    description: "Create lifecycle WASM instance"
+    rules:
+      - input: "WasmModule"
+      - operation: "LifecycleWasm::new(module)"
+      - validation: "required functions exported"
+
+  - name: register_lifecycle_templates
+    description: "Register templates from lifecycle plugin"
+    rules:
+      - input: "TemplateDefinitions"
+      - operation: "lifecycle.register_templates(templates)"
+      - constraints: "template names unique"
+
+extract:
+  - name: classify_user_task
+    description: "Extract task classification from user input"
+    rules:
+      - input: "TaskDescription"
+      - transform: "lifecycle.classify_task() -> parse_result"
+      - output: "TaskClassification"
+
+  - name: render_action_template
+    description: "Extract rendered template for agent actions"
+    rules:
+      - input: "TemplateName + Context"
+      - transform: "lifecycle.render_template() -> process_output"
+      - output: "RenderedContent"
+
+  - name: derive_agent_behavior
+    description: "Extract agent behavior configuration"
+    rules:
+      - input: "TaskType"
+      - transform: "lifecycle.get_agent_config() -> parse_config"
+      - output: "AgentBehaviorConfig"
+
+movement:
+  - name: wasm_lifecycle_calls
+    description: "Call lifecycle WASM functions"
+    rules:
+      - from: "request data"
+      - to: "WASM runtime"
+      - protocol: "WASM function interface"
+      - boundaries: "WASM runtime boundary"
+
+  - name: template_rendering
+    description: "Route template rendering to lifecycle"
+    rules:
+      - from: "template requests"
+      - to: "LifecycleWasm.render_template()"
+      - protocol: "name + JSON context"
+      - boundaries: "WASM function call boundary"
+
+  - name: task_classification_routing
+    description: "Route task analysis to lifecycle"
+    rules:
+      - from: "task descriptions"
+      - to: "LifecycleWasm.classify_task()"
+      - protocol: "string input"
+      - boundaries: "WASM function call boundary"
+
+coordination:
+  - name: lifecycle_initialization
+    description: "Coordinate lifecycle plugin loading"
+    primitives:
+      - discovery: "scan_directory() -> validate_wasm() -> load_module()"
+      - instantiation: "create_instance() -> export_functions() -> test_calls()"
+      - registration: "register_templates() -> configure_behavior() -> ready_for_use()"
+
+  - name: agent_morphing
+    description: "Coordinate agent behavior changes"
+    primitives:
+      - classification: "analyze_task() -> select_lifecycle() -> load_plugin()"
+      - adaptation: "switch_behavior() -> update_templates() -> reconfigure_tools()"
+      - execution: "apply_templates() -> route_actions() -> monitor_behavior()"

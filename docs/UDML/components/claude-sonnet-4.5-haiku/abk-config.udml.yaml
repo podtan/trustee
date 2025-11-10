@@ -1,0 +1,397 @@
+---
+# UDML: abk[config] — Configuration Loader
+# Loads and manages runtime configuration from TOML files and environment
+
+metadata:
+  name: "abk[config]"
+  version: "0.1.24"
+  owner: "ABK (Agent Builder Kit)"
+  responsibility: "TOML configuration loading, environment variable resolution, config validation"
+
+information:
+  # Configuration file structure
+  config_file_schema:
+    - section: "[agent]"
+      fields:
+        - name: max_iterations
+          type: u32
+          semantics: "Maximum iterations before termination"
+          default: 10
+        - name: timeout_seconds
+          type: u64
+          semantics: "Timeout per agent iteration"
+          default: 300
+    
+    - section: "[llm]"
+      fields:
+        - name: provider
+          type: String
+          semantics: "LLM provider type (tanbal, openai, etc.)"
+          default: "tanbal"
+        - name: model
+          type: String
+          semantics: "Model name"
+          default: "gpt-4o"
+        - name: enable_streaming
+          type: bool
+          semantics: "Enable streaming responses"
+          default: true
+        - name: temperature
+          type: f32
+          semantics: "Sampling temperature"
+          default: 0.7
+    
+    - section: "[checkpointing]"
+      fields:
+        - name: enabled
+          type: bool
+          semantics: "Enable session checkpointing"
+          default: true
+        - name: checkpoint_interval
+          type: u32
+          semantics: "Iterations between checkpoints"
+          default: 5
+        - name: storage_path
+          type: String
+          semantics: "Directory for checkpoint files"
+          default: "~/.trustee/checkpoints"
+    
+    - section: "[observability]"
+      fields:
+        - name: log_level
+          type: String
+          enum: ["off", "error", "warn", "info", "debug", "trace"]
+          semantics: "Logging level"
+          default: "info"
+        - name: log_file
+          type: Option<String>
+          semantics: "Optional log file path"
+        - name: structured_logging
+          type: bool
+          semantics: "Enable structured JSON logging"
+          default: false
+    
+    - section: "[templates]"
+      fields:
+        - name: lifecycle_plugin_path
+          type: String
+          semantics: "Path to lifecycle WASM plugin"
+          default: "./lifecycles/coder.wasm"
+        - name: custom_template_dir
+          type: Option<String>
+          semantics: "Optional directory for custom templates"
+    
+    - section: "[execution]"
+      fields:
+        - name: command_timeout_seconds
+          type: u64
+          semantics: "Timeout for command execution"
+          default: 30
+        - name: max_command_output_bytes
+          type: usize
+          semantics: "Max captured output size"
+          default: 1_000_000
+    
+    - section: "[tools]"
+      fields:
+        - name: enabled_tools
+          type: Vec<String>
+          semantics: "List of enabled tool names"
+          default: '["file_read", "file_write", "run_command"]'
+        - name: sandbox_mode
+          type: bool
+          semantics: "Restrict file operations to sandbox"
+          default: true
+
+  # Runtime configuration object
+  runtime_config:
+    - field: agent_config
+      type: AgentConfig
+      semantics: "Agent runtime settings"
+    - field: llm_config
+      type: LlmConfig
+      semantics: "LLM provider configuration"
+    - field: checkpoint_config
+      type: CheckpointConfig
+      semantics: "Session checkpointing settings"
+    - field: observability_config
+      type: ObservabilityConfig
+      semantics: "Logging and telemetry settings"
+    - field: template_config
+      type: TemplateConfig
+      semantics: "Template and lifecycle plugin settings"
+    - field: execution_config
+      type: ExecutionConfig
+      semantics: "Command execution settings"
+    - field: tool_config
+      type: ToolConfig
+      semantics: "Tool registry configuration"
+
+  # Environment variable overrides
+  env_overrides:
+    - env_var: "TRUSTEE_MAX_ITERATIONS"
+      maps_to: "agent_config.max_iterations"
+      semantics: "Override max iterations"
+    
+    - env_var: "TRUSTEE_LOG_LEVEL"
+      maps_to: "observability_config.log_level"
+      semantics: "Override log level"
+    
+    - env_var: "LLM_PROVIDER"
+      maps_to: "llm_config.provider"
+      semantics: "Override LLM provider"
+    
+    - env_var: "OPENAI_API_KEY"
+      maps_to: "llm_config.api_key"
+      semantics: "OpenAI API key"
+    
+    - env_var: "ANTHROPIC_AUTH_TOKEN"
+      maps_to: "llm_config.api_key"
+      semantics: "Anthropic API key"
+    
+    - env_var: "GITHUB_TOKEN"
+      maps_to: "llm_config.api_key"
+      semantics: "GitHub API token for Copilot"
+
+access:
+  # Configuration loading
+  config_loading:
+    - query: "load_from_file(path: &Path) -> Result<Config, Error>"
+      visibility: "Public"
+      semantics: "Load configuration from TOML file"
+      errors:
+        - "FileNotFound"
+        - "InvalidToml"
+        - "ValidationFailed"
+    
+    - query: "load_defaults() -> Config"
+      visibility: "Public"
+      semantics: "Load default configuration"
+
+  # Configuration access
+  config_access:
+    - query: "get_agent_config() -> &AgentConfig"
+      visibility: "Public (read-only)"
+      semantics: "Access agent configuration"
+    
+    - query: "get_llm_config() -> &LlmConfig"
+      visibility: "Public (read-only)"
+      semantics: "Access LLM configuration (without secrets)"
+    
+    - query: "get_llm_secret(key: &str) -> Option<&str>"
+      visibility: "Private (auth/secure)"
+      semantics: "Retrieve API keys and secrets"
+    
+    - query: "get_tool_config() -> &ToolConfig"
+      visibility: "Public (read-only)"
+      semantics: "Access tool configuration"
+
+  # Validation queries
+  validation:
+    - query: "validate_config(config: &Config) -> Result<(), Vec<ValidationError>>"
+      visibility: "Public"
+      semantics: "Validate entire configuration against schema"
+
+manipulation:
+  # Configuration loading
+  load_operations:
+    - operation: "parse_toml(content: &str) -> Result<ConfigData, TomlError>"
+      semantics: "Parse TOML file content"
+      precondition: "Content is valid TOML"
+      postcondition: "ConfigData structure populated"
+    
+    - operation: "validate_required_fields(config: &ConfigData) -> Result<(), String>"
+      semantics: "Ensure all required configuration fields are present"
+      precondition: "ConfigData is populated"
+      postcondition: "All required fields validated"
+
+  # Environment override application
+  override_operations:
+    - operation: "apply_environment_overrides(config: &mut Config, env: &HashMap<String, String>)"
+      semantics: "Apply environment variable overrides to configuration"
+      precondition: "Config is loaded, environment is accessible"
+      postcondition: "Config fields overridden by matching env vars"
+      examples:
+        - "TRUSTEE_LOG_LEVEL=debug -> config.observability_config.log_level = 'debug'"
+        - "OPENAI_API_KEY=sk-xxx -> config.llm_config.api_key = 'sk-xxx'"
+
+  # Configuration finalization
+  finalization:
+    - operation: "finalize_config(config: Config) -> FinalizedConfig"
+      semantics: "Finalize configuration and prepare for runtime use"
+      precondition: "All validation passed"
+      postcondition: "Configuration immutable and ready for agents"
+      logic: "Resolve relative paths, cache parsed values, set computed fields"
+
+extract:
+  # Configuration schema extraction
+  schema_extraction:
+    - extract: "extract_config_schema() -> JsonSchema"
+      rule: "Generate JSON Schema from configuration type definitions"
+      output_owner: "abk[config]"
+      use_case: "Documentation, validation tools, IDE hints"
+
+  # Derived configuration values
+  derived_values:
+    - extract: "compute_effective_timeout() -> Duration"
+      rule: "Combine agent timeout and command timeout"
+      input_owner: "agent_config, execution_config"
+      output_owner: "abk::agent"
+      logic: "min(agent_timeout, command_timeout) for safe orchestration"
+    
+    - extract: "resolve_template_paths() -> HashMap<String, PathBuf>"
+      rule: "Resolve all template and plugin paths to absolute paths"
+      input_owner: "template_config"
+      output_owner: "abk[lifecycle]"
+      logic: "Expand ~, resolve relative to config dir, validate accessibility"
+    
+    - extract: "extract_active_tools() -> HashSet<String>"
+      rule: "Filter tool registry to enabled tools only"
+      input_owner: "tool_config.enabled_tools"
+      output_owner: "CATS::ToolRegistry"
+      logic: "Filter based on enabled_tools list and sandbox mode"
+
+  # Log configuration extraction
+  logging_extraction:
+    - extract: "extract_log_config() -> LogConfig"
+      rule: "Create logging backend configuration from observability_config"
+      input_owner: "observability_config"
+      output_owner: "abk[observability]"
+
+movement:
+  # Configuration file discovery
+  bootstrap_discovery:
+    - from: "abk::cli"
+      to: "abk[config]::ConfigurationLoader"
+      data: "config_path (PathBuf, or default 'config/trustee.toml')"
+      protocol: "Function call (in-process)"
+      semantics: "Trigger config loading"
+    
+    - from: "filesystem"
+      to: "abk[config]"
+      data: "config/trustee.toml (TOML bytes)"
+      protocol: "File read"
+      semantics: "Load config from disk"
+
+  # Environment variable collection
+  env_collection:
+    - from: "OS environment"
+      to: "abk[config]"
+      data: "Environment variables (HashMap<String, String>)"
+      protocol: "Environment read"
+      semantics: "Collect all TRUSTEE_* and LLM_* environment variables"
+
+  # Configuration propagation
+  config_propagation:
+    - from: "abk[config]"
+      to: "abk::agent"
+      data: "FinalizedConfig (all sections)"
+      protocol: "Function parameter (in-process)"
+      semantics: "Agent receives complete configuration"
+    
+    - from: "abk[config]"
+      to: "abk[provider]::ProviderFactory"
+      data: "LlmConfig (provider type, model, API key)"
+      protocol: "Function parameter (in-process)"
+      semantics: "Provider factory gets LLM settings"
+    
+    - from: "abk[config]"
+      to: "abk[checkpoint]::SessionManager"
+      data: "CheckpointConfig (storage path, interval)"
+      protocol: "Function parameter (in-process)"
+      semantics: "Checkpoint manager gets storage settings"
+    
+    - from: "abk[config]"
+      to: "abk[observability]::Logger"
+      data: "ObservabilityConfig (log level, file, format)"
+      protocol: "Function parameter (in-process)"
+      semantics: "Logger gets output configuration"
+    
+    - from: "abk[config]"
+      to: "abk[lifecycle]::LifecycleLoader"
+      data: "TemplateConfig (plugin path, custom template dir)"
+      protocol: "Function parameter (in-process)"
+      semantics: "Lifecycle loader gets plugin paths"
+    
+    - from: "abk[config]"
+      to: "abk[executor]::CommandExecutor"
+      data: "ExecutionConfig (command timeout, max output)"
+      protocol: "Function parameter (in-process)"
+      semantics: "Executor gets execution limits"
+    
+    - from: "abk[config]"
+      to: "CATS::ToolRegistry"
+      data: "ToolConfig (enabled tools, sandbox mode)"
+      protocol: "Function parameter (in-process)"
+      semantics: "Tool registry gets filter rules"
+
+coordination:
+  # Configuration loading sequence
+  loading_sequence:
+    - step: 1
+      action: "Read config file from disk"
+      owner: "abk[config]"
+      input: "config_path"
+      error_handling: "If not found, use defaults and log warning"
+    
+    - step: 2
+      action: "Parse TOML content"
+      owner: "abk[config]"
+      error_handling: "If invalid TOML, raise error and fail startup"
+    
+    - step: 3
+      action: "Validate required fields"
+      owner: "abk[config]"
+      error_handling: "If validation fails, log errors and fail startup"
+    
+    - step: 4
+      action: "Collect environment variables"
+      owner: "abk[config]"
+      semantics: "Non-blocking; safe to proceed if no env vars found"
+    
+    - step: 5
+      action: "Apply environment overrides"
+      owner: "abk[config]"
+      semantics: "Env vars take precedence over file values"
+    
+    - step: 6
+      action: "Resolve paths and compute derived values"
+      owner: "abk[config]"
+      error_handling: "If paths invalid, log warning but continue if possible"
+    
+    - step: 7
+      action: "Return FinalizedConfig to caller"
+      owner: "abk[config]"
+      postcondition: "Config immutable for rest of session"
+
+  # Configuration scope and lifetime
+  scope:
+    - scope: "Process-wide"
+      semantics: "Config loaded once at startup, shared by all components"
+      modification: "No runtime changes; restart required for config changes"
+
+  # Secret handling
+  secret_handling:
+    - secret: "API_KEY"
+      storage: "Environment variable or secrets manager"
+      access_rule: "Only accessible via get_llm_secret(), logged as '***' in debug output"
+      rotation: "Not supported; requires restart"
+
+dependencies:
+  internal:
+    - "abk[observability]" # For config-related logging
+  
+  external:
+    - "toml" # TOML file parsing
+    - "serde" # Serialization/deserialization
+    - "serde_json" # JSON schema generation
+    - "std::env" # Environment variable access
+
+notes: |
+  - abk[config] is a pure loader and validator; it does NOT execute config directives.
+  - Configuration is immutable after loading (no runtime modifications).
+  - Paths in config are resolved to absolute paths during loading.
+  - Secrets (API keys) are NOT logged in debug output; use get_llm_secret() for access.
+  - Environment variables always override file values (standard practice).
+  - Configuration validation is strict: invalid configs fail fast at startup.
+  - All relative paths in config are resolved relative to the config file directory.

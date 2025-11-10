@@ -1,0 +1,210 @@
+# UDML Specification for Provider-WASM / Tanbal (WASM Provider)
+# This component implements WASM provider that formats requests and parses responses
+
+information:
+  # WASM Provider data structures
+  - name: WasmProvider
+    description: "WASM module implementing LLM provider interface"
+    schema:
+      type: object
+      properties:
+        module_path: { type: string }
+        instance: { type: string, description: "WASM instance handle" }
+        supported_backends: { type: array, items: { type: string } }
+        config: { type: object }
+
+  - name: WasmRequest
+    description: "Request format for WASM provider calls"
+    schema:
+      type: object
+      properties:
+        method: { type: string, enum: [format_request, parse_response, parse_stream_event] }
+        config_json: { type: string }
+        messages_json: { type: string }
+        response_body: { type: string }
+        event_data: { type: string }
+
+  - name: WasmResponse
+    description: "Response format from WASM provider calls"
+    schema:
+      type: object
+      properties:
+        success: { type: boolean }
+        result: { type: string }
+        error: { type: string }
+
+  - name: BackendConfig
+    description: "Configuration for different LLM backends"
+    schema:
+      type: object
+      properties:
+        backend_type: { type: string, enum: [openai, anthropic, github_copilot] }
+        api_key: { type: string }
+        base_url: { type: string }
+        model: { type: string }
+        timeout_seconds: { type: integer }
+        streaming_enabled: { type: boolean }
+
+access:
+  # WASM Provider access patterns
+  - name: list_supported_backends
+    description: "List LLM backends supported by WASM provider"
+    returns:
+      type: array
+      items:
+        type: object
+        properties:
+          name: { type: string }
+          capabilities: { type: array, items: { type: string } }
+          rate_limits: { type: object }
+
+  - name: get_provider_status
+    description: "Get status of WASM provider instance"
+    parameters:
+      provider_instance: { $ref: "#/definitions/WasmProvider" }
+    returns:
+      type: object
+      properties:
+        status: { type: string, enum: [loaded, running, error] }
+        active_backends: { type: array, items: { type: string } }
+        memory_usage: { type: integer }
+
+  - name: get_backend_config
+    description: "Get configuration for specific backend"
+    parameters:
+      backend_name: { type: string }
+    returns: { $ref: "#/definitions/BackendConfig" }
+
+manipulation:
+  # WASM Provider operations
+  - name: load_wasm_provider
+    description: "Load WASM provider module"
+    parameters:
+      module_path: { type: string }
+      config: { type: object }
+    creates: { $ref: "#/definitions/WasmProvider" }
+
+  - name: configure_backend
+    description: "Configure LLM backend in WASM provider"
+    parameters:
+      provider: { $ref: "#/definitions/WasmProvider" }
+      backend_config: { $ref: "#/definitions/BackendConfig" }
+    modifies: { $ref: "#/definitions/WasmProvider" }
+
+  - name: format_llm_request
+    description: "Format internal request for LLM backend"
+    parameters:
+      provider: { $ref: "#/definitions/WasmProvider" }
+      messages: { type: array, items: { $ref: "#/definitions/InternalMessage" } }
+      config: { type: object }
+    creates: { type: string, description: "Formatted request" }
+
+  - name: parse_llm_response
+    description: "Parse response from LLM backend"
+    parameters:
+      provider: { $ref: "#/definitions/WasmProvider" }
+      response_body: { type: string }
+    creates: { $ref: "#/definitions/GenerateResponse" }
+
+extract:
+  # WASM Provider computations
+  - name: validate_wasm_module
+    description: "Validate WASM module compatibility and interface"
+    input:
+      type: object
+      properties:
+        module_path: { type: string }
+        expected_interface: { type: object }
+    output:
+      type: object
+      properties:
+        is_valid: { type: boolean }
+        supported_methods: { type: array, items: { type: string } }
+        errors: { type: array, items: { type: string } }
+
+  - name: estimate_request_cost
+    description: "Estimate cost of LLM request based on backend"
+    input:
+      type: object
+      properties:
+        backend: { type: string }
+        request_data: { type: object }
+    output:
+      type: object
+      properties:
+        estimated_cost: { type: number }
+        currency: { type: string }
+        breakdown: { type: object }
+
+  - name: analyze_response_quality
+    description: "Analyze quality metrics of LLM response"
+    input: { type: string, description: "Response body" }
+    output:
+      type: object
+      properties:
+        token_count: { type: integer }
+        has_tool_calls: { type: boolean }
+        confidence_score: { type: number }
+        parsing_errors: { type: array, items: { type: string } }
+
+movement:
+  # WASM Provider data flow
+  - name: wasm_module_loading
+    description: "Load WASM modules into runtime"
+    from: "filesystem_wasm_files"
+    to: "wasm_instances"
+    protocol: "WASI_loading"
+    boundaries: ["filesystem_to_wasm_runtime"]
+
+  - name: cross_boundary_calls
+    description: "Make function calls across WASM boundary"
+    from: "host_function_calls"
+    to: "wasm_function_execution"
+    protocol: "WASM_FFI"
+    boundaries: ["native_to_wasm"]
+
+  - name: backend_api_routing
+    description: "Route requests to external LLM APIs"
+    from: "formatted_requests"
+    to: "llm_api_endpoints"
+    protocol: "HTTP/HTTPS"
+    boundaries: ["wasm_to_external_api"]
+
+  - name: response_parsing_flow
+    description: "Parse and normalize API responses"
+    from: "raw_api_responses"
+    to: "structured_responses"
+    protocol: "JSON_parsing"
+    boundaries: ["external_to_internal"]
+
+coordination:
+  # WASM Provider coordination
+  - name: backend_multiplexing
+    description: "Coordinate multiple LLM backends in single WASM module"
+    primitives:
+      - type: "backend_selection"
+        description: "Select appropriate backend based on request"
+      - type: "config_isolation"
+        description: "Isolate configuration between different backends"
+      - type: "error_isolation"
+        description: "Prevent errors in one backend from affecting others"
+
+  - name: streaming_response_handling
+    description: "Handle streaming responses from LLM APIs"
+    primitives:
+      - type: "chunk_assembly"
+        description: "Assemble streaming chunks into complete responses"
+      - type: "backpressure_management"
+        description: "Manage backpressure in streaming connections"
+      - type: "interruption_handling"
+        description: "Handle connection interruptions gracefully"
+
+  - name: resource_management
+    description: "Manage WASM module resources and lifecycle"
+    primitives:
+      - type: "memory_limits"
+        description: "Enforce memory limits on WASM instances"
+      - type: "instance_pooling"
+        description: "Pool and reuse WASM instances for performance"
+      - type: "cleanup_coordination"
+        description: "Ensure proper cleanup of WASM resources"

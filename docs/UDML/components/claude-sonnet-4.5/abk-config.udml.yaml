@@ -1,0 +1,202 @@
+# UDML Specification for abk[config] (Configuration Loader)
+# This component handles loading and merging configuration from TOML files and environment variables
+
+information:
+  # Configuration data structures
+  - name: Configuration
+    description: "Merged configuration from all sources (file + environment)"
+    schema:
+      type: object
+      properties:
+        llm: 
+          type: object
+          properties:
+            provider: { type: string }
+            model: { type: string }
+            base_url: { type: string }
+            enable_streaming: { type: boolean }
+        execution:
+          type: object
+          properties:
+            timeout_seconds: { type: integer }
+            max_iterations: { type: integer }
+            retry_attempts: { type: integer }
+        checkpointing:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            directory: { type: string }
+            compression: { type: boolean }
+        templates:
+          type: object
+          additionalProperties: { type: string }
+        logging:
+          type: object
+          properties:
+            level: { type: string }
+            file_output: { type: boolean }
+            console_output: { type: boolean }
+
+  - name: ConfigSource
+    description: "Individual configuration source (file or environment)"
+    schema:
+      type: object
+      properties:
+        type: { type: string, enum: [file, environment] }
+        path: { type: string }
+        priority: { type: integer }
+        last_modified: { type: string, format: date-time }
+
+  - name: ConfigValidationResult
+    description: "Result of configuration validation"
+    schema:
+      type: object
+      properties:
+        is_valid: { type: boolean }
+        errors: { type: array, items: { type: string } }
+        warnings: { type: array, items: { type: string } }
+
+access:
+  # Configuration access patterns
+  - name: get_config_value
+    description: "Get single configuration value by key path"
+    parameters:
+      key_path: { type: string, example: "llm.provider" }
+    returns: { type: string }
+
+  - name: get_config_section
+    description: "Get entire configuration section"
+    parameters:
+      section_name: { type: string, enum: [llm, execution, checkpointing, templates, logging] }
+    returns: { type: object }
+
+  - name: list_config_sources
+    description: "List all configuration sources and their priorities"
+    returns:
+      type: array
+      items: { $ref: "#/definitions/ConfigSource" }
+
+  - name: get_config_metadata
+    description: "Get metadata about configuration loading"
+    returns:
+      type: object
+      properties:
+        load_time: { type: string, format: date-time }
+        sources_used: { type: array, items: { type: string } }
+        validation_status: { $ref: "#/definitions/ConfigValidationResult" }
+
+manipulation:
+  # Configuration operations
+  - name: load_configuration
+    description: "Load and merge configuration from all sources"
+    parameters:
+      config_path: { type: string }
+    creates: { $ref: "#/definitions/Configuration" }
+
+  - name: reload_configuration
+    description: "Reload configuration from sources"
+    modifies: { $ref: "#/definitions/Configuration" }
+
+  - name: set_config_override
+    description: "Set runtime configuration override"
+    parameters:
+      key_path: { type: string }
+      value: { type: string }
+    modifies: { $ref: "#/definitions/Configuration" }
+
+  - name: reset_config_overrides
+    description: "Clear all runtime configuration overrides"
+    modifies: { $ref: "#/definitions/Configuration" }
+
+extract:
+  # Configuration computations
+  - name: validate_configuration
+    description: "Validate configuration against schema and business rules"
+    input: { $ref: "#/definitions/Configuration" }
+    output: { $ref: "#/definitions/ConfigValidationResult" }
+
+  - name: interpolate_variables
+    description: "Replace variable placeholders in configuration values"
+    input: { $ref: "#/definitions/Configuration" }
+    output: { $ref: "#/definitions/Configuration" }
+
+  - name: generate_config_template
+    description: "Generate default configuration template"
+    input: { type: object, description: "Feature flags and requirements" }
+    output: { $ref: "#/definitions/Configuration" }
+
+  - name: diff_configurations
+    description: "Compare two configuration instances"
+    input: 
+      type: object
+      properties:
+        old_config: { $ref: "#/definitions/Configuration" }
+        new_config: { $ref: "#/definitions/Configuration" }
+    output:
+      type: object
+      properties:
+        added: { type: object }
+        removed: { type: object }
+        modified: { type: object }
+
+movement:
+  # Configuration data flow
+  - name: file_loading
+    description: "Load configuration from TOML files"
+    from: "filesystem_paths"
+    to: { $ref: "#/definitions/Configuration" }
+    protocol: "TOML_parser"
+    boundaries: ["filesystem_to_memory"]
+
+  - name: environment_variable_loading
+    description: "Load configuration from environment variables"
+    from: "environment_variables"
+    to: { $ref: "#/definitions/Configuration" }
+    protocol: "env_var_parser"
+    boundaries: ["process_env_to_memory"]
+
+  - name: config_merging
+    description: "Merge multiple configuration sources with priority"
+    from: { type: array, items: { $ref: "#/definitions/ConfigSource" } }
+    to: { $ref: "#/definitions/Configuration" }
+    protocol: "priority_merge"
+    boundaries: ["source_aggregation"]
+
+  - name: config_distribution
+    description: "Distribute configuration to consuming components"
+    from: { $ref: "#/definitions/Configuration" }
+    to: "component_configs"
+    protocol: "config_injection"
+    boundaries: ["central_config_to_components"]
+
+coordination:
+  # Configuration coordination
+  - name: source_priority_resolution
+    description: "Resolve conflicts between configuration sources"
+    primitives:
+      - type: "priority_ordering"
+        description: "Order sources by priority (env > file > defaults)"
+      - type: "conflict_resolution"
+        description: "Resolve key conflicts with priority rules"
+      - type: "merge_strategies"
+        description: "Different merge strategies for different data types"
+
+  - name: hot_reloading
+    description: "Handle configuration changes at runtime"
+    primitives:
+      - type: "file_watching"
+        description: "Watch configuration files for changes"
+      - type: "graceful_reloading"
+        description: "Reload config without disrupting running operations"
+      - type: "validation_before_apply"
+        description: "Validate new config before applying changes"
+
+  - name: schema_validation
+    description: "Validate configuration against schemas"
+    primitives:
+      - type: "type_checking"
+        description: "Validate data types and structure"
+      - type: "business_rule_validation"
+        description: "Validate business logic constraints"
+      - type: "cross_reference_validation"
+        description: "Validate relationships between config values"

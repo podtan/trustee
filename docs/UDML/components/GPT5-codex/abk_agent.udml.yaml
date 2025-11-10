@@ -1,0 +1,130 @@
+format: UDML-YAML-0.1
+component: "abk::agent"
+summary: "Runtime core that wires lifecycle, provider, tools, and state management for each agent session."
+context:
+  crate: "abk"
+  feature_flags:
+    - agent
+    - orchestration
+    - lifecycle
+    - provider
+    - executor
+    - checkpoint
+    - observability
+  upstream_interfaces:
+    - umf::InternalMessage
+    - cats::ToolRegistry
+    - abk::provider::LlmProvider
+    - abk::lifecycle::LifecycleHost
+    - abk::checkpoint::CheckpointStore
+  downstream_interfaces:
+    - Provider-WASM
+    - Lifecycle-WASM
+    - CATS tools
+    - UMF formatters
+
+domains:
+  information:
+    - name: session_state
+      ownership: abk::agent
+      description: "Aggregated runtime state for an agent run, including conversation history, tool inventory, lifecycle bindings, and checkpoints."
+      shape: |
+        struct SessionState {
+          id: SessionId,
+          lifecycle: LifecycleContext,
+          messages: Vec<umf::InternalMessage>,
+          pending_tool_calls: Vec<umf::ToolCall>,
+          tool_results: Vec<umf::ToolResult>,
+          provider_state: ProviderSession,
+          checkpoint_cursor: Option<CheckpointId>
+        }
+    - name: agent_runtime_config
+      ownership: abk::agent
+      description: "Materialized configuration used by the agent after config resolution and lifecycle templating."
+      shape: |
+        struct AgentRuntimeConfig {
+          entry_template: TemplateId,
+          system_messages: Vec<umf::InternalMessage>,
+          tool_window: usize,
+          execution_limits: ExecutionLimits,
+          logging_level: LogLevel
+        }
+  access:
+    - name: config_resolution
+      subject: abk::agent
+      description: "Agent may read resolved configuration from abk[config] and environment. Writes are prohibited; configuration is immutable after bootstrap."
+      rules:
+        - read-only access to AgentRuntimeConfig
+        - validation errors bubble to CLI caller
+    - name: checkpoint_restore
+      subject: abk::agent
+      description: "Agent can request prior session material from abk[checkpoint] using session id; write requires orchestration approval."
+      rules:
+        - reads require session id
+        - writes gated by coordination policy orchestrated via abk[orchestration]
+  manipulation:
+    - name: message_mutations
+      description: "Append assistant/user/tool messages to the session message vector following UMF invariants."
+      operations:
+        - append_user_message
+        - append_assistant_response
+        - attach_tool_result
+      invariants:
+        - tool_results must reference existing tool_call_id
+        - lifecycle system prompts remain prefix locked
+    - name: provider_state_updates
+      description: "Update provider session markers (request ids, streaming cursors)."
+      operations:
+        - record_request_start
+        - record_request_completion
+        - reset_on_error
+  extract:
+    - name: chatml_projection
+      description: "Transform UMF messages into provider-ready ChatML strings via UMF helpers."
+      outputs:
+        - ChatML transcript string
+        - Tool call envelopes for provider schema
+    - name: lifecycle_artifact_render
+      description: "Invoke lifecycle templates to extract prompts or observations from current state."
+      outputs:
+        - rendered_prompt_segments
+        - observation_summaries
+  movement:
+    - name: provider_request_dispatch
+      source: abk::agent
+      destination: abk::provider::LlmProvider
+      protocol: "Rust trait call -> optional WASM -> HTTP"
+      payload: ChatML transcript + GenerateConfig
+      notes: "Handles streaming and non-streaming flows; movements may cross WASM boundary via ProviderFactory."
+    - name: tool_invocation_flow
+      source: abk::agent
+      destination: cats::ToolRegistry
+      protocol: "UMF ToolCall -> ToolExecutionRequest"
+      payload: tool name, arguments, session metadata
+      notes: "Executor invoked for host commands; results returned as UMF ToolResult."
+    - name: checkpoint_sync
+      source: abk::agent
+      destination: abk::checkpoint
+      protocol: "serde_json checkpoint blob"
+      payload: SessionState snapshot
+  coordination:
+    - name: orchestration_cycle
+      participants:
+        - abk::agent
+        - abk::orchestration
+        - abk::provider
+        - cats::ToolRegistry
+        - abk::checkpoint
+      triggers:
+        - message_received
+        - provider_response
+        - checkpoint_interval
+      policy: "abk::agent delegates turn-based control to abk[orchestration] which sequences provider calls, tool executions, and checkpoint commits."
+    - name: lifecycle_binding
+      participants:
+        - abk::agent
+        - Lifecycle-WASM
+      triggers:
+        - session_start
+        - template_request
+      policy: "Lifecycle selected at session start remains bound; dynamic reclassification requires Lifecycle-WASM confirmation."

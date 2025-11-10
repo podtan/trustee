@@ -1,0 +1,215 @@
+# UDML Specification for CATS (Tool Registry + Tool Implementations)
+# This component provides a registry of tools (file ops, editing, search, run_command) and tool execution logic
+
+information:
+  # CATS data structures
+  - name: Tool
+    description: "Definition of a tool with its interface and capabilities"
+    schema:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        parameters: 
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              type: { type: string }
+              description: { type: string }
+              required: { type: boolean }
+        returns: { type: object }
+        safety_level: { type: string, enum: [safe, moderate, dangerous] }
+        categories: { type: array, items: { type: string } }
+
+  - name: ToolRegistry
+    description: "Registry containing all available tools"
+    schema:
+      type: object
+      properties:
+        tools: { type: object, additionalProperties: { $ref: "#/definitions/Tool" } }
+        categories: { type: object, additionalProperties: { type: array, items: { type: string } } }
+        metadata: { type: object }
+
+  - name: ToolInvocation
+    description: "Request to invoke a specific tool"
+    schema:
+      type: object
+      properties:
+        tool_name: { type: string }
+        parameters: { type: object }
+        invocation_id: { type: string }
+        timeout_seconds: { type: integer }
+        session_id: { type: string }
+
+  - name: ToolResult
+    description: "Result of tool execution"
+    schema:
+      type: object
+      properties:
+        invocation_id: { type: string }
+        tool_name: { type: string }
+        success: { type: boolean }
+        result: { type: object }
+        error: { type: string }
+        execution_time_ms: { type: integer }
+        metadata: { type: object }
+
+access:
+  # Tool access patterns
+  - name: list_available_tools
+    description: "List all tools in the registry"
+    returns:
+      type: array
+      items: { $ref: "#/definitions/Tool" }
+
+  - name: get_tool_definition
+    description: "Get detailed definition of a specific tool"
+    parameters:
+      tool_name: { type: string }
+    returns: { $ref: "#/definitions/Tool" }
+
+  - name: list_tools_by_category
+    description: "List tools filtered by category"
+    parameters:
+      category: { type: string }
+    returns:
+      type: array
+      items: { $ref: "#/definitions/Tool" }
+
+  - name: get_tool_execution_history
+    description: "Get execution history for a tool"
+    parameters:
+      tool_name: { type: string }
+      limit: { type: integer }
+    returns:
+      type: array
+      items: { $ref: "#/definitions/ToolResult" }
+
+manipulation:
+  # Tool operations
+  - name: register_tool
+    description: "Register a new tool in the registry"
+    parameters: { $ref: "#/definitions/Tool" }
+    modifies: { $ref: "#/definitions/ToolRegistry" }
+
+  - name: unregister_tool
+    description: "Remove a tool from the registry"
+    parameters:
+      tool_name: { type: string }
+    modifies: { $ref: "#/definitions/ToolRegistry" }
+
+  - name: invoke_tool
+    description: "Execute a tool with given parameters"
+    parameters: { $ref: "#/definitions/ToolInvocation" }
+    creates: { $ref: "#/definitions/ToolResult" }
+
+  - name: update_tool_definition
+    description: "Update the definition of an existing tool"
+    parameters:
+      tool_name: { type: string }
+      updates: { type: object }
+    modifies: { $ref: "#/definitions/Tool" }
+
+extract:
+  # Tool computations
+  - name: validate_tool_parameters
+    description: "Validate parameters against tool definition"
+    input:
+      type: object
+      properties:
+        tool: { $ref: "#/definitions/Tool" }
+        parameters: { type: object }
+    output:
+      type: object
+      properties:
+        is_valid: { type: boolean }
+        errors: { type: array, items: { type: string } }
+        coerced_parameters: { type: object }
+
+  - name: analyze_tool_usage
+    description: "Analyze usage patterns and performance of tools"
+    input:
+      type: array
+      items: { $ref: "#/definitions/ToolResult" }
+    output:
+      type: object
+      properties:
+        usage_frequency: { type: object, additionalProperties: { type: integer } }
+        average_execution_time: { type: object, additionalProperties: { type: number } }
+        success_rate: { type: object, additionalProperties: { type: number } }
+        error_patterns: { type: object, additionalProperties: { type: array, items: { type: string } } }
+
+  - name: generate_tool_documentation
+    description: "Generate documentation for tools"
+    input: { $ref: "#/definitions/ToolRegistry" }
+    output:
+      type: object
+      properties:
+        tool_descriptions: { type: object, additionalProperties: { type: string } }
+        usage_examples: { type: object, additionalProperties: { type: array, items: { type: string } } }
+        category_index: { type: object, additionalProperties: { type: array, items: { type: string } } }
+
+movement:
+  # Tool data flow
+  - name: tool_invocation_routing
+    description: "Route tool invocations to appropriate implementations"
+    from: { $ref: "#/definitions/ToolInvocation" }
+    to: "tool_implementations"
+    protocol: "dynamic_dispatch"
+    boundaries: ["registry_to_implementation"]
+
+  - name: result_formatting
+    description: "Format tool results for consumption by other components"
+    from: "raw_tool_output"
+    to: { $ref: "#/definitions/ToolResult" }
+    protocol: "result_normalization"
+    boundaries: ["implementation_to_standardized"]
+
+  - name: parameter_validation_flow
+    description: "Validate and transform parameters before tool execution"
+    from: "user_provided_parameters"
+    to: "validated_parameters"
+    protocol: "parameter_validation"
+    boundaries: ["external_to_internal"]
+
+  - name: error_handling_flow
+    description: "Handle and format tool execution errors"
+    from: "tool_exceptions"
+    to: "standardized_error_responses"
+    protocol: "error_normalization"
+    boundaries: ["implementation_to_consumer"]
+
+coordination:
+  # Tool coordination
+  - name: tool_execution_pipeline
+    description: "Coordinate the complete tool execution lifecycle"
+    primitives:
+      - type: "parameter_validation"
+        description: "Validate input parameters before execution"
+      - type: "execution_isolation"
+        description: "Isolate tool execution for safety and reliability"
+      - type: "result_processing"
+        description: "Process and normalize execution results"
+      - type: "error_recovery"
+        description: "Handle execution errors and recovery"
+
+  - name: registry_management
+    description: "Manage tool registration and discovery"
+    primitives:
+      - type: "dynamic_registration"
+        description: "Allow runtime registration of new tools"
+      - type: "version_management"
+        description: "Handle tool versioning and compatibility"
+      - type: "capability_discovery"
+        description: "Discover tool capabilities and constraints"
+
+  - name: safety_enforcement
+    description: "Enforce safety policies on tool execution"
+    primitives:
+      - type: "permission_checking"
+        description: "Check permissions before tool execution"
+      - type: "resource_limits"
+        description: "Enforce resource limits on tool usage"
+      - type: "audit_logging"
+        description: "Log all tool executions for audit purposes"

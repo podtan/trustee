@@ -1,0 +1,29 @@
+name: abk::observability
+description: "Logging/telemetry: provides structured logging and telemetry for sessions, LLM interactions, and errors."
+udml:
+  information:
+    - description: "Log events, which are structured data containing a message, level, timestamp, and contextual fields (e.g., session_id, component)."
+      schema:
+        type: object
+        properties:
+          timestamp: { type: string, format: "date-time" }
+          level: { type: string, enum: ["info", "warn", "error", "debug"] }
+          message: { type: string }
+          fields: { type: object }
+
+  access:
+    - description: "Any component in the application can submit log events."
+    - description: "The observability system has write access to the console and/or log files."
+
+  manipulation:
+    - description: "Writes log events to the configured output sinks (e.g., stdout, file)."
+
+  extract:
+    - description: "Formats the structured log events into human-readable strings or JSON for output."
+
+  movement:
+    - description: "Receives log events from various components within the application."
+    - description: "Outputs formatted log strings to the console or a log file."
+
+  coordination:
+    - description: "Provides a centralized and consistent way to record what the agent is doing, which is critical for debugging and monitoring."

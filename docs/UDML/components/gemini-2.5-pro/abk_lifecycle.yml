@@ -1,0 +1,24 @@
+name: abk::lifecycle
+description: "WASM lifecycle templates & classification: loads and calls lifecycle WASM plugins for templates, task classification, and rendering."
+udml:
+  information:
+    - description: "A collection of WASM lifecycle plugins found in the search paths (`~/.trustee/lifecycles`, `./lifecycles`)."
+
+  access:
+    - description: "The `abk::agent` accesses the current lifecycle to get templates and classify tasks."
+
+  manipulation:
+    - description: "Loads a specific lifecycle WASM module into the `wasmtime` runtime."
+
+  extract:
+    - description: "Exposes functions from the WASM plugin to the host, such as `classify_task`, `load_template`, and `render_template`."
+    - description: "The `classify_task` function determines which agent type (and thus, which set of templates) to use for a given task."
+
+  movement:
+    - description: "The host (`abk::agent`) calls functions in the WASM guest."
+    - description: "The WASM guest returns data (like rendered template strings) back to the host."
+    - description: "The file system is accessed to discover and read `.wasm` files."
+
+  coordination:
+    - description: "Enables agent 'morphing' by dynamically loading different behaviors (lifecycles) at runtime based on the task at hand."
+    - description: "Decouples the agent's core orchestration logic from the specific prompts and templates used for different tasks."

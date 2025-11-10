@@ -1,0 +1,415 @@
+---
+# UDML: abk[checkpoint] — Checkpoint/Session Manager
+# Manages session persistence, resumption, and checkpoint lifecycle
+
+metadata:
+  name: "abk[checkpoint]"
+  version: "0.1.24"
+  owner: "ABK (Agent Builder Kit)"
+  responsibility: "Session checkpointing, persistence, resumption, checkpoint storage and lifecycle"
+
+information:
+  # Checkpoint data structure
+  checkpoint_data:
+    - field: session_id
+      type: String
+      semantics: "Unique session identifier"
+    
+    - field: timestamp_created
+      type: Timestamp
+      semantics: "When session was started"
+    
+    - field: timestamp_checkpoint
+      type: Timestamp
+      semantics: "When this checkpoint was created"
+    
+    - field: iteration
+      type: u32
+      semantics: "Current iteration number"
+    
+    - field: messages
+      type: Vec<InternalMessage>
+      semantics: "Conversation history"
+      owner: "UMF"
+    
+    - field: agent_context
+      type: HashMap<String, Value>
+      semantics: "Agent runtime context (variables, state)"
+    
+    - field: workflow_state
+      type: WorkflowState
+      enum: ["running", "paused", "completed", "failed"]
+      semantics: "Current workflow state"
+    
+    - field: tool_results_pending
+      type: Vec<ToolCall>
+      semantics: "Tool calls awaiting results (for resumption)"
+    
+    - field: metadata
+      type: HashMap<String, String>
+      semantics: "Custom metadata (task, model, notes, etc.)"
+
+  # Session metadata
+  session_metadata:
+    - field: session_id
+      type: String
+      semantics: "Unique session identifier"
+    
+    - field: task_description
+      type: String
+      semantics: "Original task given to agent"
+    
+    - field: agent_type
+      type: String
+      semantics: "Type of agent (coder, researcher, etc.)"
+    
+    - field: model
+      type: String
+      semantics: "LLM model used"
+    
+    - field: status
+      type: SessionStatus
+      enum: ["active", "completed", "failed", "paused"]
+      semantics: "Current session status"
+    
+    - field: created_at
+      type: Timestamp
+      semantics: "Session creation time"
+    
+    - field: updated_at
+      type: Timestamp
+      semantics: "Last update time"
+    
+    - field: checkpoint_count
+      type: u32
+      semantics: "Number of checkpoints for this session"
+
+  # Checkpoint storage configuration
+  storage_config:
+    - field: storage_path
+      type: PathBuf
+      semantics: "Directory for checkpoint files"
+      default: "~/.trustee/checkpoints"
+    
+    - field: compression
+      type: CompressionMode
+      enum: ["none", "gzip", "zstd"]
+      semantics: "Compression algorithm for checkpoints"
+      default: "gzip"
+    
+    - field: max_checkpoints_per_session
+      type: u32
+      semantics: "Maximum checkpoints to keep per session (oldest removed)"
+      default: 10
+    
+    - field: retention_days
+      type: u32
+      semantics: "Delete checkpoints older than N days"
+      default: 30
+
+  # Checkpoint file format
+  checkpoint_file:
+    - field: version
+      type: String
+      semantics: "Checkpoint format version (e.g., '1.0')"
+    
+    - field: header
+      type: CheckpointHeader
+      semantics: "Metadata about checkpoint"
+    
+    - field: data
+      type: CheckpointData (compressed if configured)
+      semantics: "Session and context data"
+    
+    - field: checksum
+      type: String
+      semantics: "SHA256 of uncompressed data for integrity verification"
+
+access:
+  # Checkpoint saving and loading
+  checkpoint_access:
+    - query: "save_checkpoint(session: &AgentSession) -> Result<CheckpointId, Error>"
+      visibility: "Public"
+      semantics: "Save current session state to checkpoint"
+      returns:
+        - type: String
+        - semantics: "Checkpoint ID (timestamp-based or UUID)"
+    
+    - query: "load_checkpoint(checkpoint_id: &str) -> Result<CheckpointData, Error>"
+      visibility: "Public"
+      semantics: "Load checkpoint by ID"
+
+  # Session management
+  session_access:
+    - query: "create_session(task: &str, metadata: &HashMap<String, String>) -> Result<SessionId, Error>"
+      visibility: "Public"
+      semantics: "Create new session and initialize storage"
+      returns:
+        - type: String
+        - semantics: "New session ID"
+    
+    - query: "list_sessions(status_filter: Option<SessionStatus>) -> Result<Vec<SessionMetadata>, Error>"
+      visibility: "Public"
+      semantics: "List all sessions, optionally filtered by status"
+    
+    - query: "get_session_metadata(session_id: &str) -> Result<SessionMetadata, Error>"
+      visibility: "Public"
+      semantics: "Get metadata for specific session"
+
+  # Resumption
+  resumption_access:
+    - query: "restore_session(session_id: &str) -> Result<RestoredSession, Error>"
+      visibility: "Public"
+      semantics: "Restore session from latest checkpoint"
+      returns:
+        - field: messages
+          type: Vec<InternalMessage>
+          semantics: "Conversation history"
+        - field: context
+          type: HashMap<String, Value>
+          semantics: "Agent context"
+        - field: iteration
+          type: u32
+          semantics: "Iteration to resume from"
+
+manipulation:
+  # Session lifecycle
+  session_lifecycle:
+    - operation: "create_new_session(task: &str) -> SessionId"
+      semantics: "Create new session and initialize checkpoint storage"
+      precondition: "Task description provided"
+      postcondition: "Session directory created, session ID returned"
+    
+    - operation: "finalize_session(session_id: &str, status: SessionStatus, summary: &str)"
+      semantics: "Mark session as completed and save final checkpoint"
+      precondition: "Session exists and is active"
+      postcondition: "Session status updated, final checkpoint saved"
+
+  # Checkpoint operations
+  checkpoint_operations:
+    - operation: "save_checkpoint(session_id: &str, data: &CheckpointData) -> CheckpointId"
+      semantics: "Save session checkpoint to disk"
+      precondition: "Session exists, data is valid"
+      postcondition: "Checkpoint file written, ID returned"
+      compression: "Applied if configured"
+    
+    - operation: "load_checkpoint(checkpoint_id: &str) -> CheckpointData"
+      semantics: "Load checkpoint from disk and decompress"
+      precondition: "Checkpoint file exists and is readable"
+      postcondition: "CheckpointData deserialized"
+      verification: "Checksum verified after decompression"
+    
+    - operation: "delete_checkpoint(checkpoint_id: &str) -> Result<(), Error>"
+      semantics: "Delete specific checkpoint"
+      precondition: "Checkpoint exists"
+      postcondition: "Checkpoint file deleted from disk"
+    
+    - operation: "cleanup_old_checkpoints(session_id: &str)"
+      semantics: "Remove old checkpoints exceeding retention policy"
+      logic: "Keep max_checkpoints_per_session most recent, delete if older than retention_days"
+
+  # Session metadata updates
+  metadata_updates:
+    - operation: "update_session_status(session_id: &str, status: SessionStatus)"
+      semantics: "Update session status (active, completed, failed, paused)"
+      postcondition: "Session metadata updated, timestamp recorded"
+
+extract:
+  # Session restoration
+  restoration_extraction:
+    - extract: "restore_agent_from_checkpoint(checkpoint: &CheckpointData) -> RestoredAgent"
+      rule: "Extract agent state from checkpoint for resumption"
+      input_owner: "abk[checkpoint]"
+      output_owner: "abk::agent"
+      extraction:
+        - "messages list"
+        - "agent context"
+        - "current iteration"
+        - "pending tool calls"
+
+  # Checkpoint metadata extraction
+  metadata_extraction:
+    - extract: "extract_sessions_list() -> Vec<SessionMetadata>"
+      rule: "List all session directories and extract metadata"
+      input_owner: "Checkpoint storage (filesystem)"
+      output_owner: "abk[checkpoint]"
+      logic: "Scan storage directory, read metadata files, apply filters"
+
+  # Checkpoint statistics
+  statistics_extraction:
+    - extract: "compute_checkpoint_stats(session_id: &str) -> CheckpointStats"
+      rule: "Compute storage usage and checkpoint count"
+      input_owner: "abk[checkpoint]"
+      output_owner: "abk[observability]"
+      metrics:
+        - "total_size_bytes"
+        - "checkpoint_count"
+        - "oldest_checkpoint_age"
+        - "compression_ratio"
+
+movement:
+  # Checkpoint saving flow
+  save_flow:
+    - from: "abk::agent"
+      to: "abk[checkpoint]::SessionManager"
+      data: "CheckpointData (messages, context, iteration)"
+      protocol: "Function call (in-process)"
+      semantics: "Request checkpoint save (periodic or manual)"
+    
+    - from: "abk[checkpoint]"
+      to: "filesystem"
+      data: "Checkpoint file (JSON or msgpack, optionally compressed)"
+      protocol: "File write"
+      semantics: "Persist checkpoint to disk"
+
+  # Checkpoint loading flow
+  load_flow:
+    - from: "abk::cli"
+      to: "abk[checkpoint]::SessionManager"
+      data: "session_id"
+      protocol: "Function call (in-process)"
+      condition: "command == 'resume'"
+      semantics: "Request session restoration"
+    
+    - from: "abk[checkpoint]"
+      to: "filesystem"
+      data: "Read latest checkpoint file"
+      protocol: "File read"
+      semantics: "Retrieve checkpoint from disk"
+    
+    - from: "abk[checkpoint]"
+      to: "abk[checkpoint]"
+      data: "Decompress (if needed)"
+      protocol: "In-process decompression"
+      semantics: "Restore original checkpoint data"
+    
+    - from: "abk[checkpoint]"
+      to: "abk::cli"
+      data: "RestoredSession (messages, context, iteration)"
+      protocol: "Function return (in-process)"
+      semantics: "Return session data"
+
+  # Session listing flow
+  list_flow:
+    - from: "abk::cli"
+      to: "abk[checkpoint]::SessionManager"
+      data: "Optional status filter"
+      protocol: "Function call (in-process)"
+      condition: "command == 'list-sessions'"
+      semantics: "Request session list"
+    
+    - from: "abk[checkpoint]"
+      to: "filesystem"
+      data: "Scan checkpoint storage directory"
+      protocol: "Directory listing"
+      semantics: "Discover all sessions"
+    
+    - from: "abk[checkpoint]"
+      to: "abk::cli"
+      data: "Vec<SessionMetadata>"
+      protocol: "Function return (in-process)"
+      semantics: "Return session list"
+
+coordination:
+  # Checkpoint saving schedule
+  checkpoint_schedule:
+    - trigger: "Periodic"
+      frequency: "Every N iterations (configurable)"
+      action: "abk[checkpoint]::save_checkpoint()"
+      owner: "abk[orchestration] (on behalf of abk::agent)"
+    
+    - trigger: "On completion"
+      action: "abk[checkpoint]::finalize_session(status=completed)"
+      owner: "abk::agent"
+    
+    - trigger: "On failure"
+      action: "abk[checkpoint]::finalize_session(status=failed)"
+      owner: "abk::agent"
+    
+    - trigger: "Manual"
+      action: "User requests checkpoint save"
+      owner: "abk::cli (if supported)"
+
+  # Session restoration sequence
+  restoration_sequence:
+    - step: 1
+      action: "User invokes 'trustee resume <session_id>'"
+      owner: "User"
+    
+    - step: 2
+      action: "abk::cli routes to list-sessions or resume handler"
+      owner: "abk::cli"
+    
+    - step: 3
+      action: "abk[checkpoint]::SessionManager::list_sessions() or restore_session()"
+      owner: "abk[checkpoint]"
+      semantics: "Scan checkpoint storage"
+    
+    - step: 4
+      action: "Locate latest checkpoint for session_id"
+      owner: "abk[checkpoint]"
+      error_handling: "If not found, return error: 'Session not found'"
+    
+    - step: 5
+      action: "Load and decompress checkpoint"
+      owner: "abk[checkpoint]"
+      error_handling: "If decompression/deserialization fails, return error"
+    
+    - step: 6
+      action: "Verify checksum"
+      owner: "abk[checkpoint]"
+      error_handling: "If checksum fails, return corruption error"
+    
+    - step: 7
+      action: "Return RestoredSession to caller"
+      owner: "abk[checkpoint]"
+    
+    - step: 8
+      action: "abk::agent resumes from saved iteration"
+      owner: "abk::agent"
+      semantics: "Agent state restored, workflow continues"
+
+  # Cleanup policy
+  cleanup_policy:
+    - policy: "Keep max_checkpoints_per_session most recent"
+    - policy: "Delete checkpoints older than retention_days"
+    - policy: "Run cleanup on checkpoint save (or periodically)"
+    - logging: "Log cleanup actions via abk[observability]"
+
+  # Error recovery
+  error_handling:
+    - error: "Checkpoint save fails (disk full, permission denied)"
+      handler: "Log error, continue agent execution (checkpoint lost for this iteration)"
+      logging: "Log error via abk[observability]"
+    
+    - error: "Checkpoint load fails (file corrupted, checksum mismatch)"
+      handler: "Return error, suggest trying previous checkpoint or starting fresh"
+      logging: "Log error via abk[observability]"
+    
+    - error: "Session not found for resumption"
+      handler: "Print error message, suggest listing sessions"
+      logging: "Log error via abk[observability]"
+
+dependencies:
+  internal:
+    - "UMF" # InternalMessage format
+    - "abk[config]" # Storage configuration
+    - "abk[observability]" # Logging and cleanup events
+  
+  external:
+    - "serde_json" # Checkpoint serialization
+    - "gzip" or "zstd" # Optional compression
+    - "sha2" # Checksum computation
+    - "uuid" # Session and checkpoint ID generation
+
+notes: |
+  - abk[checkpoint] manages session state persistence and resumption.
+  - Checkpoints are saved periodically or on demand, and can be resumed later.
+  - Checkpoints are versioned and can optionally be compressed.
+  - Compression reduces disk usage; decompression is automatic on load.
+  - Checksums verify checkpoint integrity; corrupted checkpoints are detected.
+  - Session metadata is queryable (list, filter by status).
+  - Checkpoint cleanup follows retention policy (keep N most recent, or N days old).
+  - Checkpoint storage is isolated per session (separate directories).
+  - All checkpoint operations are synchronous (no async IO).
+  - Checkpoint failures (save) do not crash the agent; they are logged and the session continues in memory.

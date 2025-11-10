@@ -1,0 +1,110 @@
+component: abk::executor
+description: "Command execution with timeout and validation for safe shell operations"
+
+information:
+  - name: ExecutionRequest
+    description: "Request to execute a command"
+    schema:
+      command: string
+      args: "Vec<String>"
+      timeout_seconds: integer
+      working_directory: "Option<PathBuf>"
+
+  - name: ExecutionResult
+    description: "Result of command execution"
+    schema:
+      stdout: string
+      stderr: string
+      exit_code: integer
+      success: boolean
+      execution_time_ms: integer
+
+  - name: CommandValidator
+    description: "Validator for command safety"
+    schema:
+      allowed_commands: "Vec<String>"
+      dangerous_patterns: "Vec<Regex>"
+
+access:
+  - name: read_execution_config
+    description: "Access execution configuration"
+    rules:
+      - source: "abk::config::ExecutionConfig"
+      - method: "get_execution_settings()"
+      - visibility: "internal"
+
+  - name: read_system_environment
+    description: "Access system execution environment"
+    rules:
+      - source: "std::process::Command"
+      - method: "current_dir() | env()"
+      - visibility: "internal"
+
+manipulation:
+  - name: create_execution_request
+    description: "Create validated execution request"
+    rules:
+      - input: "CommandString + Args"
+      - operation: "ExecutionRequest::new(cmd, args)"
+      - validation: "command allowed and safe"
+
+  - name: execute_command
+    description: "Execute the command with timeout"
+    rules:
+      - input: "ExecutionRequest"
+      - operation: "spawn_process() -> wait_with_timeout()"
+      - constraints: "respect timeout, capture output"
+
+extract:
+  - name: extract_execution_summary
+    description: "Extract summary from execution result"
+    rules:
+      - input: "ExecutionResult"
+      - transform: "extract_exit_code | extract_output_length | extract_timing"
+      - output: "ExecutionSummary"
+
+  - name: validate_command_safety
+    description: "Extract safety validation from command"
+    rules:
+      - input: "CommandString"
+      - transform: "check_against_allowlist | check_dangerous_patterns"
+      - output: "SafetyValidation"
+
+movement:
+  - name: process_spawning
+    description: "Spawn child processes for command execution"
+    rules:
+      - from: "ExecutionRequest"
+      - to: "system process"
+      - protocol: "execve() system call"
+      - boundaries: "process boundary"
+
+  - name: output_capture
+    description: "Capture stdout/stderr from executed processes"
+    rules:
+      - from: "child process streams"
+      - to: "ExecutionResult"
+      - protocol: "pipe streams"
+      - boundaries: "inter-process communication boundary"
+
+  - name: timeout_enforcement
+    description: "Enforce execution timeouts"
+    rules:
+      - from: "timeout configuration"
+      - to: "process management"
+      - protocol: "signal handling"
+      - boundaries: "process control boundary"
+
+coordination:
+  - name: execution_lifecycle
+    description: "Coordinate command execution phases"
+    primitives:
+      - preparation: "validate_command() -> setup_environment() -> prepare_request()"
+      - execution: "spawn_process() -> monitor_progress() -> handle_timeout()"
+      - completion: "capture_output() -> wait_exit() -> cleanup_resources()"
+
+  - name: safety_coordination
+    description: "Coordinate command safety validation"
+    primitives:
+      - validation: "check_allowlist() -> scan_patterns() -> approve_or_reject()"
+      - monitoring: "watch_execution() -> detect_anomalies() -> terminate_if_needed()"

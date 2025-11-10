@@ -1,0 +1,77 @@
+id: abk-cli
+layer: support
+ownership: crate
+summary: CLI/bootstrap that loads config, builds command context, and launches the agent.
+provides:
+  information:
+    - id: cli-args
+      kind: struct
+      schema:
+        fields:
+          - id: command
+            type: string
+          - id: task
+            type: string
+          - id: flags
+            type: map<string,string|bool>
+      purpose: Parsed CLI invocation.
+      owners: [abk-cli]
+    - id: command-context
+      kind: struct
+      schema:
+        fields:
+          - id: config
+            type: abk-config:runtime-config
+          - id: env
+            type: map<string,string>
+      purpose: Ready-to-run context that wires the agent.
+      owners: [abk-cli]
+access:
+  rules:
+    - id: ctx-read
+      target: command-context
+      read: abk-agent|abk-orchestration
+      constraints: []
+      description: Agent/orchestration can read command context to wire dependencies.
+manipulation:
+  mutations:
+    - id: init-context
+      target: command-context
+      kind: create
+      preconditions: []
+      postconditions: []
+      side_effects: [mv-load-config]
+extract:
+  transforms:
+    - id: parse-cli
+      inputs: []
+      output: cli-args
+      method: parsing
+      description: Convert argv/env into structured args.
+movement:
+  routes:
+    - id: mv-load-config
+      direction: out
+      from: abk-cli
+      to: abk-config
+      medium: fs
+      payload: abk-config:config-request
+      trigger: event
+      reliability: best-effort
+coordination:
+  primitives:
+    - id: bootstrap
+      kind: orchestration
+      participants: [abk-cli, abk-config, abk-agent]
+      drives: [mv-load-config]
+      description: Build command context and launch agent.
+dependencies:
+  runtime: [abk-config, abk-agent]
+  build: [abk]
+  feature_flags: [cli]
+risks:
+  - id: misconfig
+    impact: medium
+    likelihood: medium
+    description: Incorrect or missing configuration prevents bootstrap.
+    mitigation: Validate config, defaults, helpful errors.

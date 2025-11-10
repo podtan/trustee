@@ -1,0 +1,40 @@
+# UDML for Lifecycle-WASM (WASM lifecycle templates)
+metadata:
+  name: Lifecycle-WASM
+  role: Lifecycle templates & classification in WASM
+  version: 1.0
+information:
+  description: |
+    Lifecycle WASM modules contain templates and classification logic for task-specific behavior. They are invoked by the Agent to classify tasks and render templates into prompts.
+  canonical_schemas:
+    - lifecycle_manifest: { id: string, templates: [ { name, inputs } ], version }
+access:
+  surface (WASM host API):
+    - list_templates() -> [template_name]
+    - render_template(name, context_json) -> string
+    - classify(text) -> classification_result
+  auth:
+    - modules loaded from trusted paths only
+manipulation:
+  mutations:
+    - templates may be updated by lifecycle maintainers (out-of-band deployments)
+  invariants:
+    - rendering must be deterministic for given context
+extract:
+  transforms:
+    - render_template -> ChatML-ready prompt parts
+movement:
+  routes:
+    - host <-> wasm via JSON ABI
+coordination:
+  responsibilities:
+    - own template names and rendering semantics for a lifecycle
+    - provide stable classification outputs to Agent
+contracts:
+  error_modes:
+    - missing_template
+    - rendering_error
+examples:
+  - lifecycle_manifest: { id: "coder", templates: [ { name: "create_unit_test", inputs: ["file","line"] } ], version: "1.0" }
+notes: |
+  Lifecycle WASMs are versioned artifacts. The host should validate manifest compatibility before invoking.

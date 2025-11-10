@@ -1,0 +1,45 @@
+# UDML for Provider-WASM / Tanbal (WASM provider)
+metadata:
+  name: Provider-WASM-Tanbal
+  role: WASM-based provider adapter
+  version: 1.0
+information:
+  description: |
+    Tanbal is a WASM provider that implements request formatting, response parsing, and streaming event handling inside a WASM sandbox. It hides backend specifics (OpenAI, Anthropic, etc.) behind a unified WASM ABI.
+  canonical_schemas:
+    - wasm_request: { op: string, payload: json }
+    - wasm_response: { status: "ok"|"error", body: any }
+access:
+  surface (WASM exports):
+    - format_request(config_json, messages_json) -> Result<String, String>
+    - parse_response(response_body) -> Result<String, String>
+    - parse_stream_event(event) -> Result<String, String>
+  auth:
+    - provider keys passed as opaque configuration; WASM cannot access host secrets directly except via explicit host-provided buffers
+manipulation:
+  mutations:
+    - may transform messages into backend-specific request formats
+  invariants:
+    - must not perform network I/O directly; the host provides transport when required
+extract:
+  transforms:
+    - parse backend responses into UMF-aligned JSON (tool_calls or text)
+movement:
+  routes:
+    - host <-> wasm ABI (JSON over memory buffer)
+    - host performs HTTP/network transport when needed on behalf of WASM
+coordination:
+  responsibilities:
+    - normalize backend differences (param names, streaming encodings)
+    - provide stable parsing into UMF
+contracts:
+  wasm_contract:
+    - input: JSON
+    - output: JSON
+  error_modes:
+    - wasm_deserialization_error
+    - parsing_inconsistency
+examples:
+  - format_request example: { model: "gpt-5-mini", messages: [...] }
+notes: |
+  Tanbal's advantage is versioned WASM modules that can be swapped without host recompilation. Keep its ABI minimal and well-documented.

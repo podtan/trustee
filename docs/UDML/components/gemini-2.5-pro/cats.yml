@@ -1,0 +1,29 @@
+name: CATS
+description: "Code Agent Tool System: provides a registry of tools (file ops, editing, search, run_command) and executes tool calls."
+udml:
+  information:
+    - description: "A registry of available tools, where each tool has a name, description, and input schema."
+    - description: "A tool call request from the agent."
+      schema: { $ref: "umf.yml#ToolUse" }
+    - description: "The result of a tool execution."
+      schema: { $ref: "umf.yml#ToolResult" }
+
+  access:
+    - description: "The `abk::agent` accesses the tool registry to find and execute tools."
+    - description: "Tools have access to the filesystem and the `abk::executor` to perform their actions."
+
+  manipulation:
+    - description: "Tools can create, read, update, or delete files on the filesystem."
+    - description: "The `run_command` tool can execute arbitrary shell commands via `abk::executor`."
+
+  extract:
+    - description: "The tool registry provides the LLM with a structured list (schema) of available tools so it knows what it can call."
+    - description: "Tools read data from the filesystem or command output and format it into a `ToolResult`."
+
+  movement:
+    - description: "Receives a `ToolCall` request from the `abk::agent`."
+    - description: "The `run_command` tool sends a command to the `abk::executor` and receives an `ExecutionResult`."
+    - description: "Returns a `ToolResult` (containing stdout, stderr, etc.) to the `abk::agent`."
+
+  coordination:
+    - description: "Provides the agent with its 'hands', allowing it to interact with the external world (filesystem, shell) in a structured and observable way."

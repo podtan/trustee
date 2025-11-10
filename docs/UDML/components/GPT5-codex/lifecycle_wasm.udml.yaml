@@ -1,0 +1,104 @@
+format: UDML-YAML-0.1
+component: "Lifecycle-WASM"
+summary: "WebAssembly lifecycle module providing task classification, templates, and action guidance."
+context:
+  crate: "coder-lifecycle"
+  upstream_interfaces:
+    - abk[lifecycle] host ABI
+    - template assets
+  downstream_interfaces:
+    - abk::agent
+    - abk::orchestration
+
+domains:
+  information:
+    - name: template_catalog
+      ownership: Lifecycle-WASM
+      description: "Collection of prompt templates, action observation templates, and resume prompts."
+      shape: |
+        struct TemplateCatalog {
+          templates: Vec<Template>,
+          default_template: TemplateId,
+          variants: HashMap<String, TemplateId>
+        }
+    - name: classifier_rules
+      ownership: Lifecycle-WASM
+      description: "Rules mapping task descriptors to lifecycle profiles."
+      shape: |
+        struct ClassifierRule {
+          pattern: String,
+          target_profile: String,
+          confidence: f32
+        }
+    - name: action_guidance_schema
+      ownership: Lifecycle-WASM
+      description: "JSON schema for structured guidance returned to orchestration (next actions, tool hints)."
+      shape: |
+        struct Guidance {
+          steps: Vec<GuidanceStep>,
+          checkpoint_hint: Option<String>,
+          provider_bias: Option<String>
+        }
+  access:
+    - name: template_render_access
+      subject: abk::agent / orchestration
+      description: "Host may request template rendering; templates immutable inside module."
+      rules:
+        - read-only render operations
+        - modifications require new wasm build
+    - name: classifier_access
+      subject: abk::lifecycle host
+      description: "Host submits task descriptors; WASM returns classification."
+      rules:
+        - host supplies sanitized input
+        - WASM returns profile id + confidence
+  manipulation:
+    - name: template_rendering
+      description: "Fill template slots with provided context (messages, tool results)."
+      operations:
+        - render_system_prompt
+        - render_action_observation
+        - render_resume_prompt
+    - name: guidance_refinement
+      description: "Adjust guidance output based on runtime feedback (e.g., tool failures)."
+      operations:
+        - update_plan_state
+        - suggest_retry
+  extract:
+    - name: plan_generation
+      description: "Produce structured plan artifacts when lifecycle supports planning."
+      outputs:
+        - GuidancePlan
+    - name: summary_generation
+      description: "Summaries for final responses or checkpoint recaps."
+      outputs:
+        - SummaryArtifact
+  movement:
+    - name: wasm_invocation
+      source: Lifecycle-WASM
+      destination: abk[lifecycle] host
+      protocol: "wasmtime ABI"
+      payload: JSON encoded requests/responses
+    - name: template_asset_lookup
+      source: Lifecycle-WASM
+      destination: embedded assets / host file system (optional)
+      protocol: "static data read"
+      payload: template bytes
+  coordination:
+    - name: lifecycle_contract
+      participants:
+        - Lifecycle-WASM
+        - abk::agent
+        - abk::orchestration
+      triggers:
+        - classification
+        - guidance_request
+      policy: "Lifecycle maintains authoritative contract for agent behavior; host must follow provided guidance or explicitly override with logging."
+    - name: template_versioning
+      participants:
+        - Lifecycle-WASM
+        - abk::lifecycle host
+        - abk::config
+      triggers:
+        - module_update
+      policy: "Template changes require manifest version bump; host validates compatibility before load."

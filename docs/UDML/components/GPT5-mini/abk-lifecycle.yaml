@@ -1,0 +1,45 @@
+# UDML for abk[lifecycle] (WASM lifecycle templates & classification)
+metadata:
+  name: abk[lifecycle]
+  role: Lifecycle WASM plugin interface
+  version: 1.0
+information:
+  description: |
+    Lifecycle plugins are WASM modules that implement classification, template management and rendering. They encapsulate task-specific templates and heuristics and are loaded at runtime by the host lifecycle loader.
+  canonical_schemas:
+    - template: { name: string, content: string, inputs: [string] }
+    - classification_result: { lifecycle: string, confidence: float, template_name: string }
+access:
+  surface (WASM host API):
+    - classify_task(task_text) -> classification_result
+    - load_template(name) -> template
+    - render_template(name, context) -> rendered_text
+  auth:
+    - WASM modules are loaded from trusted directories only
+manipulation:
+  mutations:
+    - templates can be uploaded/updated via lifecycle management tooling (out-of-band)
+  invariants:
+    - template rendering must be deterministic given the same context
+extract:
+  transforms:
+    - classification -> agent lifecycle selection
+    - render_template -> ChatML prompt
+movement:
+  routes:
+    - host <-> wasm: JSON messages over the WASM ABI
+coordination:
+  responsibilities:
+    - decide which lifecycle to use for a given task
+    - provide template rendering service to the Agent
+contracts:
+  wasm contract:
+    - input: JSON { op: "classify" | "render" , payload: {...} }
+    - output: JSON { status: "ok" | "error", payload: {...} }
+  error_modes:
+    - template_missing
+    - wasm_execution_error
+examples:
+  - classify_task: { lifecycle: "coder", confidence: 0.96, template_name: "create_unit_test" }
+notes: |
+  Treat lifecycle WASMs as isolated execution environments. Keep the contract narrow and stable to allow lifecycle authors freedom to evolve templates internally.

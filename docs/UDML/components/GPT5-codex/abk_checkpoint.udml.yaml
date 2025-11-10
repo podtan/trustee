@@ -1,0 +1,96 @@
+format: UDML-YAML-0.1
+component: "abk[checkpoint]"
+summary: "Session checkpoint manager that persists and restores agent state snapshots."
+context:
+  crate: "abk"
+  feature_flags:
+    - checkpoint
+  upstream_interfaces:
+    - filesystem
+    - serde serialization
+  downstream_interfaces:
+    - abk::agent
+    - abk::orchestration
+
+domains:
+  information:
+    - name: checkpoint_blob
+      ownership: abk[checkpoint]
+      description: "Serialized representation of agent session state used for persistence."
+      shape: |
+        struct CheckpointBlob {
+          session_id: SessionId,
+          created_at: Timestamp,
+          version: u32,
+          payload: Vec<u8>,
+          metadata: HashMap<String, String>
+        }
+    - name: checkpoint_index
+      ownership: abk[checkpoint]
+      description: "Lookup table mapping session ids to stored checkpoint paths and retention policies."
+      shape: |
+        struct CheckpointIndex {
+          entries: Vec<CheckpointEntry>
+        }
+  access:
+    - name: storage_scope
+      subject: abk[checkpoint]
+      description: "Allowed to read/write checkpoint files within configured directory."
+      rules:
+        - base_path defined by config
+        - retention policy enforces max checkpoints per session
+    - name: restore_access
+      subject: abk::agent
+      description: "Agents may request checkpoint blobs matching their session id; cross-session access denied."
+      rules:
+        - require session ownership
+        - restore operations logged for auditing
+  manipulation:
+    - name: snapshot_compaction
+      description: "Optional compression or diffing applied before writing to disk."
+      operations:
+        - compress_payload
+        - prune_transient_fields
+    - name: retention_enforcement
+      description: "Apply deletion rules when exceeding storage limits."
+      operations:
+        - delete_oldest
+        - enforce_expiration
+  extract:
+    - name: resume_metadata
+      description: "Extract metadata (last_step, pending_tool_id) for orchestration before full restore."
+      outputs:
+        - CheckpointPreview
+    - name: diff_projection
+      description: "Compute differences between successive checkpoints for observability."
+      outputs:
+        - CheckpointDiff
+  movement:
+    - name: checkpoint_write
+      source: abk[checkpoint]
+      destination: filesystem / optional remote store
+      protocol: "Binary file write"
+      payload: CheckpointBlob
+    - name: checkpoint_read
+      source: abk[checkpoint]
+      destination: abk::agent / orchestration
+      protocol: "Binary file read"
+      payload: CheckpointBlob
+  coordination:
+    - name: checkpoint_schedule
+      participants:
+        - abk::orchestration
+        - abk[checkpoint]
+        - abk::agent
+      triggers:
+        - iteration_count
+        - completion
+      policy: "Orchestration requests checkpoint after N iterations or before risky operations; checkpoint module confirms durability."
+    - name: resume_handshake
+      participants:
+        - abk[checkpoint]
+        - abk::agent
+        - Lifecycle-WASM (for template replay)
+      triggers:
+        - session_resume
+      policy: "On resume, checkpoint provides preview, lifecycle confirms template continuity, agent rebuilds state."
