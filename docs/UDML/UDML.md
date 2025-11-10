@@ -53,3 +53,12 @@ Two questions. Two rules.
 2. Does this need new movement or coordination? → New movement/coordination rule (and evaluate module split)
 
 Access, Manipulation, and Extract remain within the owning module unless coordination or movement requires cross-module concerns.
+
+## SQL Comparison
+
+**Information** = DDL
+**Access** = DCL
+**Manipulation** DML
+**Extract** DQL
+**Movement** ?
+**Coordination** ?
