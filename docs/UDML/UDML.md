@@ -1,4 +1,4 @@
-# Unified Data Morphism Hypothesis (UDMH)
+# Unified Data Morphism Language (UDML)
 
 ## Abstract
 
@@ -32,11 +32,11 @@ Any software system can be synthesized, analyzed, and reasoned about entirely by
 
 …and an engine capable of interpreting these categories can generate the complete executable system — regardless of implementation language, paradigm, or runtime.
 
-## UDMH specification
+## UDML specification
 
-- A compact, machine-readable specification that lists: information schemas, access policies, manipulation rules, extract transforms, movement routes, and coordination primitives.
+- A compact, machine-readable language that lists: information schemas, access policies, manipulation rules, extract transforms, movement routes, and coordination primitives.
 - Recommended formats: YAML/JSON (schema + policy sections) so engines and validators can interpret and compile behaviors into concrete runtimes.
-- Conformance: validators, interpreters, and target adapters translate the spec into imperative, declarative, actor-based, or orchestration code.
+- Conformance: validators, interpreters, and target adapters translate UDML specs into imperative, declarative, actor-based, or orchestration code.
 
 ## Implications
 
