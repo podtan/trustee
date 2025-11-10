@@ -1,0 +1,195 @@
+# UDML Schema v0.1 - Standardized Format
+# Universal Data Morphism Language Schema Definition
+
+$schema: "https://udml.podtan.com/schema/v0.1"
+version: "0.1"
+
+# ==============================================================================
+# COMPONENT METADATA (REQUIRED)
+# ==============================================================================
+
+id: component-name                    # kebab-case identifier, unique
+layer: runtime                        # runtime|infrastructure|boundary|support|plugin
+ownership: crate                      # crate|wasm|external
+summary: "Single sentence component description"
+
+# ==============================================================================
+# OPTIONAL METADATA
+# ==============================================================================
+
+metadata:
+  version: "0.0.1"                   # Semantic version of the component
+  authors: ["Team Name"]             # Component authors
+  created: "2025-11-10"              # Creation date (YYYY-MM-DD)
+  updated: "2025-11-10"              # Last update date (YYYY-MM-DD)
+  tags: ["tag1", "tag2"]             # Categorical tags
+
+# ==============================================================================
+# SIX UDML DOMAINS (at least one REQUIRED)
+# ==============================================================================
+
+provides:
+  
+  # ============================================================================
+  # 1. INFORMATION DOMAIN
+  # Purpose: Real world state and persistent semantic domain data
+  # ============================================================================
+  
+  information:
+    - id: data-entity-id              # kebab-case, unique within component
+      kind: struct                    # struct|enum|alias|collection|blob|stream|schema|code
+      purpose: "Why this entity exists"
+      owners: [component-ids]         # Components that own this data
+      
+      # For kind: struct - structured fields
+      schema:
+        fields:
+          - id: field-name
+            type: string              # primitive|component:entity-id|list<type>|map<key,val>
+            description: "Field purpose"
+            required: true            # boolean
+            default: null             # optional default value
+      
+      # For kind: schema - JSON Schema validation
+      # schema:
+      #   type: object
+      #   properties:
+      #     field-name:
+      #       type: string
+      #       description: "Field description"
+      #   required: ["field-name"]
+      
+      # For kind: code - language-specific type definition
+      # schema:
+      #   language: rust              # rust|python|typescript
+      #   code: |
+      #     struct DataEntity {
+      #       field: Type
+      #     }
+  
+  # ============================================================================
+  # 2. ACCESS DOMAIN
+  # Purpose: Permissible ways data may be viewed/read
+  # ============================================================================
+  
+  access:
+    rules:
+      - id: rule-id
+        target: information-id          # Reference to information entity
+        read: component-id              # component-id|scope-expression
+        write: component-id             # Optional, who can write
+        constraints: []                 # Optional constraint IDs
+        visibility: internal            # public|private|internal
+        auth: []                        # Optional auth requirements
+        description: "Access rule explanation"
+  
+  # ============================================================================
+  # 3. MANIPULATION DOMAIN
+  # Purpose: Lawful mutation rules (create, update, delete, etc.)
+  # ============================================================================
+  
+  manipulation:
+    mutations:
+      - id: mutation-id
+        target: information-id
+        kind: create                    # create|update|delete|invalidate|correct
+        operation: "operation_name(params)"  # Optional function signature
+        preconditions: []               # Rule IDs that must be satisfied
+        postconditions: []              # Rule IDs guaranteed after operation
+        side_effects: []                # Movement route IDs triggered
+        validation: []                  # Validation rule IDs
+        description: "What this mutation does"
+  
+  # ============================================================================
+  # 4. EXTRACT DOMAIN
+  # Purpose: Derivation of new representations (inference, computation, aggregation)
+  # ============================================================================
+  
+  extract:
+    transforms:
+      - id: transform-id
+        inputs: [information-ids]       # Source entity IDs
+        output: information-id          # Output entity ID
+        method: algorithm               # algorithm|template|aggregation|projection|inference
+        deterministic: true             # Whether output is deterministic
+        cacheable: false                # Whether result can be cached
+        description: "Transformation purpose"
+        algorithm: |                    # Optional algorithm description
+          Step-by-step transformation logic
+  
+  # ============================================================================
+  # 5. MOVEMENT DOMAIN
+  # Purpose: How data travels through processes, boundaries, and protocols
+  # ============================================================================
+  
+  movement:
+    routes:
+      - id: route-id
+        direction: out                  # in|out|bi
+        from: component-id              # component-id|external
+        to: component-id                # component-id|external
+        medium: memory                  # memory|wasm-call|fs|network|process|stdout|stderr|ipc
+        payload: information-id         # information-id|stream
+        protocol: http                  # Optional: http|grpc|json|binary
+        trigger: event                  # event|schedule|mutation|request
+        reliability: best-effort        # best-effort|at-least-once|exactly-once|not-applicable
+        async: true                     # Whether route is asynchronous
+        latency: 10ms                   # Optional: e.g., "10ms", "100ms"
+        description: "Data movement explanation"
+  
+  # ============================================================================
+  # 6. COORDINATION DOMAIN
+  # Purpose: Synchronization, scheduling, and orchestration primitives
+  # ============================================================================
+  
+  coordination:
+    primitives:
+      - id: coord-id
+        kind: orchestration             # orchestration|scheduling|locking|retry|checkpoint|classification|consensus
+        participants: [component-ids]   # Components involved
+        drives: [route-ids]             # Movement route IDs controlled
+        guarantees: []                  # Optional guarantee descriptions
+        failure_modes: []               # Optional failure descriptions
+        description: "Coordination purpose"
+
+# ==============================================================================
+# DEPENDENCIES (RECOMMENDED)
+# ==============================================================================
+
+dependencies:
+  runtime: []                          # Required at runtime
+  build: []                            # Required at build time
+  feature_flags: []                    # Cargo/build feature flags
+  external: []                         # External crate/package dependencies
+
+# ==============================================================================
+# RISK ASSESSMENT (OPTIONAL but RECOMMENDED)
+# ==============================================================================
+
+risks:
+  - id: risk-id
+    category: security                 # security|performance|reliability|maintainability
+    impact: high                       # low|medium|high|critical
+    likelihood: medium                 # low|medium|high
+    description: "Risk description"
+    mitigation: "Mitigation strategy"
+    status: mitigated                  # open|mitigated|accepted
+
+# ==============================================================================
+# CROSS-COMPONENT INTEGRATION (OPTIONAL)
+# ==============================================================================
+
+integration:
+  implements: []                       # Interface IDs this component implements
+  extends: []                          # Component IDs this extends
+  replaces: []                         # Component IDs this replaces/deprecates
+
+# ==============================================================================
+# EXAMPLES AND USAGE (OPTIONAL)
+# ==============================================================================
+
+examples:
+  - name: "Example name"
+    description: "What this example demonstrates"
+    code: |
+      Example code or usage pattern
