@@ -62,3 +62,34 @@ Access, Manipulation, and Extract remain within the owning module unless coordin
 **Extract** DQL
 **Movement** ?
 **Coordination** ?
+
+## 🌐 Exposure and Integration Guidelines
+
+UDML modules are designed for **uniform internal communication** using the **UDML Runtime Packet (URP)**.  
+Each module exposes a single interface (e.g., `handle(URP)`) that accepts and returns URPs, ensuring consistent data-driven interaction.
+
+To make module capabilities available to **external systems** (such as REST, gRPC, GraphQL, WebSocket, or CLI tools), developers should use a **UDML Gateway**.
+
+### UDML Gateway Pattern
+
+A UDML Gateway acts as an adapter layer between protocol-specific clients and the internal UDML runtime:
+
+1. **Receives** external protocol requests (e.g., REST or gRPC calls).  
+2. **Transforms** them into a valid URP instance.  
+3. **Routes** the URP to the appropriate module’s `handle(URP)` method.  
+4. **Returns** the resulting URP (or extracted output) to the caller in their expected protocol format.
+
+This pattern maintains:
+- Architectural purity and uniformity across all modules  
+- Clear separation between **internal morphic logic** and **external integration surfaces**  
+- Observability and traceability in distributed environments  
+- Compatibility with OpenAPI, gRPC, and other standard interface tools
+
+### Important Design Rule
+
+> **Do not** expose multiple API endpoints or protocol-specific operations directly from UDML modules.  
+>  
+> **Instead**, expose all public-facing interfaces through a UDML Gateway that maps external requests to URPs.
+
+This approach prevents fragmentation, preserves UDML’s data calculus model, and ensures complete alignment between **design-time UDML specifications** and **runtime module behavior**.
+
