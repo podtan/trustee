@@ -1,0 +1,485 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://udml.podtan.com/urp/v0.1/schema.json",
+  "title": "UDML Runtime Packet (URP)",
+  "description": "Universal runtime message format for UDML-based systems",
+  "type": "object",
+  "required": [
+    "$schema",
+    "version",
+    "urp_id",
+    "timestamp",
+    "source_component",
+    "target_component",
+    "information",
+    "access",
+    "manipulation",
+    "extract",
+    "movement",
+    "coordination"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri",
+      "const": "https://udml.podtan.com/urp/v0.1/schema.json",
+      "description": "URI to URP JSON Schema for validation"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$",
+      "description": "URP specification version (semantic versioning)"
+    },
+    "urp_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "Unique identifier for this packet (ULID format)"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when packet was created"
+    },
+    "source_component": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "UDML component ID that created this packet"
+    },
+    "target_component": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "UDML component ID that should receive this packet"
+    },
+    "trace_id": {
+      "type": "string",
+      "description": "Distributed tracing ID for correlation"
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "Application-level correlation identifier"
+    },
+    "information": {
+      "type": "object",
+      "description": "Information domain: runtime data payload",
+      "required": ["entity_id", "entity_type", "schema_ref"],
+      "properties": {
+        "entity_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Reference to UDML Information entity ID"
+        },
+        "entity_type": {
+          "type": "string",
+          "enum": ["struct", "enum", "alias", "collection", "blob", "stream", "schema", "code"],
+          "description": "Type of entity"
+        },
+        "data": {
+          "description": "Actual runtime data payload (can be null for requests)"
+        },
+        "schema_ref": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*#[a-z][a-z0-9-]*$",
+          "description": "Full reference to UDML schema (component#entity)"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "description": "Data schema version (semantic versioning)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "access": {
+      "type": "object",
+      "description": "Access domain: runtime authorization context",
+      "required": ["principal", "visibility", "permissions"],
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Reference to UDML Access rule being applied"
+        },
+        "principal": {
+          "type": "object",
+          "required": ["type", "id"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["user", "service", "system", "anonymous"],
+              "description": "Type of principal"
+            },
+            "id": {
+              "type": "string",
+              "description": "Principal identifier"
+            },
+            "roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Roles assigned to principal"
+            }
+          },
+          "additionalProperties": false
+        },
+        "auth_method": {
+          "type": "string",
+          "enum": ["bearer-token", "api-key", "oauth2", "mutual-tls", "basic-auth", "none"],
+          "description": "Authentication method used"
+        },
+        "auth_token": {
+          "type": "string",
+          "description": "Optional authentication token (handle securely)"
+        },
+        "visibility": {
+          "type": "string",
+          "enum": ["public", "internal", "private", "restricted"],
+          "description": "Data visibility level"
+        },
+        "constraints_satisfied": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "description": "List of constraint IDs that are satisfied"
+        },
+        "permissions": {
+          "type": "object",
+          "required": ["read", "write", "delete"],
+          "properties": {
+            "read": {
+              "type": "boolean"
+            },
+            "write": {
+              "type": "boolean"
+            },
+            "delete": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Explicit permissions for this operation"
+        }
+      },
+      "additionalProperties": false
+    },
+    "manipulation": {
+      "type": "object",
+      "description": "Manipulation domain: runtime operation",
+      "required": ["operation"],
+      "properties": {
+        "mutation_id": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Reference to UDML Manipulation mutation ID"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Operation name being invoked"
+        },
+        "kind": {
+          "type": ["string", "null"],
+          "enum": ["create", "update", "delete", "invalidate", "correct", null],
+          "description": "Mutation kind"
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Operation parameters as key-value pairs"
+        },
+        "preconditions_checked": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "description": "List of precondition IDs that were verified"
+        },
+        "postconditions_expected": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "description": "List of postcondition IDs that should result"
+        },
+        "validation_passed": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "description": "List of validation rule IDs that passed"
+        },
+        "idempotency_key": {
+          "type": ["string", "null"],
+          "description": "Optional key for idempotent operations"
+        }
+      },
+      "additionalProperties": false
+    },
+    "extract": {
+      "type": "object",
+      "description": "Extract domain: runtime transformation",
+      "required": ["deterministic", "cacheable"],
+      "properties": {
+        "transform_id": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Reference to UDML Extract transform ID"
+        },
+        "method": {
+          "type": ["string", "null"],
+          "enum": ["algorithm", "template", "aggregation", "projection", "inference", null],
+          "description": "Transformation method"
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["entity_id", "source"],
+            "properties": {
+              "entity_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$"
+              },
+              "source": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*#[a-z][a-z0-9-]*$"
+              },
+              "data_ref": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "description": "List of input data sources with references"
+        },
+        "output": {
+          "type": ["object", "null"],
+          "properties": {
+            "entity_id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "schema_ref": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*#[a-z][a-z0-9-]*$"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Expected output entity specification"
+        },
+        "deterministic": {
+          "type": "boolean",
+          "description": "Whether transformation is deterministic"
+        },
+        "cacheable": {
+          "type": "boolean",
+          "description": "Whether result can be cached"
+        },
+        "cache_key": {
+          "type": ["string", "null"],
+          "description": "Optional cache key for result storage"
+        },
+        "cache_ttl": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Cache time-to-live in seconds"
+        },
+        "algorithm_version": {
+          "type": ["string", "null"],
+          "description": "Version of transformation algorithm"
+        }
+      },
+      "additionalProperties": false
+    },
+    "movement": {
+      "type": "object",
+      "description": "Movement domain: runtime routing",
+      "required": ["direction", "medium", "reliability", "async"],
+      "properties": {
+        "route_id": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Reference to UDML Movement route ID"
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["in", "out", "bi"],
+          "description": "Data flow direction"
+        },
+        "medium": {
+          "type": "string",
+          "enum": ["memory", "wasm-call", "fs", "network", "process", "stdout", "stderr", "ipc"],
+          "description": "Communication medium"
+        },
+        "protocol": {
+          "type": ["string", "null"],
+          "description": "Wire protocol (grpc, https, json, binary, etc.)"
+        },
+        "endpoint": {
+          "type": ["string", "null"],
+          "description": "Network endpoint or resource locator"
+        },
+        "reliability": {
+          "type": "string",
+          "enum": ["best-effort", "at-least-once", "exactly-once", "not-applicable"],
+          "description": "Delivery guarantee"
+        },
+        "async": {
+          "type": "boolean",
+          "description": "Whether transmission is asynchronous"
+        },
+        "trigger": {
+          "type": ["string", "null"],
+          "enum": ["event", "schedule", "mutation", "request", null],
+          "description": "What triggered this movement"
+        },
+        "trigger_event": {
+          "type": ["string", "null"],
+          "description": "Specific event that triggered transmission"
+        },
+        "priority": {
+          "type": ["string", "null"],
+          "enum": ["low", "normal", "high", "critical", null],
+          "description": "Message priority"
+        },
+        "timeout_ms": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Operation timeout in milliseconds"
+        },
+        "retry_policy": {
+          "type": ["object", "null"],
+          "properties": {
+            "max_retries": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "backoff": {
+              "type": "string",
+              "enum": ["linear", "exponential", "constant"]
+            },
+            "initial_delay_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_delay_ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "description": "Retry configuration"
+        },
+        "compression": {
+          "type": ["string", "null"],
+          "description": "Compression algorithm used"
+        },
+        "encryption": {
+          "type": ["string", "null"],
+          "description": "Encryption protocol"
+        }
+      },
+      "additionalProperties": false
+    },
+    "coordination": {
+      "type": "object",
+      "description": "Coordination domain: runtime orchestration",
+      "required": ["kind", "status", "participants"],
+      "properties": {
+        "primitive_id": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Reference to UDML Coordination primitive ID"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["orchestration", "scheduling", "locking", "retry", "checkpoint", "classification", "consensus"],
+          "description": "Coordination kind"
+        },
+        "workflow_id": {
+          "type": ["string", "null"],
+          "description": "Unique workflow instance identifier"
+        },
+        "step": {
+          "type": ["string", "null"],
+          "description": "Current step in workflow/coordination"
+        },
+        "step_index": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Numeric index of current step"
+        },
+        "total_steps": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Total number of steps in workflow"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "in-progress", "completed", "failed", "cancelled"],
+          "description": "Coordination status"
+        },
+        "participants": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "description": "List of participating component IDs"
+        },
+        "locks_held": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "description": "List of lock IDs currently held"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["step", "status"],
+            "properties": {
+              "step": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": ["pending", "in-progress", "completed", "failed"]
+              }
+            },
+            "additionalProperties": false
+          },
+          "description": "Steps that must complete before proceeding"
+        },
+        "next_steps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Upcoming steps after current"
+        },
+        "failure_mode": {
+          "type": ["string", "null"],
+          "description": "Current failure mode if any"
+        },
+        "retry_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of retries attempted"
+        },
+        "deadline": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO 8601 deadline for completion"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
