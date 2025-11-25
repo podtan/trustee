@@ -350,13 +350,3 @@ help = "Clean temporary files and logs"
 arg_type = "bool"
 long = "clean"
 
-[templates]
-system_template = "templates/system.md"
-system_classification_template = "templates/system_classification.md"
-bug_fix_template = "templates/task/bug_fix.md"
-fallback_template = "templates/task/fallback.md"
-feature_template = "templates/task/feature.md"
-maintenance_template = "templates/task/maintenance.md"
-query_template = "templates/task/query.md"
-action_observation_template = "templates/action_observation.md"
-format_error_template = "templates/format_error.md"
