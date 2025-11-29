@@ -26,6 +26,7 @@ I wanted a small, simple core and the rest extensible — like Kubernetes or Pos
 3. Expose agent functionality to Python via `pyo3` to tap into Python tooling and ecosystems.
 4. Emulate PostgreSQL's extension model: lots of small, discoverable extensions.
 5. Learn from Kubernetes: provide clear extension points so components (written in many languages) can interoperate.
+6. I should also investigate how to use an ABI (Application Binary Interface). Maybe we could use that to create modules in other high-performance languages (Zig, Mojo, Hare, etc.), but I do not know how this would differ from PostgreSQL's extension model.
 
 ## Early modularization: CATS and WASM
 
@@ -57,16 +58,10 @@ This allowed projects to depend on the building blocks they needed without pulli
 
 ## Extraction and the 10-line rule: a saga with LLMs
 
-I set a strict rule to reduce the main `simpaticoder` binary to a tiny bootstrap:
-
-1. The main app (`simpaticoder`) must have at most ten lines of Rust code.
-2. Unlimited configuration files stay in the main app.
-3. All nontrivial Rust code must live in crates such as `ABK`, `CATS`, `UMF`, or provider/lifecycle crates.
-
 Extraction was straightforward at first: `abk[config]`, `abk[observability]`, `abk[provider]`, `abk[lifecycle]`, and `abk[executor]` were successfully moved. Then I hit the wall: I had around 6,500 lines of code in `simpaticoder` and my target was to reduce the main binary to 10 lines. The biggest remaining part was the CLI—about 4,000 lines of Rust code—tangled together with orchestration and session logic.
 
 
-LLMs were unable to extract the CLI automatically. I tried many models (GPT-5, Claude Sonnet 4.5, Grok-code-fast-1, Gemini 2.5), and none solved the extraction cleanly. I even struggled for two days with Claude Sonnet 4.5 trying to get a clean extraction of `abk[cli]` — it could not extract the CLI according to my rule. I started brute-forcing different prompts and approaches. Finally I made a strict rule:
+LLMs were unable to extract the CLI automatically. I tried many models (GPT-5, Claude Sonnet 4.5, Grok-code-fast-1, Gemini 2.5), and none solved the extraction cleanly. Finally I made a strict rule:
 
 1. Only 10 lines of Rust code in the main `simpaticoder` binary.
 2. Unlimited configuration files in the main app.
@@ -74,7 +69,7 @@ LLMs were unable to extract the CLI automatically. I tried many models (GPT-5, C
 
 Claude Sonnet 4.5 told me to extract the CLI into `abk[cli]` and to extract orchestration as `abk[orchestration]`. I was not happy with this because 1,500 lines for orchestration felt too large and, in my view, should have been handled in `main` or other clearer modules. Still, I accepted the change and the orchestration code was abstracted into `abk[orchestration]`.
 
-After that, Claude was still unable to extract `abk[cli]` cleanly and recommended creating another module, `abk[agent]`. That was unacceptable at first—`simpaticoder` was supposed to be the agent—but I accepted the suggestion because my priority was to remove the 4,000-line CLI from the main app: the CLI logic was not the agent's core. Claude Sonnet 4.5 created `abk[agent]`, but even after that it could not extract `abk[cli]` according to my 10-line rule.
+After that, Claude was still unable to extract `abk[cli]` cleanly and recommended creating another module, `abk[agent]`. That was unacceptable at first—`simpaticoder` was supposed to be the agent—but I accepted the suggestion because my priority was to remove the 4,000-line CLI from the main app: the CLI logic was not the agent's core. Claude Sonnet 4.5 created `abk[agent]`, but even after that it could not extract `abk[cli]` according to my 10-line rule. I even struggled for two days with Claude Sonnet 4.5 trying to get a clean extraction of `abk[cli]` — it could not extract the CLI according to my rule. I started brute-forcing different prompts and approaches.
 
 Grok-code-fast-1 eventually succeeded where others struggled by choosing a minimal interface pattern. Rather than inventing heavyweight behavioral factories, Grok used a small data-query interface (a `CommandContext`-style trait) as the thin bridge between the tiny bootstrap and the heavy CLI/orchestration code. The practical difference was:
 
