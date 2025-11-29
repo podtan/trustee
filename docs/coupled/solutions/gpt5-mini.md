@@ -1,4 +1,3 @@
-```markdown
 **Gpt5-Mini Solution Notes**
 
 - **Purpose:** Answer the questions in `AGENT_EVOLUTION_Part3.md` using the coupled-docs, current data-flow analysis, and the temporary package sources under `tmp/`.
@@ -93,4 +92,4 @@ cargo build -p abk --features "config,executor,observability"
 
 ---
 
-```
+
