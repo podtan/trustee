@@ -70,10 +70,16 @@ agent feature requires:
 ├── orchestration → requires provider, umf
 ├── executor
 ├── umf (direct)
-└── cats (direct)
+├── cats (direct)
+└── lifecycle (bundled, no separate feature)
+
+cli feature requires:
+├── config
+├── checkpoint → requires umf
+└── (indirectly requires umf via checkpoint)
 ```
 
-Enabling `agent` pulls in the entire dependency tree.
+Enabling `agent` pulls in the entire dependency tree. Enabling `cli` also pulls significant dependencies due to `checkpoint` requiring `umf`.
 
 ### 3. UMF Type Pollution in ABK
 
@@ -109,19 +115,62 @@ This violates the Dependency Inversion Principle — ABK depends on concrete imp
 
 ### 5. Feature Independence Test Results
 
+ABK has 9 feature-gated modules in `tmp/abk/src/`:
+
+| Module Directory | Feature Gate | Description |
+|------------------|--------------|-------------|
+| `agent/` | `agent` | Core agent implementation |
+| `checkpoint/` | `checkpoint` | Session persistence |
+| `cli/` | `cli` | CLI display utilities |
+| `config/` | `config` | Configuration loading |
+| `executor/` | `executor` | Command execution |
+| `lifecycle/` | `agent` | WASM lifecycle loading (bundled with agent) |
+| `observability/` | `observability` | Logging and metrics |
+| `orchestration/` | `orchestration` | Workflow coordination |
+| `provider/` | `provider` | LLM provider abstraction |
+
+**Note:** The `lifecycle` module has no separate feature flag — it's gated behind `agent`, meaning lifecycle cannot be used without the full agent feature.
+
 Testing individual features reveals coupling:
 
 | Feature | Can Compile Independently? | Blocker |
 |---------|---------------------------|---------|
 | `executor` | ✅ Yes | — |
 | `observability` | ✅ Yes | — |
-| `config` | ❌ No | Implicit CLI type dependencies |
-| `provider` | ❌ No | Requires config → cli types |
-| `checkpoint` | ❌ No | Requires umf types |
-| `orchestration` | ❌ No | Requires provider, umf |
-| `agent` | ❌ No | Requires everything |
+| `config` | ⚠️ Partial | Works alone but has implicit CLI type references |
+| `cli` | ❌ No | Requires `config` + `checkpoint` (transitive deps) |
+| `checkpoint` | ❌ No | Requires `umf` types |
+| `provider` | ❌ No | Requires `config` + `umf` |
+| `orchestration` | ❌ No | Requires `provider` + `umf` |
+| `agent` | ❌ No | Requires all other features |
+| `lifecycle` | ❌ N/A | No separate feature, bundled with `agent` |
 
-**Result: Only 2 of 7 main features can compile independently (29% modularity)**
+**Feature Dependency Chain from `Cargo.toml`:**
+
+```
+cli = [..., "config", "checkpoint", ...]
+         ↓           ↓
+      config    checkpoint = [..., "umf", ...]
+                               ↓
+                             umf (external)
+
+provider = [..., "config", "umf", ...]
+              ↓         ↓
+           config     umf (external)
+
+orchestration = [..., "provider", "umf", ...]
+                   ↓            ↓
+               provider       umf (external)
+
+agent = [..., "config", "observability", "checkpoint", 
+         "provider", "orchestration", "executor", 
+         "umf", "cats", ...]
+         ↓ (everything)
+```
+
+**Result: Only 2 of 9 modules can compile independently (22% modularity)**
+
+The `lifecycle` module being bundled with `agent` instead of having its own feature flag prevents using lifecycle functionality without pulling in the entire agent dependency tree.
 
 ### 6. Config → CLI Hidden Coupling
 

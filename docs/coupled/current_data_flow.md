@@ -472,6 +472,20 @@ pub enum GenerateResponse {
 
 ## Component Dependencies Summary
 
+**ABK Module Structure (9 modules in `tmp/abk/src/`):**
+
+| Module | Feature Gate | Standalone? |
+|--------|--------------|-------------|
+| `agent/` | `agent` | ❌ Requires all others |
+| `checkpoint/` | `checkpoint` | ❌ Requires `umf` |
+| `cli/` | `cli` | ❌ Requires `config`, `checkpoint` |
+| `config/` | `config` | ⚠️ Partial (implicit cli refs) |
+| `executor/` | `executor` | ✅ Independent |
+| `lifecycle/` | `agent` (bundled) | ❌ No separate feature |
+| `observability/` | `observability` | ✅ Independent |
+| `orchestration/` | `orchestration` | ❌ Requires `provider`, `umf` |
+| `provider/` | `provider` | ❌ Requires `config`, `umf` |
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         TRUSTEE                                  │
@@ -482,7 +496,7 @@ pub enum GenerateResponse {
 ┌─────────────────────────────────────────────────────────────────┐
 │                          ABK                                     │
 │   ┌─────────────────────────────────────────────────────────┐   │
-│   │ agent (depends on all below)                             │   │
+│   │ agent + lifecycle (depends on all below)                 │   │
 │   └─────────────────────────────────────────────────────────┘   │
 │         │          │          │          │          │           │
 │         ▼          ▼          ▼          ▼          ▼           │
@@ -490,7 +504,13 @@ pub enum GenerateResponse {
 │   │ config  │ │checkpoint│ │provider │ │orchestr.│ │executor │  │
 │   └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘  │
 │         │          │          │          │                      │
-│         └──────────┴──────────┴──────────┘                      │
+│         │          │          └──────────┘                      │
+│         │          │               │                            │
+│   ┌─────────┐      │               │      ┌─────────────┐       │
+│   │  cli    │──────┘               │      │observability│       │
+│   └─────────┘                      │      └─────────────┘       │
+│         │                          │                            │
+│         └──────────────────────────┘                            │
 │                          │                                       │
 └──────────────────────────┼───────────────────────────────────────┘
                            │
@@ -509,6 +529,47 @@ pub enum GenerateResponse {
                                      │ │  (tanbal)   │ │
                                      │ └─────────────┘ │
                                      └─────────────────┘
+```
+
+**Feature Dependency Graph:**
+
+```
+                    ┌─────────┐
+                    │  agent  │
+                    └────┬────┘
+                         │ requires
+    ┌────────┬───────┬───┴────┬──────────┬───────────┬──────────┐
+    ▼        ▼       ▼        ▼          ▼           ▼          ▼
+┌────────┐┌─────┐┌──────┐┌─────────┐┌───────────┐┌────────┐┌────────┐
+│ config ││cats ││ umf  ││checkpoint││orchestrat.││executor││observ. │
+└────────┘└─────┘└──────┘└────┬────┘└─────┬─────┘└────────┘└────────┘
+                              │           │
+                              │requires   │requires
+                              ▼           ▼
+                           ┌─────┐    ┌──────────┐
+                           │ umf │    │ provider │
+                           └─────┘    └────┬─────┘
+                                           │requires
+                                      ┌────┴────┐
+                                      ▼         ▼
+                                  ┌────────┐ ┌─────┐
+                                  │ config │ │ umf │
+                                  └────────┘ └─────┘
+
+                    ┌─────────┐
+                    │   cli   │
+                    └────┬────┘
+                         │ requires
+                    ┌────┴────┐
+                    ▼         ▼
+               ┌────────┐┌──────────┐
+               │ config ││checkpoint│
+               └────────┘└────┬─────┘
+                              │requires
+                              ▼
+                           ┌─────┐
+                           │ umf │
+                           └─────┘
 ```
 
 ---
