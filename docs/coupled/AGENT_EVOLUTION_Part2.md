@@ -51,6 +51,8 @@ Why it failed (three main reasons):
 2. Performance and verbosity: passing large URP documents rather than small values increased overhead and amplified serialization/deserialization costs. For performance-critical paths this was too costly.
 3. Reinventing an ESB: when I framed everything as messages and schemas I realized I was effectively building an enterprise service bus (ESB) with different vocabulary. That model may be valid for some domains, but Trustee didn't need a full ESB — it needed clear, small boundaries and stable ABI-like interfaces.
 
+I also briefly considered a hybrid approach: authoring JSON/YAML schemas and using a Rust macro/codegen step to generate Rust types at compile time. That felt attractive because it would keep types in Rust while still making schemas explicit, but in practice it didn't seem clean or simple. Macro-driven codegen couples build tooling to schema files, introduces non-obvious compile-time complexity, and pushes validation into macros and build scripts rather than the language's natural type system. For these reasons I rejected it as the primary path.
+
 Conclusion: UDML/URP is useful as an experiment and for higher-level orchestration, but treating it as the primary runtime glue for all modules broke important properties (type safety, performance, simplicity).
 
 ---
