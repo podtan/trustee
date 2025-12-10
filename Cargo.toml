@@ -16,7 +16,7 @@ name = "trustee"
 path = "src/main.rs"
 
 [dependencies]
-abk = { version = "0.1.36", features = ["cli", "orchestration", "agent", "observability"] }
+abk = { version = "0.1.37", features = ["cli", "orchestration", "agent", "observability"] }
 tokio = { version = "1.0", features = ["full"] }
 
 [workspace]
