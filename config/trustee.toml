@@ -98,6 +98,24 @@ max_checkpoints_per_session = 50
 compression_enabled = true
 retention_days = 30
 
+# Storage Backend Configuration
+# Options: "file" (default), "documentdb", "mongodb"
+[checkpointing.storage_backend]
+backend_type = "documentdb"
+# Connection URL - supports environment variable substitution
+connection_url = "${DOCUMENTDB_URL}"
+# Database name for checkpoints
+database = "${DOCUMENTDB_DATABASE}"
+# Collection name for checkpoint documents
+collection = "checkpoints"
+# Authentication credentials (supports env var substitution)
+username = "${DOCUMENTDB_USERNAME}"
+password = "${DOCUMENTDB_PASSWORD}"
+# TLS settings (required for AWS DocumentDB)
+tls_enabled = true
+tls_allow_invalid_certs = true  # Set to false in production with proper certs
+connection_timeout_secs = 30
+
 [checkpointing.git_integration]
 enabled = false
 auto_commit_before_checkpoint = true
