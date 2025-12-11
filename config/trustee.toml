@@ -100,8 +100,10 @@ retention_days = 30
 
 # Storage Backend Configuration
 # Options: "file" (default), "documentdb", "mongodb"
+# Storage modes: "local" (files only), "remote" (DocumentDB only), "mirror" (both)
 [checkpointing.storage_backend]
 backend_type = "documentdb"
+storage_mode = "remote"
 # Connection URL - supports environment variable substitution
 connection_url = "${DOCUMENTDB_URL}"
 # Database name for checkpoints
@@ -367,4 +369,3 @@ name = "clean"
 help = "Clean temporary files and logs"
 arg_type = "bool"
 long = "clean"
-
