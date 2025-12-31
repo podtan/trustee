@@ -1,0 +1,36 @@
+[extension]
+id = "coder-lifecycle"
+name = "Coder Lifecycle Extension"
+version = "0.3.0"
+api_version = "0.3.0"
+description = "Template lifecycle management for ABK coding agents - handles template loading, rendering, and task classification"
+authors = ["Podtan Team"]
+repository = "https://github.com/podtan/coder-lifecycle-wasm"
+
+[lib]
+kind = "rust"
+path = "coder_lifecycle_wasm.wasm"
+
+[capabilities]
+lifecycle = true
+provider = false
+tools = false
+context = false
+
+[lifecycle]
+# Supported task types
+supported_task_types = ["bug_fix", "feature", "maintenance", "query", "fallback"]
+
+# Available templates
+templates = [
+    "system",
+    "system_classification", 
+    "action_observation",
+    "format_error",
+    "useful_commands",
+    "task/bug_fix",
+    "task/feature",
+    "task/maintenance",
+    "task/query",
+    "task/fallback"
+]
