@@ -16,8 +16,8 @@ name = "trustee"
 path = "src/main.rs"
 
 [dependencies]
-# Use published ABK from crates.io (v0.2.1)
-abk = { version = "0.2.1", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "extension"] }
+# Use ABK from crates.io
+abk = { version = "0.2.2", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "extension"] }
 umf = { version = "0.1.4", features = ["streaming"] }
 tokio = { version = "1.0", features = ["full"] }
 
