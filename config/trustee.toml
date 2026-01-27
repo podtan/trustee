@@ -90,6 +90,28 @@ endpoint = "chat/completions"
 # Enable streaming responses for real-time output
 enable_streaming = true
 
+# MCP (Model Context Protocol) Server Configuration
+# Allows Trustee to discover and use tools from MCP servers
+[mcp]
+# Enable MCP tool discovery
+enabled = true
+# Timeout for MCP server requests (seconds)
+timeout_seconds = 30
+
+# MCP Servers - Add servers that provide tools
+# Each server exposes tools via the MCP protocol
+[[mcp.servers]]
+# Server identifier (used for logging and tool namespacing)
+name = "pdt"
+# Server URL (SSE endpoint for HTTP transport)
+url = "http://127.0.0.1:8000/pdt"
+# Transport type: "http" (SSE) or "stdio"
+transport = "http"
+# Optional authentication token (supports env var substitution)
+# auth_token = "${PDT_MCP_TOKEN}"
+# Auto-initialize connection (send initialize/initialized messages)
+auto_init = true
+
 # Checkpoint and Session Management Configuration
 [checkpointing]
 enabled = true

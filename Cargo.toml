@@ -16,9 +16,10 @@ name = "trustee"
 path = "src/main.rs"
 
 [dependencies]
-# ABK 0.2.4 adds LifecycleExtensionInstance for lifecycle-only extensions
-abk = { version = "0.2.4", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "extension"] }
-umf = { version = "0.1.4", features = ["streaming"] }
+# ABK with registry-mcp for MCP tool aggregation
+abk = { version = "0.3.0", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "extension", "registry-mcp"] }
+# UMF with MCP support
+umf = { version = "0.2.0", features = ["streaming", "mcp"] }
 tokio = { version = "1.0", features = ["full"] }
 
 [workspace]
