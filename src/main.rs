@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     if is_init {
         // Init command uses the old path-based approach to set up the environment
-        abk::cli::run_configured_cli_from_config_with_build_info("config/trustee.toml", Some(build_info())).await
+        abk::cli::run_from_config_path("config/trustee.toml", Some(build_info())).await
     } else {
         // All other commands: load config and secrets, pass to ABK
         let (config_path, secrets_path) = get_config_paths(agent_name);
@@ -88,6 +88,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("Failed to read secrets from {}: {}", secrets_path.display(), e))?;
         
         // Run with raw config (ABK does NOT read files)
-        abk::cli::run_with_raw_config_and_build_info(&config_toml, secrets, Some(build_info())).await
+        abk::cli::run_from_raw_config(&config_toml, secrets, Some(build_info())).await
     }
 }
