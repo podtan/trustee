@@ -171,7 +171,7 @@ version = "0.1.0"
 default_command = "run"
 
 # Enabled commands (controls which commands are available)
-enabled_commands = ["run", "init", "config", "cache", "resume", "checkpoints", "sessions", "misc"]
+enabled_commands = ["run", "init", "config", "cache", "resume", "checkpoints", "sessions", "misc", "version"]
 
 # CLI behavior settings
 show_progress = true
