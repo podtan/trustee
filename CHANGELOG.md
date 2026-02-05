@@ -5,6 +5,18 @@ All notable changes to Trustee will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-02-05
+
+### Changed
+- Trustee now reads config and secrets itself and passes them to ABK
+- Uses `abk::cli::run_with_raw_config()` instead of `run_configured_cli_from_config()`
+- Config loaded from `~/.trustee/config/trustee.toml`, secrets from `~/.trustee/.env`
+- Environment variables override secrets from .env file
+- Prepares architecture for future S3-based configuration loading
+
+### Dependencies
+- ABK bumped to 0.3.1
+
 ## [0.1.0] - 2025-11-06
 
 ### Added
