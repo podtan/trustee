@@ -1,6 +1,6 @@
 [package]
 name = "trustee"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A general-purpose agent that can morph into different specialized agents using WASM lifecycle plugins"
 license = "MIT OR Apache-2.0"
@@ -16,8 +16,8 @@ name = "trustee"
 path = "src/main.rs"
 
 [dependencies]
-# ABK with registry-mcp for MCP tool aggregation (local for development)
-abk = { path = "../abk", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "extension", "registry-mcp"] }
+# ABK with registry-mcp for MCP tool aggregation
+abk = { version = "0.3.2", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "extension", "registry-mcp"] }
 # UMF with MCP support
 umf = { version = "0.2.0", features = ["streaming", "mcp"] }
 tokio = { version = "1.0", features = ["full"] }
