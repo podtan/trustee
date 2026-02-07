@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.1.3] - 2026-02-05
+## [0.1.4] - 2026-02-05
+
+### Added
+- **Configurable config and env file names**: Read custom file names from `~/.trustee/.env`
+  - `TRUSTEE_CONFIG_FILE`: Override local config file name (default: `trustee.toml`)
+  - `TRUSTEE_ENV_FILE`: Override local env file name (default: `.env`)
+  - `GETMYCONFIG_CONFIG_FILE`: Override remote config file name (default: `trustee.toml.enc`)
+  - `GETMYCONFIG_ENV_FILE`: Override remote env file name (default: `.env.glm.enc`)
+- **Documentation**: Added `docs/remote-config-secrets.md` with comprehensive guide
+- **Example configuration**: Added `docs/example.env` with all possible settings
+
+### Changed
+- Enhanced `get_config_paths()` to read file names from local .env
+- Enhanced `load_remote_config()` to read remote file names from local .env
+
+### Documentation
+- Added comprehensive remote config/secrets documentation
+- Added example .env file with all configuration options
+
 
 ### Changed
 - Updated to ABK 0.4.0 with cleaner CLI entry points:

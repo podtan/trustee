@@ -60,13 +60,86 @@ trustee run "Help me analyze this codebase and suggest improvements"
 
 ## Configuration
 
-Trustee uses a TOML configuration file located at `config/trustee.toml`. The configuration includes:
+Trustee uses a TOML configuration file and environment variables. Configuration is loaded from `~/.trustee/` directory.
 
-- **Agent settings**: Execution modes, timeouts, and behavior
-- **CLI configuration**: Command-line interface customization
-- **Checkpointing**: Session persistence and resume settings
-- **LLM provider**: Endpoint and streaming configuration
-- **Tool settings**: File operations, search filtering, and execution limits
+### Configuration Files
+
+Trustee uses two main configuration files:
+
+1. **Config file** (`~/.trustee/config/trustee.toml`): Agent settings, execution modes, timeouts, checkpointing, LLM provider settings, and tool configuration
+2. **Env file** (`~/.trustee/.env`): Environment variables and secrets (API keys, tokens, etc.)
+
+### Environment Variables
+
+The environment file supports the following variables:
+
+#### Local Config File Names (Optional)
+
+- **`TRUSTEE_CONFIG_FILE`**: Custom config file name (default: `trustee.toml`)
+- **`TRUSTEE_ENV_FILE`**: Custom env file name (default: `.env`)
+
+#### LLM Provider Configuration
+
+- **`OPENAI_API_KEY`**: OpenAI API key
+- **`OPENAI_DEFAULT_MODEL`**: Default OpenAI model (e.g., `gpt-4o`)
+- **`OPENAI_BASE_URL`**: Custom OpenAI endpoint URL
+- **`GITHUB_TOKEN`**: GitHub token for Copilot
+- **`GITHUB_MODEL`**: Model for GitHub Copilot (e.g., `openai/gpt-4o-mini` or `anthropic/claude-sonnet-4`)
+- **`GITHUB_BASE_URL`**: Custom GitHub Copilot endpoint URL
+- **`ANTHROPIC_AUTH_TOKEN`**: Anthropic API key
+- **`ANTHROPIC_MODEL`**: Default Anthropic model (e.g., `claude-3-5-sonnet-20241022`)
+- **`ANTHROPIC_BASE_URL`**: Custom Anthropic endpoint URL
+- **`LLM_PROVIDER`**: LLM provider to use (default: `tanbal`)
+
+#### Remote Encrypted Configuration (getmyconfig)
+
+Trustee supports loading configuration from encrypted remote storage via the `getmyconfig` library. This is useful for secure, centralized configuration management.
+
+- **`GETMYCONFIG_ENDPOINT`**: S3-compatible storage endpoint
+- **`GETMYCONFIG_ACCESS_KEY`**: Storage access key
+- **`GETMYCONFIG_SECRET_KEY`**: Storage secret key
+- **`GETMYCONFIG_BUCKET`**: Storage bucket name
+- **`GETMYCONFIG_ENCRYPTION_KEY`**: Encryption key for decrypting config files
+- **`GETMYCONFIG_REGION`**: Storage region (optional)
+- **`GETMYCONFIG_CONFIG_FILE`**: Remote config file name (default: `trustee.toml.enc`)
+- **`GETMYCONFIG_ENV_FILE`**: Remote env file name (default: `env.enc`)
+
+**Example ~/.trustee/.env for remote config:**
+
+```bash
+# Remote storage configuration
+GETMYCONFIG_ENDPOINT=https://your-storage.example.com
+GETMYCONFIG_ACCESS_KEY=your-access-key
+GETMYCONFIG_SECRET_KEY=your-secret-key
+GETMYCONFIG_BUCKET=trustee-configs
+GETMYCONFIG_ENCRYPTION_KEY=your-encryption-key
+GETMYCONFIG_REGION=us-east-1
+
+# Custom remote file names (optional)
+GETMYCONFIG_CONFIG_FILE=my-custom-config.toml.enc
+GETMYCONFIG_ENV_FILE=my-custom-secretsenv.enc
+
+# Getmyconfig connection variables are always kept from local .env
+# even when using remote config
+```
+
+**Note:** When using remote configuration, Trustee will:
+1. Load local `~/.trustee/.env` first (contains getmyconfig connection params)
+2. Attempt to fetch and decrypt remote config files
+3. Merge remote secrets with local secrets (remote takes priority)
+4. Fall back to local config if remote is unavailable
+
+**Example ~/.trustee/.env for local config:**
+
+```bash
+# Local configuration file names (optional)
+TRUSTEE_CONFIG_FILE=custom-trustee.toml
+TRUSTEE_ENV_FILE=custom-secrets.env
+
+# LLM provider configuration
+OPENAI_API_KEY=sk-your-key-here
+OPENAI_DEFAULT_MODEL=gpt-4o
+```
 
 ## Lifecycle Plugins
 
