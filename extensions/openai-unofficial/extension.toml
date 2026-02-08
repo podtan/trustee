@@ -1,0 +1,26 @@
+[extension]
+id = "openai-unofficial"
+name = "OpenAI Unofficial Provider"
+version = "0.1.0"
+api_version = "0.3.0"
+description = "OpenAI-compatible API provider for ABK agents - supports streaming, function calling, and standard OpenAI headers only"
+authors = ["Podtan Team"]
+repository = "https://github.com/podtan/openai-unofficial-wasm"
+
+[lib]
+kind = "rust"
+path = "openai_unofficial_wasm.wasm"
+
+[capabilities]
+lifecycle = false
+provider = true
+tools = false
+context = false
+
+[provider]
+# Supports any OpenAI-compatible model (wildcard)
+supported_models = ["*"]
+
+# Features
+supports_streaming = true
+supports_function_calling = true
