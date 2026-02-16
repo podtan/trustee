@@ -3,7 +3,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use figment::providers::{Format, Toml};
+use figment::Figment;
 use getmyconfig::{ConfigReader, StorageConfig};
+
+/// Embedded default configuration - compiled into the binary
+const DEFAULT_CONFIG: &str = include_str!("../config/trustee_default.toml");
 
 /// Build-time metadata embedded by build.rs
 fn build_info() -> abk::cli::BuildInfo {
@@ -194,6 +199,21 @@ async fn load_remote_config(
     Some((config_toml, remote_secrets))
 }
 
+/// Merge embedded defaults with user overrides using figment.
+/// Returns the merged TOML string ready for ABK.
+fn merge_config(user_config_toml: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let merged: toml::Table = Figment::new()
+        .merge(Toml::string(DEFAULT_CONFIG))
+        .merge(Toml::string(user_config_toml))
+        .extract()
+        .map_err(|e| format!("Failed to merge configuration: {}", e))?;
+
+    let merged_toml = toml::to_string(&merged)
+        .map_err(|e| format!("Failed to serialize merged config: {}", e))?;
+
+    Ok(merged_toml)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Determine agent name from the project config (for init) or use "trustee" as default
@@ -204,8 +224,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_init = args.get(1).map(|s| s.as_str()) == Some("init");
     
     if is_init {
-        // Init command uses the old path-based approach to set up the environment
-        abk::cli::run_from_config_path("config/trustee.toml", Some(build_info())).await
+        // Init command uses the old path-based approach to set up the environment.
+        // It reads config/trustee.toml (the minimal user config) from the project directory.
+        // But we still need to merge with defaults so ABK gets a complete config.
+        let project_config = std::fs::read_to_string("config/trustee.toml")
+            .unwrap_or_default();
+        let merged = merge_config(&project_config)?;
+        let secrets = HashMap::new();
+        abk::cli::run_from_raw_config(&merged, secrets, Some(build_info())).await
     } else {
         // All other commands: load config and secrets, pass to ABK
         let (config_path, secrets_path, _config_filename, _env_filename) = get_config_paths(agent_name);
@@ -222,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("Failed to read secrets from {}: {}", secrets_path.display(), e))?;
         
         // Try remote config first, fall back to local
-        let (config_toml, secrets) = match load_remote_config(&local_secrets).await {
+        let (user_config_toml, secrets) = match load_remote_config(&local_secrets).await {
             Some((remote_config, remote_secrets)) => {
                 // Merge: remote secrets take priority, but keep local GETMYCONFIG_* vars
                 let mut merged = local_secrets.clone();
@@ -246,7 +272,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         
-        // Run with raw config (ABK does NOT read files)
-        abk::cli::run_from_raw_config(&config_toml, secrets, Some(build_info())).await
+        // Merge embedded defaults with user overrides (from local or S3)
+        let merged_config = merge_config(&user_config_toml)?;
+        
+        // Run with merged config (ABK does NOT read files)
+        abk::cli::run_from_raw_config(&merged_config, secrets, Some(build_info())).await
     }
 }

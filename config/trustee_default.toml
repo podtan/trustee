@@ -1,0 +1,348 @@
+# Trustee Default Configuration
+# 
+# These are sensible defaults embedded in the binary.
+# Users only need to provide overrides in ~/.trustee/config/trustee.toml
+
+[agent]
+execution_mode = "hybrid"
+name = "trustee"
+version = "0.1.5"
+default_mode = "confirm"
+enable_task_classification = true
+
+[installation]
+binary_name = "trustee"
+binary_source_path = "target/release/trustee"
+local_bin_path = "~/.local/bin"
+
+[logging]
+log_file = "/tmp/trustee_logs.md"
+log_level = "INFO"
+
+[execution]
+enable_tool_calling = true
+timeout_seconds = 120
+max_retries = 3
+max_tokens = 4000
+max_history = 100
+enable_dangerous_command_validation = true
+max_iterations = 1000
+request_interval_seconds = 0
+
+[modes.confirm]
+description = "Agent proposes actions and asks for confirmation"
+auto_execute = false
+
+[modes.yolo]
+description = "Actions run immediately without confirmation"
+auto_execute = true
+
+[modes.human]
+description = "Human enters commands directly"
+auto_execute = false
+
+[tools]
+enabled = true
+max_file_size_mb = 10
+max_grep_results = 100
+open_file_window_size = 1000
+max_tool_result_size_bytes = 256000
+truncate_large_results = true
+pagination_size = 50
+
+# Search filtering configuration
+[search_filtering]
+enabled = true
+
+exclude_dirs = [
+    "target",
+    "node_modules",
+    "__pycache__",
+    "dist",
+    "build",
+    ".git",
+    ".svn",
+    ".hg",
+    "venv",
+    "env",
+    ".venv"
+]
+
+exclude_extensions = [
+    "exe", "dll", "so", "dylib", "a", "o",
+    "pyc",
+    "png", "jpg", "jpeg", "gif", "bmp", "ico",
+    "mp3", "mp4", "avi", "mov", "wav", "pdf",
+    "zip", "tar", "gz", "rar", "7z"
+]
+
+exclude_hidden = true
+
+# LLM Provider Configuration
+[llm]
+endpoint = "chat/completions"
+enable_streaming = true
+
+# MCP - disabled by default, user enables and configures servers
+[mcp]
+enabled = false
+timeout_seconds = 30
+
+# Checkpoint and Session Management Configuration
+[checkpointing]
+enabled = true
+auto_checkpoint_interval = 1
+max_checkpoints_per_session = 50
+compression_enabled = true
+retention_days = 30
+
+[checkpointing.storage_backend]
+backend_type = "file"
+storage_mode = "local"
+collection = "checkpoints"
+tls_enabled = false
+tls_allow_invalid_certs = false
+connection_timeout_secs = 30
+
+[checkpointing.git_integration]
+enabled = false
+auto_commit_before_checkpoint = true
+
+[checkpointing.performance]
+compression_level = 6
+enable_lazy_loading = true
+enable_async_operations = true
+max_concurrent_operations = 4
+checkpoint_creation_timeout_seconds = 60
+enable_caching = true
+cache_size_mb = 100
+
+[checkpointing.security]
+enable_encryption = false
+filter_sensitive_env_vars = true
+sensitive_env_patterns = ["*KEY*", "*TOKEN*", "*PASSWORD*", "*SECRET*"]
+file_permission_strict = true
+max_file_size_mb = 10
+
+# CLI Configuration
+[cli]
+name = "trustee"
+about = "A general-purpose agent that can morph into different specialized agents"
+version = "0.1.5"
+default_command = "run"
+enabled_commands = ["run", "init", "config", "cache", "resume", "checkpoints", "sessions", "misc", "version"]
+show_progress = true
+interactive_mode = true
+require_confirmation = true
+
+[cli.commands.version]
+description = "Show version information"
+enabled = true
+
+[cli.commands.run]
+description = "Run trustee with the specified task"
+enabled = true
+
+[[cli.commands.run.args]]
+name = "task"
+help = "Description of the task to perform"
+arg_type = "string"
+multiple = true
+trailing = true
+required = true
+
+[[cli.commands.run.args]]
+name = "config"
+help = "Path to TOML config file"
+arg_type = "path"
+long = "config"
+short = "c"
+
+[[cli.commands.run.args]]
+name = "yolo"
+help = "Enable YOLO mode (no confirmation)"
+arg_type = "bool"
+long = "yolo"
+short = "y"
+
+[[cli.commands.run.args]]
+name = "mode"
+help = "Agent interaction mode (confirm, yolo, human)"
+arg_type = "string"
+long = "mode"
+default = "confirm"
+
+[[cli.commands.run.args]]
+name = "verbose"
+help = "Enable verbose output"
+arg_type = "bool"
+long = "verbose"
+short = "v"
+
+[cli.commands.init]
+description = "Initialize a new trustee project"
+enabled = true
+
+[[cli.commands.init.args]]
+name = "force"
+help = "Force initialization even if project already exists"
+arg_type = "bool"
+long = "force"
+
+[[cli.commands.init.args]]
+name = "template"
+help = "Project template to use"
+arg_type = "string"
+long = "template"
+default = "default"
+
+[cli.commands.config]
+description = "Manage trustee configuration"
+enabled = true
+
+[[cli.commands.config.args]]
+name = "show"
+help = "Show current configuration"
+arg_type = "bool"
+long = "show"
+
+[[cli.commands.config.args]]
+name = "edit"
+help = "Edit configuration file"
+arg_type = "bool"
+long = "edit"
+
+[[cli.commands.config.args]]
+name = "validate"
+help = "Validate configuration file"
+arg_type = "bool"
+long = "validate"
+
+[cli.commands.cache]
+description = "Manage trustee cache"
+enabled = true
+
+[[cli.commands.cache.args]]
+name = "clear"
+help = "Clear all cached data"
+arg_type = "bool"
+long = "clear"
+
+[[cli.commands.cache.args]]
+name = "list"
+help = "List cached items"
+arg_type = "bool"
+long = "list"
+
+[[cli.commands.cache.args]]
+name = "size"
+help = "Show cache size information"
+arg_type = "bool"
+long = "size"
+
+[cli.commands.resume]
+description = "Resume a previous trustee session"
+enabled = true
+
+[[cli.commands.resume.args]]
+name = "session"
+help = "Session ID to resume"
+arg_type = "string"
+long = "session"
+
+[[cli.commands.resume.args]]
+name = "checkpoint"
+help = "Specific checkpoint ID to resume from"
+arg_type = "string"
+long = "checkpoint"
+
+[[cli.commands.resume.args]]
+name = "list"
+help = "List available sessions"
+arg_type = "bool"
+long = "list"
+
+[[cli.commands.resume.args]]
+name = "interactive"
+help = "Interactive session selection"
+arg_type = "bool"
+long = "interactive"
+short = "i"
+
+[[cli.commands.resume.args]]
+name = "latest"
+help = "Resume the latest session"
+arg_type = "bool"
+long = "latest"
+
+[cli.commands.checkpoints]
+description = "Manage trustee checkpoints"
+enabled = true
+
+[[cli.commands.checkpoints.args]]
+name = "list"
+help = "List all checkpoints"
+arg_type = "bool"
+long = "list"
+
+[[cli.commands.checkpoints.args]]
+name = "show"
+help = "Show checkpoint details"
+arg_type = "string"
+long = "show"
+
+[[cli.commands.checkpoints.args]]
+name = "delete"
+help = "Delete a checkpoint"
+arg_type = "string"
+long = "delete"
+
+[[cli.commands.checkpoints.args]]
+name = "clean"
+help = "Clean old checkpoints"
+arg_type = "bool"
+long = "clean"
+
+[cli.commands.sessions]
+description = "Manage trustee sessions"
+enabled = true
+
+[[cli.commands.sessions.args]]
+name = "list"
+help = "List all sessions"
+arg_type = "bool"
+long = "list"
+
+[[cli.commands.sessions.args]]
+name = "show"
+help = "Show session details"
+arg_type = "string"
+long = "show"
+
+[[cli.commands.sessions.args]]
+name = "delete"
+help = "Delete a session"
+arg_type = "string"
+long = "delete"
+
+[cli.commands.misc]
+description = "Miscellaneous trustee utilities"
+enabled = true
+
+[[cli.commands.misc.args]]
+name = "doctor"
+help = "Run diagnostics and health checks"
+arg_type = "bool"
+long = "doctor"
+
+[[cli.commands.misc.args]]
+name = "stats"
+help = "Show usage statistics"
+arg_type = "bool"
+long = "stats"
+
+[[cli.commands.misc.args]]
+name = "clean"
+help = "Clean temporary files and logs"
+arg_type = "bool"
+long = "clean"

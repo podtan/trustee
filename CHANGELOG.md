@@ -5,6 +5,27 @@ All notable changes to Trustee will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-02-16
+
+### Added
+- **Layered configuration with figment**: Embedded default config (`trustee_default.toml`)
+  in the binary, users only need a minimal `~/.trustee/config/trustee.toml` with overrides
+- **figment dependency**: Layered config merging (defaults + user overrides) for both
+  local file and remote S3 (getmyconfig) config paths
+- **Default storage backend**: `[checkpointing.storage_backend]` defaults to local file
+  storage; users override to DocumentDB only when needed
+
+### Changed
+- Split `config/trustee.toml` (394 lines) into:
+  - `config/trustee_default.toml` (348 lines) — embedded in binary via `include_str!()`
+  - `config/trustee.toml` (28 lines) — minimal user overrides only
+- `trustee init` now copies the minimal user config instead of the full monolith
+- Config merge applies to both local and remote (S3/getmyconfig) config sources
+
+### Dependencies
+- Added `figment` 0.10 (with toml feature)
+- Added `toml` 0.8
+
 ## [0.1.3] - 2026-02-05
 ## [0.1.4] - 2026-02-05
 
