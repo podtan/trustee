@@ -135,7 +135,7 @@ collection = "checkpoints"
 # Authentication credentials (supports env var substitution)
 username = "${DOCUMENTDB_USERNAME}"
 password = "${DOCUMENTDB_PASSWORD}"
-# TLS settings (required for AWS DocumentDB)
+# TLS settings (required for DocumentDB)
 tls_enabled = true
 tls_allow_invalid_certs = true  # Set to false in production with proper certs
 connection_timeout_secs = 30
