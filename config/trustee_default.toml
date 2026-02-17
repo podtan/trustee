@@ -6,7 +6,7 @@
 [agent]
 execution_mode = "hybrid"
 name = "trustee"
-version = "0.1.5"
+version = "0.1.7"
 default_mode = "confirm"
 enable_task_classification = true
 
@@ -135,7 +135,7 @@ max_file_size_mb = 10
 [cli]
 name = "trustee"
 about = "A general-purpose agent that can morph into different specialized agents"
-version = "0.1.5"
+version = "0.1.7"
 default_command = "run"
 enabled_commands = ["run", "init", "config", "cache", "resume", "checkpoints", "sessions", "misc", "version"]
 show_progress = true
