@@ -94,7 +94,14 @@ enabled = true
 auto_checkpoint_interval = 1
 max_checkpoints_per_session = 50
 compression_enabled = true
-retention_days = 30
+[checkpointing.retention]
+max_age_days = 30
+max_total_size_gb = 10
+max_sessions_per_project = 20
+cleanup_interval_hours = 24
+enable_auto_cleanup = true
+preserve_tagged = true
+preserve_active_sessions = true
 
 [checkpointing.storage_backend]
 backend_type = "file"
