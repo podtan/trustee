@@ -5,6 +5,16 @@ All notable changes to Trustee will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-02-17
+
+### Fixed
+- **Checkpoint conversation snapshots now include assistant text responses**: When the LLM returns both text content and tool calls (e.g., jokes followed by submit), the text is now captured in checkpoint files
+- **Final checkpoint saves complete conversation**: A final checkpoint is now saved when the session ends, ensuring all messages including the last assistant response are preserved
+
+### Dependencies
+- ABK bumped to 0.4.7
+- UMF bumped to 0.2.1
+
 ## [0.1.6] - 2026-02-16
 
 ### Fixed
