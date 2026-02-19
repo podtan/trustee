@@ -17,9 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 # ABK with registry-mcp for MCP tool aggregation
-abk = { version = "0.4.8", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "extension", "registry-mcp"] }
+abk = { path = "../abk", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "extension", "registry-mcp"] }
 # UMF with MCP support
-umf = { version = "0.2.1", features = ["streaming", "mcp"] }
+umf = { path = "../umf", features = ["streaming", "mcp"] }
 # Layered configuration merging (defaults + user overrides)
 figment = { version = "0.10", features = ["toml"] }
 toml = "0.8"
