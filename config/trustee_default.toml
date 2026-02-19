@@ -83,6 +83,10 @@ exclude_hidden = true
 endpoint = "chat/completions"
 enable_streaming = true
 
+# Lifecycle extension configuration
+[lifecycle]
+enabled = false  # Set to true to use WASM lifecycle extension (requires coder-lifecycle-wasm)
+
 # MCP - disabled by default, user enables and configures servers
 [mcp]
 enabled = false
