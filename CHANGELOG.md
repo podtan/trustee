@@ -5,6 +5,27 @@ All notable changes to Trustee will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-02-20
+
+### Added
+- **Reasoning/Thinking Model Support**: Full support for thinking models (GLM-4.7, GLM-5, Qwen3, DeepSeek)
+  - Reasoning content is printed to stderr in gray during streaming
+  - Reasoning is captured and can be sent back to LLM for multi-turn conversations
+
+### Changed
+- **Default lifecycle.disabled**: `lifecycle.enabled = false` by default, using simple built-in lifecycle
+  - No task classification or templates by default
+  - Direct system prompt + user task flow
+  - Enable WASM lifecycle with `lifecycle.enabled = true` for classification/templates
+
+### Fixed
+- **Flow with disabled lifecycle**: No more classification tool calls or template placeholders
+- **Tool filtering**: `classify_task` tool properly removed when not needed
+
+### Dependencies
+- ABK bumped to 0.4.9
+- UMF bumped to 0.2.2
+
 ## [0.1.8] - 2026-02-17
 
 ### Fixed
