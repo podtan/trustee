@@ -5,6 +5,17 @@ All notable changes to Trustee will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14] - 2026-02-23
+
+### Fixed
+- **Working Directory Resolution**: Tools now correctly use project directory instead of home directory
+  - Mirrors OpenCode's approach: working directory set at execution time, not instantiation
+  - Fixes issue where `ls trustee/abk/cats` would fail because tools were running from `~`
+
+### Dependencies
+- ABK bumped to 0.5.3
+- CATS bumped to 0.1.5 (via ABK)
+
 ## [0.1.10] - 2026-02-20
 
 ### Added
