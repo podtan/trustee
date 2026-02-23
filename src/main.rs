@@ -23,15 +23,27 @@ fn build_info() -> abk::cli::BuildInfo {
 /// Load secrets from a .env file into a HashMap
 /// 
 /// Format: KEY=VALUE (one per line, # for comments)
+/// 
+/// After loading from file, merges process environment variables with
+/// GETMYCONFIG_ prefix. This allows orchestrators like TRP to inject
+/// remote config credentials via env vars (Turtle Zero bootstrapping).
+/// Process env vars take precedence over file values.
 fn load_env_file(path: &PathBuf) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
     let mut secrets = HashMap::new();
     
-    if !path.exists() {
-        return Ok(secrets); // Empty if file doesn't exist
+    if path.exists() {
+        let content = std::fs::read_to_string(path)?;
+        parse_env_content(&content, &mut secrets);
     }
     
-    let content = std::fs::read_to_string(path)?;
-    parse_env_content(&content, &mut secrets);
+    // Merge process environment variables so TRP (or other orchestrators)
+    // can inject GETMYCONFIG_* credentials without touching the .env file.
+    // Process env vars override file values for Turtle Zero bootstrapping.
+    for (key, value) in std::env::vars() {
+        if key.starts_with("GETMYCONFIG_") {
+            secrets.insert(key, value);
+        }
+    }
     
     Ok(secrets)
 }
