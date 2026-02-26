@@ -86,6 +86,19 @@ enable_streaming = true
 # Lifecycle extension configuration
 [lifecycle]
 enabled = false  # Set to true to use WASM lifecycle extension (requires coder-lifecycle-wasm)
+system_template = """You are a helpful AI assistant. Follow the user's instructions directly.
+
+## Tools
+
+You have access to tools. Use them when needed to accomplish tasks.
+
+## Workflow
+
+1. Understand what the user wants
+2. Execute the necessary actions using available tools
+3. Provide clear, helpful responses
+
+When you have completed the task, use the `submit` tool to indicate completion."""
 
 # MCP - disabled by default, user enables and configures servers
 [mcp]
