@@ -20,9 +20,11 @@ use ratatui::{
 pub struct App {
     /// Input buffer for user commands
     pub input: String,
+    /// Cursor position in input buffer
+    pub cursor_position: usize,
     /// Output log lines
     pub output_lines: Vec<String>,
-    /// Scroll position in output
+    /// Scroll position in output (vertical)
     pub scroll: u16,
     /// Whether the app should quit
     pub should_quit: bool,
@@ -33,10 +35,17 @@ impl App {
     pub fn new() -> Self {
         Self {
             input: String::new(),
+            cursor_position: 0,
             output_lines: vec![
                 "Welcome to Trustee TUI".to_string(),
                 "Type a task and press Enter to execute".to_string(),
                 "Press Ctrl+C to exit".to_string(),
+                "".to_string(),
+                "Keyboard shortcuts:".to_string(),
+                "  ↑/↓ or Page Up/Down - Scroll output".to_string(),
+                "  Enter - Execute task".to_string(),
+                "  Backspace - Delete character".to_string(),
+                "  Esc or Ctrl+C - Exit".to_string(),
             ],
             scroll: 0,
             should_quit: false,
@@ -57,26 +66,84 @@ impl App {
             // Draw the UI
             terminal.draw(|f| self.render(f))?;
 
-            // Handle events
+            // Handle events with 100ms timeout
             if event::poll(std::time::Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
+                    // Task 26: Enhanced keyboard event handling
                     match key.code {
+                        // Exit with Ctrl+C
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             self.should_quit = true;
                         }
-                        KeyCode::Char(c) => {
-                            self.input.push(c);
+                        // Exit with Esc
+                        KeyCode::Esc => {
+                            self.should_quit = true;
                         }
+                        // Submit task with Enter
                         KeyCode::Enter => {
                             if !self.input.is_empty() {
                                 self.execute_command();
                             }
                         }
+                        // Task 24: Backspace - delete character before cursor
                         KeyCode::Backspace => {
-                            self.input.pop();
+                            if self.cursor_position > 0 {
+                                self.input.remove(self.cursor_position - 1);
+                                self.cursor_position -= 1;
+                            }
                         }
-                        KeyCode::Esc => {
-                            self.should_quit = true;
+                        // Delete key - delete character at cursor
+                        KeyCode::Delete => {
+                            if self.cursor_position < self.input.len() {
+                                self.input.remove(self.cursor_position);
+                            }
+                        }
+                        // Task 25: Scroll up with arrow up
+                        KeyCode::Up => {
+                            if self.scroll > 0 {
+                                self.scroll -= 1;
+                            }
+                        }
+                        // Task 25: Scroll down with arrow down
+                        KeyCode::Down => {
+                            let max_scroll = self.output_lines.len().saturating_sub(1) as u16;
+                            if self.scroll < max_scroll {
+                                self.scroll += 1;
+                            }
+                        }
+                        // Task 25: Page Up - scroll up by 10 lines
+                        KeyCode::PageUp => {
+                            self.scroll = self.scroll.saturating_sub(10);
+                        }
+                        // Task 25: Page Down - scroll down by 10 lines
+                        KeyCode::PageDown => {
+                            let max_scroll = self.output_lines.len().saturating_sub(1) as u16;
+                            self.scroll = (self.scroll + 10).min(max_scroll);
+                        }
+                        // Task 24: Home - move cursor to beginning
+                        KeyCode::Home => {
+                            self.cursor_position = 0;
+                        }
+                        // Task 24: End - move cursor to end
+                        KeyCode::End => {
+                            self.cursor_position = self.input.len();
+                        }
+                        // Task 24: Left arrow - move cursor left
+                        KeyCode::Left => {
+                            if self.cursor_position > 0 {
+                                self.cursor_position -= 1;
+                            }
+                        }
+                        // Task 24: Right arrow - move cursor right
+                        KeyCode::Right => {
+                            if self.cursor_position < self.input.len() {
+                                self.cursor_position += 1;
+                            }
+                        }
+                        // Task 24: Character input
+                        KeyCode::Char(c) => {
+                            self.input.insert(self.cursor_position, c);
+                            self.cursor_position += 1;
                         }
                         _ => {}
                     }
@@ -106,9 +173,11 @@ impl App {
         // TODO: Execute the actual workflow here
         // For now, just echo the command
         self.output_lines.push(format!("Command received: {}", command));
+        self.output_lines.push("".to_string()); // Empty line for spacing
         
-        // Clear input buffer
+        // Clear input buffer and reset cursor
         self.input.clear();
+        self.cursor_position = 0;
         
         // Auto-scroll to bottom
         self.scroll = self.output_lines.len().saturating_sub(1) as u16;
@@ -116,40 +185,61 @@ impl App {
 
     /// Render the TUI
     pub fn render(&self, frame: &mut Frame) {
-        // Create main layout: output area (top) + input box (bottom)
-        let chunks = Layout::default()
+        // Task 23: Create main layout with 80/20 split
+        let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(2)
             .constraints([
-                Constraint::Min(10), // Output area
-                Constraint::Length(3), // Input box
+                Constraint::Percentage(80), // Output area - 80%
+                Constraint::Percentage(20), // Input area - 20%
             ])
             .split(frame.area());
 
-        // Render output area
+        // Task 25: Render output area with scrollable content
         let output_text = self.output_lines.join("\n");
         let output_paragraph = Paragraph::new(Text::from(output_text))
             .block(
                 Block::default()
-                    .title("Output")
+                    .title("Output (↑/↓ or PgUp/PgDn to scroll)")
                     .title_style(Style::default().add_modifier(Modifier::BOLD))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan)),
             )
             .scroll((self.scroll, 0));
-        frame.render_widget(output_paragraph, chunks[0]);
+        frame.render_widget(output_paragraph, main_chunks[0]);
 
-        // Render input box
-        let input_paragraph = Paragraph::new(Text::from(self.input.as_str()))
+        // Task 23: Center the input box visually
+        let input_area = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),    // Top padding for centering
+                Constraint::Length(3), // Input box
+            ])
+            .split(main_chunks[1]);
+
+        // Task 24: Render input box with cursor tracking
+        // Display input text with cursor position indicator
+        let input_text = if self.cursor_position < self.input.len() {
+            // Cursor is in the middle - show cursor position with underline
+            let before: String = self.input.chars().take(self.cursor_position).collect();
+            let at: String = self.input.chars().skip(self.cursor_position).take(1).collect();
+            let after: String = self.input.chars().skip(self.cursor_position + 1).collect();
+            format!("{}{}{}", before, at, after)
+        } else {
+            // Cursor is at the end
+            self.input.clone()
+        };
+
+        let input_paragraph = Paragraph::new(Text::from(input_text.as_str()))
             .block(
                 Block::default()
-                    .title("Input (press Enter to execute)")
+                    .title(format!("Input (cursor: {})", self.cursor_position))
                     .title_style(Style::default().add_modifier(Modifier::BOLD))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Green)),
             )
             .style(Style::default().fg(Color::White));
-        frame.render_widget(input_paragraph, chunks[1]);
+        frame.render_widget(input_paragraph, input_area[1]);
     }
 }
 
