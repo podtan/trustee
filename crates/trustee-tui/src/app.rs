@@ -267,8 +267,9 @@ impl App {
 
     /// Execute the current command in the input buffer
     /// 
-    /// Task 50: Wired to ABK's run_from_raw_config
-    /// Spawns an async workflow that sends output through TuiMessage
+    /// Task 50: Wired to ABK's run_task_from_raw_config
+    /// Spawns an async workflow that sends output through TuiMessage.
+    /// Tails the log file to capture ABK's output into the TUI display.
     fn execute_command(&mut self) {
         let command = self.input.trim().to_string();
         
@@ -292,33 +293,99 @@ impl App {
         // Mark workflow as running
         self.workflow_running = true;
         
-        // Task 50: Execute the actual ABK workflow in a spawned task
-        //
-        // Note: This is a temporary solution. ABK's run_from_raw_config currently
-        // writes to stdout, which won't show in TUI mode. When Workstream A delivers
-        // the OutputSink abstraction, we'll swap this for proper integration.
-        //
-        // For now, we spawn the workflow and report completion.
+        // Determine log file path from config (default /tmp/trustee.log)
+        let log_path = config_toml
+            .parse::<toml::Value>()
+            .ok()
+            .and_then(|v| v.get("logging")?.get("log_file")?.as_str().map(String::from))
+            .unwrap_or_else(|| "/tmp/trustee.log".to_string());
+        
+        // Spawn the workflow with log file tailing
         tokio::spawn(async move {
-            // Send initial status
             tx.send(TuiMessage::OutputLine(format!("Executing: {}", command))).ok();
-            tx.send(TuiMessage::OutputLine("Starting ABK workflow...".to_string())).ok();
-            tx.send(TuiMessage::OutputLine("(Output will appear in terminal - TUI OutputSink integration pending)".to_string())).ok();
             
-            // Run ABK workflow - the command becomes the task for ABK
-            // Note: Output currently goes to stdout/stderr, not to TUI
-            // This will be fixed when OutputSink is implemented (Workstream A)
-            match abk::cli::run_from_raw_config(
-                &config_toml,
-                secrets,
-                build_info,
-            ).await {
+            // Record log file size before workflow starts so we only read new content
+            let log_start_pos = std::fs::metadata(&log_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            
+            // Spawn a log file tailer that reads new lines and sends to TUI
+            let tail_tx = tx.clone();
+            let tail_path = log_path.clone();
+            let tail_handle = tokio::spawn(async move {
+                let mut last_pos = log_start_pos;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    
+                    let current_size = match std::fs::metadata(&tail_path) {
+                        Ok(m) => m.len(),
+                        Err(_) => continue,
+                    };
+                    
+                    if current_size > last_pos {
+                        if let Ok(file) = std::fs::File::open(&tail_path) {
+                            use std::io::{Seek, BufRead, BufReader};
+                            let mut reader = BufReader::new(file);
+                            if reader.seek(std::io::SeekFrom::Start(last_pos)).is_ok() {
+                                let mut line = String::new();
+                                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                                    let trimmed = line.trim_end().to_string();
+                                    if !trimmed.is_empty() {
+                                        tail_tx.send(TuiMessage::OutputLine(trimmed)).ok();
+                                    }
+                                    line.clear();
+                                }
+                            }
+                            last_pos = current_size;
+                        }
+                    }
+                }
+            });
+            
+            // Run ABK workflow with the task — bypasses CLI arg parsing
+            // Redirect stdout to /dev/null to prevent raw mode corruption
+            let result: Result<(), String> = {
+                // Suppress stdout: ABK's tee-write sends output to both file and stdout,
+                // but stdout is owned by ratatui in TUI mode. We only want the file output
+                // (which the tailer reads). Redirect stdout to /dev/null during execution.
+                use std::os::unix::io::AsRawFd;
+                let devnull = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open("/dev/null")
+                    .ok();
+                let saved_stdout = unsafe { libc::dup(1) };
+                if let Some(ref dn) = devnull {
+                    unsafe { libc::dup2(dn.as_raw_fd(), 1); }
+                }
+                
+                let res = abk::cli::run_task_from_raw_config(
+                    &config_toml,
+                    secrets,
+                    build_info,
+                    &command,
+                ).await.map_err(|e| e.to_string());
+                
+                // Restore stdout
+                if saved_stdout >= 0 {
+                    unsafe { 
+                        libc::dup2(saved_stdout, 1);
+                        libc::close(saved_stdout);
+                    }
+                }
+                
+                res
+            };
+            
+            // Give the tailer a moment to catch the last lines
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tail_handle.abort();
+            
+            match result {
                 Ok(()) => {
-                    tx.send(TuiMessage::OutputLine("✓ Workflow completed successfully".to_string())).ok();
                     tx.send(TuiMessage::WorkflowCompleted).ok();
                 }
                 Err(e) => {
-                    tx.send(TuiMessage::WorkflowError(format!("ABK error: {}", e))).ok();
+                    tx.send(TuiMessage::WorkflowError(format!("{}", e))).ok();
                 }
             }
         });
