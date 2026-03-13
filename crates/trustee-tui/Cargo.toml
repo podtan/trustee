@@ -1,0 +1,19 @@
+[package]
+name = "trustee-tui"
+version = "0.1.0"
+edition = "2021"
+description = "TUI interface for Trustee agent"
+license = "MIT OR Apache-2.0"
+authors = ["Podtan Team"]
+keywords = ["tui", "terminal", "agent"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+# TUI framework
+ratatui = "0.29"
+crossterm = "0.28"
+# Async runtime support
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = "0.7"
+# Error handling
+anyhow = "1.0"
