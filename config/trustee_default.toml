@@ -6,7 +6,7 @@
 [agent]
 execution_mode = "hybrid"
 name = "trustee"
-version = "0.1.7"
+version = "0.1.19"
 default_mode = "confirm"
 enable_task_classification = true
 

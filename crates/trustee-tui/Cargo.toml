@@ -1,6 +1,6 @@
 [package]
 name = "trustee-tui"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "TUI interface for Trustee agent"
 license = "MIT OR Apache-2.0"
@@ -18,4 +18,4 @@ tokio-util = "0.7"
 # Error handling
 anyhow = "1.0"
 # ABK for workflow execution
-abk = { path = "../../../abk", features = ["cli", "orchestration", "agent", "observability", "extension"] }
+abk = { version = "0.5.8", features = ["cli", "orchestration", "agent", "observability", "extension"] }

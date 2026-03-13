@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.19] - 2026-03-13
+
+### Added
+- Async TUI loop with `tokio::select!` for concurrent workflow execution (Task 52)
+- TUI wired to ABK's `run_from_raw_config` for real workflow execution (Task 50)
+- TUI loads config/secrets same as CLI mode for consistent behavior
+
+### Changed
+- Updated to abk 0.5.8 (tee-write logging, duplicate log fix)
+- Log file renamed from `trustee_logs.log` to `trustee.log`
+- Non-TUI mode verified working (Task 51)
+
 ## [0.1.18] - 2026-03-12
 
 ### Changed
