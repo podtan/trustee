@@ -9,14 +9,9 @@ mod app;
 pub use app::App;
 
 /// Run the TUI application
+/// 
+/// This function is synchronous and should be called from async context
 pub fn run() -> anyhow::Result<()> {
-    // TODO: Implement TUI entry point
-    // For now, this is a placeholder that will be implemented in subsequent tasks
-    
-    // Create a tokio runtime for the async app
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        let mut app = App::new();
-        app.run().await
-    })
+    let mut app = App::new();
+    app.run()
 }

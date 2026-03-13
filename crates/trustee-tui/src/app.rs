@@ -53,7 +53,7 @@ impl App {
     }
 
     /// Run the main event loop
-    pub async fn run(&mut self) -> anyhow::Result<()> {
+    pub fn run(&mut self) -> anyhow::Result<()> {
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();

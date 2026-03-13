@@ -243,17 +243,32 @@ fn setup_panic_hook() {
     }));
 }
 
+/// Run TUI mode when no arguments provided
+#[cfg(feature = "tui")]
+async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
+    // Launch the TUI application
+    trustee_tui::run()?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup panic hook for TUI mode (restores terminal on panic)
     #[cfg(feature = "tui")]
     setup_panic_hook();
     
+    // Check if running without arguments - launch TUI if feature is enabled
+    let args: Vec<String> = std::env::args().collect();
+    #[cfg(feature = "tui")]
+    if args.len() == 1 {
+        // No arguments provided - launch TUI mode
+        return run_tui_mode().await;
+    }
+    
     // Determine agent name from the project config (for init) or use "trustee" as default
     let agent_name = "trustee";
     
     // Check if this is the init command (special case - use project config)
-    let args: Vec<String> = std::env::args().collect();
     let is_init = args.get(1).map(|s| s.as_str()) == Some("init");
     
     if is_init {
