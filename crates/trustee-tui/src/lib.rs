@@ -8,10 +8,28 @@ mod app;
 
 pub use app::App;
 
-/// Run the TUI application
+use std::collections::HashMap;
+
+/// Build information passed from the main binary
+pub type BuildInfo = abk::cli::BuildInfo;
+
+/// Run the TUI application with configuration
 /// 
-/// This function is synchronous and should be called from async context
-pub fn run() -> anyhow::Result<()> {
+/// Task 50: This function accepts the merged configuration and secrets
+/// and will wire them to ABK's run_from_raw_config for workflow execution.
+/// 
+/// This function is async to allow concurrent workflow execution with the TUI event loop.
+pub async fn run(
+    config_toml: String,
+    secrets: HashMap<String, String>,
+    build_info: BuildInfo,
+) -> anyhow::Result<()> {
     let mut app = App::new();
-    app.run()
+    
+    // Store config and secrets in the app for workflow execution
+    app.config_toml = Some(config_toml);
+    app.secrets = Some(secrets);
+    app.build_info = Some(build_info);
+    
+    app.run().await
 }

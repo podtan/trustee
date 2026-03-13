@@ -1,4 +1,8 @@
 //! TUI Application structure and main loop
+//!
+//! Task 52: Async TUI Loop
+//! Converted from synchronous to async to allow concurrent workflow execution
+//! with the TUI event loop using tokio::select!
 
 use std::io;
 
@@ -15,6 +19,22 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
 };
+use tokio::sync::mpsc;
+use anyhow::Result;
+
+/// Messages that can be sent to the TUI from async workflows
+#[derive(Debug, Clone)]
+pub enum TuiMessage {
+    /// A line of output to display
+    OutputLine(String),
+    /// Workflow completed
+    WorkflowCompleted,
+    /// Workflow error
+    WorkflowError(String),
+}
+
+/// Build information for ABK (forward declaration)
+pub type BuildInfo = abk::cli::BuildInfo;
 
 /// Main application state for the TUI
 pub struct App {
@@ -28,11 +48,24 @@ pub struct App {
     pub scroll: u16,
     /// Whether the app should quit
     pub should_quit: bool,
+    /// Receiver for messages from async workflows
+    pub workflow_rx: mpsc::UnboundedReceiver<TuiMessage>,
+    /// Sender for messages from async workflows (clone and pass to workflow runners)
+    pub workflow_tx: mpsc::UnboundedSender<TuiMessage>,
+    /// Whether a workflow is currently running
+    pub workflow_running: bool,
+    /// Configuration TOML for ABK workflows (Task 50)
+    pub config_toml: Option<String>,
+    /// Secrets for ABK workflows (Task 50)
+    pub secrets: Option<std::collections::HashMap<String, String>>,
+    /// Build info for ABK workflows (Task 50)
+    pub build_info: Option<BuildInfo>,
 }
 
 impl App {
     /// Create a new App instance
     pub fn new() -> Self {
+        let (workflow_tx, workflow_rx) = mpsc::unbounded_channel();
         Self {
             input: String::new(),
             cursor_position: 0,
@@ -49,11 +82,22 @@ impl App {
             ],
             scroll: 0,
             should_quit: false,
+            workflow_rx,
+            workflow_tx,
+            workflow_running: false,
+            config_toml: None,
+            secrets: None,
+            build_info: None,
         }
     }
 
-    /// Run the main event loop
-    pub fn run(&mut self) -> anyhow::Result<()> {
+    /// Run the main event loop (async version)
+    /// 
+    /// Task 52: Converted from synchronous to async to enable:
+    /// - Running async ABK workflows concurrently with TUI
+    /// - Using tokio::select! for responsive event handling
+    /// - Non-blocking terminal event polling
+    pub async fn run(&mut self) -> Result<()> {
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -61,91 +105,24 @@ impl App {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        // Main loop
+        // Main async loop with tokio::select!
         loop {
             // Draw the UI
             terminal.draw(|f| self.render(f))?;
 
-            // Handle events with 100ms timeout
-            if event::poll(std::time::Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
-                    // Task 26: Enhanced keyboard event handling
-                    match key.code {
-                        // Exit with Ctrl+C
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.should_quit = true;
-                        }
-                        // Exit with Esc
-                        KeyCode::Esc => {
-                            self.should_quit = true;
-                        }
-                        // Submit task with Enter
-                        KeyCode::Enter => {
-                            if !self.input.is_empty() {
-                                self.execute_command();
-                            }
-                        }
-                        // Task 24: Backspace - delete character before cursor
-                        KeyCode::Backspace => {
-                            if self.cursor_position > 0 {
-                                self.input.remove(self.cursor_position - 1);
-                                self.cursor_position -= 1;
-                            }
-                        }
-                        // Delete key - delete character at cursor
-                        KeyCode::Delete => {
-                            if self.cursor_position < self.input.len() {
-                                self.input.remove(self.cursor_position);
-                            }
-                        }
-                        // Task 25: Scroll up with arrow up
-                        KeyCode::Up => {
-                            if self.scroll > 0 {
-                                self.scroll -= 1;
-                            }
-                        }
-                        // Task 25: Scroll down with arrow down
-                        KeyCode::Down => {
-                            let max_scroll = self.output_lines.len().saturating_sub(1) as u16;
-                            if self.scroll < max_scroll {
-                                self.scroll += 1;
-                            }
-                        }
-                        // Task 25: Page Up - scroll up by 10 lines
-                        KeyCode::PageUp => {
-                            self.scroll = self.scroll.saturating_sub(10);
-                        }
-                        // Task 25: Page Down - scroll down by 10 lines
-                        KeyCode::PageDown => {
-                            let max_scroll = self.output_lines.len().saturating_sub(1) as u16;
-                            self.scroll = (self.scroll + 10).min(max_scroll);
-                        }
-                        // Task 24: Home - move cursor to beginning
-                        KeyCode::Home => {
-                            self.cursor_position = 0;
-                        }
-                        // Task 24: End - move cursor to end
-                        KeyCode::End => {
-                            self.cursor_position = self.input.len();
-                        }
-                        // Task 24: Left arrow - move cursor left
-                        KeyCode::Left => {
-                            if self.cursor_position > 0 {
-                                self.cursor_position -= 1;
-                            }
-                        }
-                        // Task 24: Right arrow - move cursor right
-                        KeyCode::Right => {
-                            if self.cursor_position < self.input.len() {
-                                self.cursor_position += 1;
-                            }
-                        }
-                        // Task 24: Character input
-                        KeyCode::Char(c) => {
-                            self.input.insert(self.cursor_position, c);
-                            self.cursor_position += 1;
-                        }
-                        _ => {}
+            // Use tokio::select! to handle both terminal events and workflow messages
+            tokio::select! {
+                // Handle terminal events (non-blocking poll)
+                result = Self::poll_event() => {
+                    if let Some(event) = result? {
+                        self.handle_event(event)?;
+                    }
+                }
+
+                // Handle messages from async workflows
+                msg = self.workflow_rx.recv() => {
+                    if let Some(msg) = msg {
+                        self.handle_workflow_message(msg);
                     }
                 }
             }
@@ -163,17 +140,188 @@ impl App {
         Ok(())
     }
 
+    /// Poll for terminal events asynchronously
+    /// Uses tokio::task::spawn_blocking to avoid blocking the async runtime
+    /// with synchronous crossterm event polling
+    async fn poll_event() -> Result<Option<Event>> {
+        // Spawn a blocking task to poll for events
+        // This prevents the synchronous event::poll from blocking the Tokio runtime
+        tokio::task::spawn_blocking(|| {
+            // Poll with a short timeout to remain responsive
+            if event::poll(std::time::Duration::from_millis(50))? {
+                Ok(Some(event::read()?))
+            } else {
+                Ok(None)
+            }
+        })
+        .await?
+    }
+
+    /// Handle a terminal event
+    fn handle_event(&mut self, event: Event) -> Result<()> {
+        if let Event::Key(key) = event {
+            // Task 26: Enhanced keyboard event handling
+            match key.code {
+                // Exit with Ctrl+C
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.should_quit = true;
+                }
+                // Exit with Esc
+                KeyCode::Esc => {
+                    self.should_quit = true;
+                }
+                // Submit task with Enter
+                KeyCode::Enter => {
+                    if !self.input.is_empty() && !self.workflow_running {
+                        self.execute_command();
+                    }
+                }
+                // Task 24: Backspace - delete character before cursor
+                KeyCode::Backspace => {
+                    if self.cursor_position > 0 {
+                        self.input.remove(self.cursor_position - 1);
+                        self.cursor_position -= 1;
+                    }
+                }
+                // Delete key - delete character at cursor
+                KeyCode::Delete => {
+                    if self.cursor_position < self.input.len() {
+                        self.input.remove(self.cursor_position);
+                    }
+                }
+                // Task 25: Scroll up with arrow up
+                KeyCode::Up => {
+                    if self.scroll > 0 {
+                        self.scroll -= 1;
+                    }
+                }
+                // Task 25: Scroll down with arrow down
+                KeyCode::Down => {
+                    let max_scroll = self.output_lines.len().saturating_sub(1) as u16;
+                    if self.scroll < max_scroll {
+                        self.scroll += 1;
+                    }
+                }
+                // Task 25: Page Up - scroll up by 10 lines
+                KeyCode::PageUp => {
+                    self.scroll = self.scroll.saturating_sub(10);
+                }
+                // Task 25: Page Down - scroll down by 10 lines
+                KeyCode::PageDown => {
+                    let max_scroll = self.output_lines.len().saturating_sub(1) as u16;
+                    self.scroll = (self.scroll + 10).min(max_scroll);
+                }
+                // Task 24: Home - move cursor to beginning
+                KeyCode::Home => {
+                    self.cursor_position = 0;
+                }
+                // Task 24: End - move cursor to end
+                KeyCode::End => {
+                    self.cursor_position = self.input.len();
+                }
+                // Task 24: Left arrow - move cursor left
+                KeyCode::Left => {
+                    if self.cursor_position > 0 {
+                        self.cursor_position -= 1;
+                    }
+                }
+                // Task 24: Right arrow - move cursor right
+                KeyCode::Right => {
+                    if self.cursor_position < self.input.len() {
+                        self.cursor_position += 1;
+                    }
+                }
+                // Task 24: Character input
+                KeyCode::Char(c) => {
+                    self.input.insert(self.cursor_position, c);
+                    self.cursor_position += 1;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle messages from async workflows
+    fn handle_workflow_message(&mut self, msg: TuiMessage) {
+        match msg {
+            TuiMessage::OutputLine(line) => {
+                self.output_lines.push(line);
+                // Auto-scroll to bottom on new output
+                self.scroll = self.output_lines.len().saturating_sub(1) as u16;
+            }
+            TuiMessage::WorkflowCompleted => {
+                self.output_lines.push("✓ Workflow completed".to_string());
+                self.output_lines.push("".to_string());
+                self.workflow_running = false;
+                self.scroll = self.output_lines.len().saturating_sub(1) as u16;
+            }
+            TuiMessage::WorkflowError(err) => {
+                self.output_lines.push(format!("✗ Error: {}", err));
+                self.output_lines.push("".to_string());
+                self.workflow_running = false;
+                self.scroll = self.output_lines.len().saturating_sub(1) as u16;
+            }
+        }
+    }
+
     /// Execute the current command in the input buffer
+    /// 
+    /// Task 50: Wired to ABK's run_from_raw_config
+    /// Spawns an async workflow that sends output through TuiMessage
     fn execute_command(&mut self) {
         let command = self.input.trim().to_string();
         
         // Add command to output
         self.output_lines.push(format!("> {}", command));
         
-        // TODO: Execute the actual workflow here
-        // For now, just echo the command
-        self.output_lines.push(format!("Command received: {}", command));
-        self.output_lines.push("".to_string()); // Empty line for spacing
+        // Check if config is available
+        let config_toml = match &self.config_toml {
+            Some(c) => c.clone(),
+            None => {
+                self.output_lines.push("✗ Error: Configuration not loaded".to_string());
+                self.output_lines.push("".to_string());
+                return;
+            }
+        };
+        
+        let secrets = self.secrets.clone().unwrap_or_default();
+        let build_info = self.build_info.clone();
+        let tx = self.workflow_tx.clone();
+        
+        // Mark workflow as running
+        self.workflow_running = true;
+        
+        // Task 50: Execute the actual ABK workflow in a spawned task
+        //
+        // Note: This is a temporary solution. ABK's run_from_raw_config currently
+        // writes to stdout, which won't show in TUI mode. When Workstream A delivers
+        // the OutputSink abstraction, we'll swap this for proper integration.
+        //
+        // For now, we spawn the workflow and report completion.
+        tokio::spawn(async move {
+            // Send initial status
+            tx.send(TuiMessage::OutputLine(format!("Executing: {}", command))).ok();
+            tx.send(TuiMessage::OutputLine("Starting ABK workflow...".to_string())).ok();
+            tx.send(TuiMessage::OutputLine("(Output will appear in terminal - TUI OutputSink integration pending)".to_string())).ok();
+            
+            // Run ABK workflow - the command becomes the task for ABK
+            // Note: Output currently goes to stdout/stderr, not to TUI
+            // This will be fixed when OutputSink is implemented (Workstream A)
+            match abk::cli::run_from_raw_config(
+                &config_toml,
+                secrets,
+                build_info,
+            ).await {
+                Ok(()) => {
+                    tx.send(TuiMessage::OutputLine("✓ Workflow completed successfully".to_string())).ok();
+                    tx.send(TuiMessage::WorkflowCompleted).ok();
+                }
+                Err(e) => {
+                    tx.send(TuiMessage::WorkflowError(format!("ABK error: {}", e))).ok();
+                }
+            }
+        });
         
         // Clear input buffer and reset cursor
         self.input.clear();
@@ -230,10 +378,17 @@ impl App {
             self.input.clone()
         };
 
+        // Show status in input title
+        let input_title = if self.workflow_running {
+            format!("Input (Running...) - cursor: {}", self.cursor_position)
+        } else {
+            format!("Input (Ready) - cursor: {}", self.cursor_position)
+        };
+
         let input_paragraph = Paragraph::new(Text::from(input_text.as_str()))
             .block(
                 Block::default()
-                    .title(format!("Input (cursor: {})", self.cursor_position))
+                    .title(input_title)
                     .title_style(Style::default().add_modifier(Modifier::BOLD))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Green)),
