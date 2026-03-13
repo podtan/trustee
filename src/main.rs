@@ -226,8 +226,29 @@ fn merge_config(user_config_toml: &str) -> Result<String, Box<dyn std::error::Er
     Ok(merged_toml)
 }
 
+/// Setup panic hook to restore terminal state before showing panic message.
+/// This is critical for TUI mode - if code panics while ratatui is in raw mode,
+/// the terminal becomes unusable without this hook.
+#[cfg(feature = "tui")]
+fn setup_panic_hook() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // Restore terminal before showing panic
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen
+        );
+        original_hook(panic_info);
+    }));
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Setup panic hook for TUI mode (restores terminal on panic)
+    #[cfg(feature = "tui")]
+    setup_panic_hook();
+    
     // Determine agent name from the project config (for init) or use "trustee" as default
     let agent_name = "trustee";
     
