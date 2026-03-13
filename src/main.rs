@@ -246,8 +246,41 @@ fn setup_panic_hook() {
 /// Run TUI mode when no arguments provided
 #[cfg(feature = "tui")]
 async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
-    // Launch the TUI application
-    trustee_tui::run()?;
+    // Load config and secrets for TUI mode
+    let agent_name = "trustee";
+    let (config_path, secrets_path, _, _) = get_config_paths(agent_name);
+    
+    // Load local .env first (contains GETMYCONFIG_* connection params)
+    let local_secrets = load_env_file(&secrets_path)
+        .map_err(|e| format!("Failed to read secrets from {}: {}", secrets_path.display(), e))?;
+    
+    // Try remote config first, fall back to local
+    let (user_config_toml, secrets) = match load_remote_config(&local_secrets).await {
+        Some((remote_config, remote_secrets)) => {
+            let mut merged = local_secrets.clone();
+            merged.extend(remote_secrets);
+            (remote_config, merged)
+        }
+        None => {
+            if !config_path.exists() {
+                eprintln!("Error: Configuration not found at: {}", config_path.display());
+                eprintln!("Remote config also unavailable.");
+                eprintln!("\nRun 'trustee init --force' to set up your environment.");
+                std::process::exit(1);
+            }
+            
+            let config_toml = std::fs::read_to_string(&config_path)
+                .map_err(|e| format!("Failed to read config from {}: {}", config_path.display(), e))?;
+            
+            (config_toml, local_secrets)
+        }
+    };
+    
+    // Merge embedded defaults with user overrides
+    let merged_config = merge_config(&user_config_toml)?;
+    
+    // Launch the TUI application with config
+    trustee_tui::run(merged_config, secrets, build_info()).await?;
     Ok(())
 }
 
