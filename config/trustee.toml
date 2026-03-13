@@ -10,7 +10,7 @@ timeout_seconds = 30
 
 [[mcp.servers]]
 name = "pdt"
-url = "http://127.0.0.1:8000/pdt"
+url = "http://127.0.0.1:8001/pdt"
 transport = "http"
 auto_init = true
 

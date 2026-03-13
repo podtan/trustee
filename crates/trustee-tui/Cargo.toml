@@ -18,7 +18,7 @@ tokio-util = "0.7"
 # Error handling
 anyhow = "1.0"
 # ABK for workflow execution
-abk = { version = "0.5.8", features = ["cli", "orchestration", "agent", "observability", "extension"] }
+abk = { version = "0.5.10", features = ["cli", "orchestration", "agent", "observability", "extension"] }
 # Stdout redirection for TUI mode
 libc = "0.2"
 # Config parsing for log file path

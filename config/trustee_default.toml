@@ -16,7 +16,7 @@ binary_source_path = "target/release/trustee"
 local_bin_path = "~/.local/bin"
 
 [logging]
-log_file = "/tmp/trustee.log"
+log_dir = ""
 log_level = "INFO"
 
 [execution]
