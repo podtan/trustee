@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.22] - 2026-03-14
+
+### Fixed
+- Fixed silent streaming failure — actual errors now logged and displayed with full error chain
+- Streaming retries on transient errors before giving up
+- Extended streaming timeout from 120s to 600s for complex tasks
+
+### Changed
+- Updated to abk 0.5.12
+
 ## [0.1.21] - 2026-03-14
 
 ### Fixed
