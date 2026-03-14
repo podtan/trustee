@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.21] - 2026-03-14
+
+### Fixed
+- Fixed premature session termination on `finish_reason: "network_error"` from LLM SSE streams
+
+### Changed
+- Updated to abk 0.5.11 (streaming retry on network errors, stream error logging)
+
 ## [0.1.20] - 2026-03-14
 
 ### Changed
