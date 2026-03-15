@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.24] - 2026-03-15
+
+### Fixed
+- TUI: Removed process-global `dup2` stdout/stderr redirect that prevented ratatui from rendering during workflows
+- TUI: Uses `abk::observability::set_tui_mode` to suppress console output at the source instead of fd-level redirect
+- TUI: Output box now updates in real-time as workflow content is tailed from the log file
+- TUI: Removed `libc` dependency (no longer needed without `dup2`)
+
+### Changed
+- Updated to abk 0.5.14 (TUI mode flag, console output suppression)
+
 ## [0.1.23] - 2026-03-15
 
 ### Fixed

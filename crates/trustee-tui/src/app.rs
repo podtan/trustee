@@ -366,26 +366,11 @@ impl App {
                 }
             });
             
-            // Run ABK workflow with the task — bypasses CLI arg parsing
-            // Redirect stdout AND stderr to /dev/null to prevent raw mode corruption
+            // Run ABK workflow with the task — bypasses CLI arg parsing.
+            // Enable TUI mode to suppress ABK's console output (stdout/stderr).
+            // All output goes to the log file which the tailer reads above.
             let result: Result<(), String> = {
-                // Suppress stdout and stderr: ABK's tee-write sends output to both file
-                // and stdout, and some components (WASM provider reasoning, checkpoint)
-                // write to stderr. Both are owned by ratatui in TUI mode. We only want
-                // the file output (which the tailer reads).
-                use std::os::unix::io::AsRawFd;
-                let devnull = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open("/dev/null")
-                    .ok();
-                let saved_stdout = unsafe { libc::dup(1) };
-                let saved_stderr = unsafe { libc::dup(2) };
-                if let Some(ref dn) = devnull {
-                    unsafe {
-                        libc::dup2(dn.as_raw_fd(), 1);
-                        libc::dup2(dn.as_raw_fd(), 2);
-                    }
-                }
+                abk::observability::set_tui_mode(true);
                 
                 let res = abk::cli::run_task_from_raw_config(
                     &config_toml,
@@ -394,19 +379,7 @@ impl App {
                     &command,
                 ).await.map_err(|e| e.to_string());
                 
-                // Restore stdout and stderr
-                if saved_stdout >= 0 {
-                    unsafe { 
-                        libc::dup2(saved_stdout, 1);
-                        libc::close(saved_stdout);
-                    }
-                }
-                if saved_stderr >= 0 {
-                    unsafe {
-                        libc::dup2(saved_stderr, 2);
-                        libc::close(saved_stderr);
-                    }
-                }
+                abk::observability::set_tui_mode(false);
                 
                 res
             };
