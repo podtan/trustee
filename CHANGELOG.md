@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.23] - 2026-03-15
+
+### Fixed
+- TUI: Clear welcome text when a new task starts (output box now starts clean)
+- TUI: Log file tailer now reads raw bytes instead of line-by-line, capturing streaming reasoning tokens that have no trailing newlines
+- TUI: Flush partial content (>80 chars) accumulated without newlines so reasoning appears progressively
+
+### Changed
+- Updated to abk 0.5.13 (ANSI-free log files, reasoning inline fix)
+
 ## [0.1.22] - 2026-03-14
 
 ### Fixed

@@ -273,6 +273,10 @@ impl App {
     fn execute_command(&mut self) {
         let command = self.input.trim().to_string();
         
+        // Clear welcome text and start fresh for this task
+        self.output_lines.clear();
+        self.scroll = 0;
+        
         // Add command to output
         self.output_lines.push(format!("> {}", command));
         
@@ -293,12 +297,11 @@ impl App {
         // Mark workflow as running
         self.workflow_running = true;
         
-        // Determine log file path from config (default /tmp/trustee.log)
-        let log_path = config_toml
-            .parse::<toml::Value>()
-            .ok()
-            .and_then(|v| v.get("logging")?.get("log_file")?.as_str().map(String::from))
-            .unwrap_or_else(|| "/tmp/trustee.log".to_string());
+        // Get the actual log file path from ABK's global logger
+        // This is where tee_println() writes, so tailing this file captures all output
+        let log_path = abk::observability::current_log_path()
+            .to_string_lossy()
+            .to_string();
         
         // Spawn the workflow with log file tailing
         tokio::spawn(async move {
@@ -309,11 +312,14 @@ impl App {
                 .map(|m| m.len())
                 .unwrap_or(0);
             
-            // Spawn a log file tailer that reads new lines and sends to TUI
+            // Spawn a log file tailer that reads new content and sends to TUI.
+            // Uses raw byte reads instead of read_line to capture partial content
+            // (e.g. reasoning tokens written without trailing newlines).
             let tail_tx = tx.clone();
             let tail_path = log_path.clone();
             let tail_handle = tokio::spawn(async move {
                 let mut last_pos = log_start_pos;
+                let mut partial = String::new(); // buffer for incomplete lines
                 loop {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     
@@ -324,19 +330,37 @@ impl App {
                     
                     if current_size > last_pos {
                         if let Ok(file) = std::fs::File::open(&tail_path) {
-                            use std::io::{Seek, BufRead, BufReader};
-                            let mut reader = BufReader::new(file);
-                            if reader.seek(std::io::SeekFrom::Start(last_pos)).is_ok() {
-                                let mut line = String::new();
-                                while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                                    let trimmed = line.trim_end().to_string();
-                                    if !trimmed.is_empty() {
-                                        tail_tx.send(TuiMessage::OutputLine(trimmed)).ok();
+                            use std::io::{Seek, Read};
+                            let mut file = file;
+                            if file.seek(std::io::SeekFrom::Start(last_pos)).is_ok() {
+                                let to_read = (current_size - last_pos) as usize;
+                                let mut buf = vec![0u8; to_read];
+                                match file.read_exact(&mut buf) {
+                                    Ok(()) => {
+                                        last_pos = current_size;
+                                        let chunk = String::from_utf8_lossy(&buf);
+                                        partial.push_str(&chunk);
+                                        
+                                        // Split on newlines; keep last part if no trailing newline
+                                        while let Some(nl_pos) = partial.find('\n') {
+                                            let line = partial[..nl_pos].trim_end().to_string();
+                                            partial = partial[nl_pos + 1..].to_string();
+                                            if !line.is_empty() {
+                                                tail_tx.send(TuiMessage::OutputLine(line)).ok();
+                                            }
+                                        }
+                                        // If partial has accumulated content without newline
+                                        // (e.g. reasoning tokens), flush it as a partial line
+                                        // after a brief accumulation period
+                                        if !partial.trim().is_empty() && partial.len() > 80 {
+                                            let flushed = partial.trim().to_string();
+                                            partial.clear();
+                                            tail_tx.send(TuiMessage::OutputLine(flushed)).ok();
+                                        }
                                     }
-                                    line.clear();
+                                    Err(_) => continue,
                                 }
                             }
-                            last_pos = current_size;
                         }
                     }
                 }

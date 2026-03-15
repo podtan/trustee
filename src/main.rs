@@ -246,6 +246,11 @@ fn setup_panic_hook() {
 /// Run TUI mode when no arguments provided
 #[cfg(feature = "tui")]
 async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize ABK's global logger first so current_log_path() works
+    // This ensures all tee_println() calls write to the same log file
+    let logger = abk::observability::Logger::new(None, None)?;
+    abk::observability::init_global_logger(logger);
+    
     // Load config and secrets for TUI mode
     let agent_name = "trustee";
     let (config_path, secrets_path, _, _) = get_config_paths(agent_name);

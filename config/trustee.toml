@@ -10,9 +10,16 @@ timeout_seconds = 30
 
 [[mcp.servers]]
 name = "pdt"
-url = "http://127.0.0.1:8001/pdt"
+url = "http://127.0.0.1:8001"
 transport = "http"
 auto_init = true
+
+[[mcp.servers]]
+name = "nghr"
+url = "http://127.0.0.1:8002"
+transport = "http"
+auto_init = true
+
 
 # Uncomment below to override checkpoint storage to DocumentDB:
 # [checkpointing.storage_backend]
