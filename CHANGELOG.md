@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.25] - 2026-03-15
+
+### Fixed
+- TUI: Added text wrapping to output box — long lines now wrap instead of being truncated/disoriented
+- TUI: Fixed auto-scroll to reliably show latest output (uses u16::MAX for scroll-to-bottom)
+- TUI: Scroll up/down/page keys now work correctly from auto-scrolled position
+- ABK: All raw `println!`/`eprintln!` calls in agent, checkpoint, and provider modules now respect TUI mode — prevents text corruption in TUI display
+
+### Changed
+- Updated to abk 0.5.15
+
 ## [0.1.24] - 2026-03-15
 
 ### Fixed

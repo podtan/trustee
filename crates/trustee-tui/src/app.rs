@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::Text,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
 use tokio::sync::mpsc;
@@ -191,25 +191,28 @@ impl App {
                 }
                 // Task 25: Scroll up with arrow up
                 KeyCode::Up => {
-                    if self.scroll > 0 {
-                        self.scroll -= 1;
+                    if self.scroll == u16::MAX {
+                        // Coming from auto-scroll bottom: start at the actual end
+                        self.scroll = self.output_lines.len().saturating_sub(1) as u16;
                     }
+                    self.scroll = self.scroll.saturating_sub(1);
                 }
                 // Task 25: Scroll down with arrow down
                 KeyCode::Down => {
-                    let max_scroll = self.output_lines.len().saturating_sub(1) as u16;
-                    if self.scroll < max_scroll {
-                        self.scroll += 1;
+                    if self.scroll < u16::MAX {
+                        self.scroll = self.scroll.saturating_add(1);
                     }
                 }
                 // Task 25: Page Up - scroll up by 10 lines
                 KeyCode::PageUp => {
+                    if self.scroll == u16::MAX {
+                        self.scroll = self.output_lines.len().saturating_sub(1) as u16;
+                    }
                     self.scroll = self.scroll.saturating_sub(10);
                 }
                 // Task 25: Page Down - scroll down by 10 lines
                 KeyCode::PageDown => {
-                    let max_scroll = self.output_lines.len().saturating_sub(1) as u16;
-                    self.scroll = (self.scroll + 10).min(max_scroll);
+                    self.scroll = self.scroll.saturating_add(10);
                 }
                 // Task 24: Home - move cursor to beginning
                 KeyCode::Home => {
@@ -248,19 +251,19 @@ impl App {
             TuiMessage::OutputLine(line) => {
                 self.output_lines.push(line);
                 // Auto-scroll to bottom on new output
-                self.scroll = self.output_lines.len().saturating_sub(1) as u16;
+                self.scroll = u16::MAX;
             }
             TuiMessage::WorkflowCompleted => {
                 self.output_lines.push("✓ Workflow completed".to_string());
                 self.output_lines.push("".to_string());
                 self.workflow_running = false;
-                self.scroll = self.output_lines.len().saturating_sub(1) as u16;
+                self.scroll = u16::MAX;
             }
             TuiMessage::WorkflowError(err) => {
                 self.output_lines.push(format!("✗ Error: {}", err));
                 self.output_lines.push("".to_string());
                 self.workflow_running = false;
-                self.scroll = self.output_lines.len().saturating_sub(1) as u16;
+                self.scroll = u16::MAX;
             }
         }
     }
@@ -403,7 +406,7 @@ impl App {
         self.cursor_position = 0;
         
         // Auto-scroll to bottom
-        self.scroll = self.output_lines.len().saturating_sub(1) as u16;
+        self.scroll = u16::MAX;
     }
 
     /// Render the TUI
@@ -427,8 +430,7 @@ impl App {
                     .title_style(Style::default().add_modifier(Modifier::BOLD))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan)),
-            )
-            .scroll((self.scroll, 0));
+            )            .wrap(Wrap { trim: false })            .scroll((self.scroll, 0));
         frame.render_widget(output_paragraph, main_chunks[0]);
 
         // Task 23: Center the input box visually
