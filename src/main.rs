@@ -246,6 +246,11 @@ fn setup_panic_hook() {
 /// Run TUI mode when no arguments provided
 #[cfg(feature = "tui")]
 async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
+    // Set ABK_AGENT_NAME early so the global logger creates files in /tmp/trustee/
+    // instead of the default /tmp/agent/. This MUST happen before Logger::new()
+    // because Logger reads ABK_AGENT_NAME to determine the log directory.
+    std::env::set_var("ABK_AGENT_NAME", "trustee");
+
     // Initialize ABK's global logger first so current_log_path() works
     // This ensures all tee_println() calls write to the same log file
     let logger = abk::observability::Logger::new(None, None)?;
