@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.27] - 2026-03-21
+
+### Fixed
+- CLI: Fixed streaming text printed one word/token per line — `StdoutSink` now uses `print!` (no newline) + flush for `StreamingChunk` events instead of `println!`
+- TUI/CLI: Fixed duplicate LLM response — when response was already streamed chunk-by-chunk, `handle_content_response` no longer emits a second `LlmResponse` event
+
+### Changed
+- Updated to abk 0.5.17 (streaming-aware content response, StdoutSink inline streaming)
+- Updated trustee-tui to 0.1.9
+
 ## [0.1.26] - 2026-03-21
 
 ### Fixed
