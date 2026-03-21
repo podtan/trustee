@@ -358,13 +358,13 @@ impl App {
 
     /// Render the TUI
     pub fn render(&self, frame: &mut Frame) {
-        // Task 23: Create main layout with 80/20 split
+        // Create main layout: output takes remaining space, input gets fixed height
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(2)
             .constraints([
-                Constraint::Percentage(80), // Output area - 80%
-                Constraint::Percentage(20), // Input area - 20%
+                Constraint::Min(0),    // Output area - all remaining space
+                Constraint::Length(7), // Input area - fixed 7 rows (5 content + 2 borders)
             ])
             .split(frame.area());
 
@@ -398,15 +398,6 @@ impl App {
             .scroll((clamped_scroll, 0));
         frame.render_widget(output_paragraph, main_chunks[0]);
 
-        // Task 23: Center the input box visually
-        let input_area = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),    // Top padding for centering
-                Constraint::Length(3), // Input box
-            ])
-            .split(main_chunks[1]);
-
         // Task 24: Render input box with cursor tracking
         // Display input text with cursor position indicator
         let input_text = if self.cursor_position < self.input.len() {
@@ -435,8 +426,9 @@ impl App {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Green)),
             )
-            .style(Style::default().fg(Color::White));
-        frame.render_widget(input_paragraph, input_area[1]);
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(input_paragraph, main_chunks[1]);
     }
 }
 
