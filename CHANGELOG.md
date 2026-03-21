@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.26] - 2026-03-21
+
+### Fixed
+- TUI: Fixed top box appearing empty — scroll position `u16::MAX` (65535) pushed viewport past all content. Now properly clamps scroll to `content_height - viewport_height` so the last visible page fills the entire box
+- TUI: Fixed streaming text rendered line-by-line (one word/token per line) — streaming SSE deltas now append to the last line (print-style) instead of creating new lines (println-style)
+- TUI: Added `TuiMessage::StreamDelta` variant for continuous streaming display
+
+### Changed
+- Updated to abk 0.5.16 (StreamingChunk and LlmResponse events emitted to OutputSink)
+- Updated trustee-tui to 0.1.8
+- Updated default max_tokens from 4000 to 16000 and max_history from 100 to 200
+
 ## [0.1.25] - 2026-03-15
 
 ### Fixed
