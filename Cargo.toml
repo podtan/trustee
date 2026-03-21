@@ -41,5 +41,3 @@ trustee-tui = { version = "0.1.8", path = "crates/trustee-tui", optional = true 
 members = ["crates/trustee-tui"]
 resolver = "2"
 
-[patch.crates-io]
-abk = { path = "../abk" }
