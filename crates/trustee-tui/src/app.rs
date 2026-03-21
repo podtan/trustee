@@ -283,6 +283,10 @@ impl App {
         
         // Add command to output
         self.output_lines.push(format!("> {}", command));
+        // DIAGNOSTIC: Direct push before spawn — proves render pipeline works
+        self.output_lines.push("[TEST: If you see this line, render pipeline works]".to_string());
+        self.output_lines.push("[TEST: Waiting for async messages from spawned task...]".to_string());
+        self.output_lines.push("".to_string());
         
         // Check if config is available
         let config_toml = match &self.config_toml {
@@ -303,20 +307,28 @@ impl App {
         
         // Spawn the workflow with TuiSink-based output
         tokio::spawn(async move {
-            tx.send(TuiMessage::OutputLine(format!("Executing: {}", command))).ok();
-            
+            // DIAGNOSTIC 1: Immediate test — channel works outside ABK
+            tx.send(TuiMessage::OutputLine(format!("🚀 Executing: {}", command))).ok();
+            tx.send(TuiMessage::OutputLine("⏳ Calling run_task_from_raw_config...".to_string())).ok();
+
             // Create TuiSink that bridges OutputEvent → TuiMessage channel.
-            // This replaces the old file-tailing hack and the NoopSink that
-            // was previously used in TUI mode (which silently discarded all events).
             let tui_sink: abk::orchestration::output::SharedSink =
                 std::sync::Arc::new(TuiSink::new(tx.clone()));
-            
+
+            // DIAGNOSTIC 2: Verify TuiSink channel works by emitting directly
+            tx.send(TuiMessage::OutputLine("📡 TuiSink created, testing emit...".to_string())).ok();
+            tui_sink.emit(abk::orchestration::output::OutputEvent::Info {
+                message: "🔧 TuiSink.emit() channel test — if you see this, the bridge works".to_string(),
+            });
+
             // Run ABK workflow with the task — bypasses CLI arg parsing.
             // TUI mode is enabled to suppress ABK's console output (stdout/stderr).
             // Output events flow through TuiSink directly to the TUI display.
             let result: Result<(), String> = {
                 abk::observability::set_tui_mode(true);
-                
+
+                tx.send(TuiMessage::OutputLine("🔄 ABK workflow starting now...".to_string())).ok();
+
                 let res = abk::cli::run_task_from_raw_config(
                     &config_toml,
                     secrets,
@@ -324,20 +336,27 @@ impl App {
                     &command,
                     Some(tui_sink),
                 ).await.map_err(|e| e.to_string());
-                
+
                 abk::observability::set_tui_mode(false);
-                
+
+                tx.send(TuiMessage::OutputLine("🏁 ABK workflow returned".to_string())).ok();
+
                 res
             };
             
             match result {
                 Ok(()) => {
+                    tx.send(TuiMessage::OutputLine("✅ Workflow completed successfully".to_string())).ok();
                     tx.send(TuiMessage::WorkflowCompleted).ok();
                 }
                 Err(e) => {
+                    tx.send(TuiMessage::OutputLine(format!("❌ Workflow error: {}", e))).ok();
                     tx.send(TuiMessage::WorkflowError(format!("{}", e))).ok();
                 }
             }
+
+            // DIAGNOSTIC 3: Final message — if you see this, the whole channel works end-to-end
+            tx.send(TuiMessage::OutputLine("═══ End of workflow run ═══".to_string())).ok();
         });
         
         // Clear input buffer and reset cursor
@@ -360,16 +379,41 @@ impl App {
             ])
             .split(frame.area());
 
+        // DIAGNOSTIC: Show output_lines.len() in title to verify rendering pipeline
+        let output_title = format!(
+            "Output (↑/↓ to scroll) [{} lines | running: {}]",
+            self.output_lines.len(),
+            self.workflow_running,
+        );
+
         // Task 25: Render output area with scrollable content
         let output_text = self.output_lines.join("\n");
-        let output_paragraph = Paragraph::new(Text::from(output_text))
+        // DIAGNOSTIC: If output_lines is empty, show a visible fallback so we know render runs
+        let display_text = if output_text.is_empty() {
+            "[RENDER DIAGNOSTIC: output_lines is EMPTY — render() is running but no content]".to_string()
+        } else {
+            output_text
+        };
+        // Clamp scroll to content height so u16::MAX doesn't scroll past all text.
+        // ratatui silently ignores out-of-range scroll, causing blank display.
+        let max_scroll = display_text.lines().count().saturating_sub(1) as u16;
+        let clamped_scroll = if self.scroll == u16::MAX {
+            // Auto-scroll: jump to bottom
+            max_scroll
+        } else {
+            self.scroll.min(max_scroll)
+        };
+
+        let output_paragraph = Paragraph::new(Text::from(display_text))
             .block(
                 Block::default()
-                    .title("Output (↑/↓ or PgUp/PgDn to scroll)")
+                    .title(output_title)
                     .title_style(Style::default().add_modifier(Modifier::BOLD))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Cyan)),
-            )            .wrap(Wrap { trim: false })            .scroll((self.scroll, 0));
+            )
+            .wrap(Wrap { trim: false })
+            .scroll((clamped_scroll, 0));
         frame.render_widget(output_paragraph, main_chunks[0]);
 
         // Task 23: Center the input box visually
