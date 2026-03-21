@@ -34,13 +34,16 @@ impl TuiSink {
 impl OutputSink for TuiSink {
     fn emit(&self, event: OutputEvent) {
         let msg = match event {
-            // Streaming chunks go straight through (they arrive frequently)
+            // Streaming chunks — append to last line (print-style) instead of
+            // creating a new line for each chunk (println-style).
+            // This makes LLM thinking/response text flow naturally within a line.
             OutputEvent::StreamingChunk { delta } => {
-                // Skip empty chunks
                 if delta.is_empty() {
                     return;
                 }
-                TuiMessage::OutputLine(delta)
+                // Use a dedicated message type so handle_workflow_message can append
+                // rather than push a new line.
+                TuiMessage::StreamDelta(delta)
             }
 
             // Full LLM responses — display with model info
