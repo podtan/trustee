@@ -22,6 +22,8 @@ use ratatui::{
 use tokio::sync::mpsc;
 use anyhow::Result;
 
+use crate::tui_sink::TuiSink;
+
 /// Messages that can be sent to the TUI from async workflows
 #[derive(Debug, Clone)]
 pub enum TuiMessage {
@@ -271,8 +273,7 @@ impl App {
     /// Execute the current command in the input buffer
     /// 
     /// Task 50: Wired to ABK's run_task_from_raw_config
-    /// Spawns an async workflow that sends output through TuiMessage.
-    /// Tails the log file to capture ABK's output into the TUI display.
+    /// Task 55: Creates TuiSink to bridge OutputEvent → TuiMessage channel
     fn execute_command(&mut self) {
         let command = self.input.trim().to_string();
         
@@ -300,78 +301,19 @@ impl App {
         // Mark workflow as running
         self.workflow_running = true;
         
-        // Get the actual log file path from ABK's global logger
-        // This is where tee_println() writes, so tailing this file captures all output
-        let log_path = abk::observability::current_log_path()
-            .to_string_lossy()
-            .to_string();
-        
-        // Spawn the workflow with log file tailing
+        // Spawn the workflow with TuiSink-based output
         tokio::spawn(async move {
             tx.send(TuiMessage::OutputLine(format!("Executing: {}", command))).ok();
             
-            // Record log file size before workflow starts so we only read new content
-            let log_start_pos = std::fs::metadata(&log_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            
-            // Spawn a log file tailer that reads new content and sends to TUI.
-            // Uses raw byte reads instead of read_line to capture partial content
-            // (e.g. reasoning tokens written without trailing newlines).
-            let tail_tx = tx.clone();
-            let tail_path = log_path.clone();
-            let tail_handle = tokio::spawn(async move {
-                let mut last_pos = log_start_pos;
-                let mut partial = String::new(); // buffer for incomplete lines
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    
-                    let current_size = match std::fs::metadata(&tail_path) {
-                        Ok(m) => m.len(),
-                        Err(_) => continue,
-                    };
-                    
-                    if current_size > last_pos {
-                        if let Ok(file) = std::fs::File::open(&tail_path) {
-                            use std::io::{Seek, Read};
-                            let mut file = file;
-                            if file.seek(std::io::SeekFrom::Start(last_pos)).is_ok() {
-                                let to_read = (current_size - last_pos) as usize;
-                                let mut buf = vec![0u8; to_read];
-                                match file.read_exact(&mut buf) {
-                                    Ok(()) => {
-                                        last_pos = current_size;
-                                        let chunk = String::from_utf8_lossy(&buf);
-                                        partial.push_str(&chunk);
-                                        
-                                        // Split on newlines; keep last part if no trailing newline
-                                        while let Some(nl_pos) = partial.find('\n') {
-                                            let line = partial[..nl_pos].trim_end().to_string();
-                                            partial = partial[nl_pos + 1..].to_string();
-                                            if !line.is_empty() {
-                                                tail_tx.send(TuiMessage::OutputLine(line)).ok();
-                                            }
-                                        }
-                                        // If partial has accumulated content without newline
-                                        // (e.g. reasoning tokens), flush it as a partial line
-                                        // after a brief accumulation period
-                                        if !partial.trim().is_empty() && partial.len() > 80 {
-                                            let flushed = partial.trim().to_string();
-                                            partial.clear();
-                                            tail_tx.send(TuiMessage::OutputLine(flushed)).ok();
-                                        }
-                                    }
-                                    Err(_) => continue,
-                                }
-                            }
-                        }
-                    }
-                }
-            });
+            // Create TuiSink that bridges OutputEvent → TuiMessage channel.
+            // This replaces the old file-tailing hack and the NoopSink that
+            // was previously used in TUI mode (which silently discarded all events).
+            let tui_sink: abk::orchestration::output::SharedSink =
+                std::sync::Arc::new(TuiSink::new(tx.clone()));
             
             // Run ABK workflow with the task — bypasses CLI arg parsing.
-            // Enable TUI mode to suppress ABK's console output (stdout/stderr).
-            // All output goes to the log file which the tailer reads above.
+            // TUI mode is enabled to suppress ABK's console output (stdout/stderr).
+            // Output events flow through TuiSink directly to the TUI display.
             let result: Result<(), String> = {
                 abk::observability::set_tui_mode(true);
                 
@@ -380,16 +322,13 @@ impl App {
                     secrets,
                     build_info,
                     &command,
+                    Some(tui_sink),
                 ).await.map_err(|e| e.to_string());
                 
                 abk::observability::set_tui_mode(false);
                 
                 res
             };
-            
-            // Give the tailer a moment to catch the last lines
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            tail_handle.abort();
             
             match result {
                 Ok(()) => {

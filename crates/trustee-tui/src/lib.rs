@@ -5,6 +5,7 @@
 //! control.
 
 mod app;
+mod tui_sink;
 
 pub use app::App;
 
