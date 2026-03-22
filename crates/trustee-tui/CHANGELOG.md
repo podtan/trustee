@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11] - 2026-03-22
+
+### Added
+- TUI session continuity: stores `ResumeInfo` from completed workflows and passes it to the next command, enabling seamless multi-turn conversations without losing context
+- `TuiMessage::ResumeInfo(Option<ResumeInfo>)` variant for receiving resume info from workflow runner
+- `resume_info` field on `App` struct for persisting session state between commands
+- Status indicator: "🔄 Session preserved — next command will continue this session"
+
+### Changed
+- `run_task_from_raw_config` now returns `TaskResult` (with success/error/resume_info) instead of `Result<(), String>`
+- Updated to abk 0.5.19 (in-memory ResumeInfo types, session continuity support)
+
 ## [0.1.10] - 2026-03-22
 
 ### Added

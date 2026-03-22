@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use anyhow::Result;
 
 use crate::tui_sink::TuiSink;
+use abk::cli::ResumeInfo;
 
 /// Messages that can be sent to the TUI from async workflows
 #[derive(Debug, Clone)]
@@ -37,6 +38,8 @@ pub enum TuiMessage {
     WorkflowCompleted,
     /// Workflow error
     WorkflowError(String),
+    /// Resume info from the completed workflow for session continuity
+    ResumeInfo(Option<ResumeInfo>),
 }
 
 /// Build information for ABK (forward declaration)
@@ -66,6 +69,8 @@ pub struct App {
     pub secrets: Option<std::collections::HashMap<String, String>>,
     /// Build info for ABK workflows (Task 50)
     pub build_info: Option<BuildInfo>,
+    /// Resume info from the last completed task for session continuity
+    pub resume_info: Option<ResumeInfo>,
 }
 
 impl App {
@@ -94,6 +99,7 @@ impl App {
             config_toml: None,
             secrets: None,
             build_info: None,
+            resume_info: None,
         }
     }
 
@@ -294,6 +300,12 @@ impl App {
                 self.workflow_running = false;
                 self.scroll = u16::MAX;
             }
+            TuiMessage::ResumeInfo(info) => {
+                self.resume_info = info;
+                if self.resume_info.is_some() {
+                    self.output_lines.push("🔄 Session preserved — next command will continue this session".to_string());
+                }
+            }
         }
     }
 
@@ -326,6 +338,9 @@ impl App {
         let build_info = self.build_info.clone();
         let tx = self.workflow_tx.clone();
         
+        // Take resume_info (one-time use — consumed on next command)
+        let resume_info = self.resume_info.take();
+        
         // Mark workflow as running
         self.workflow_running = true;
         
@@ -338,30 +353,33 @@ impl App {
             // Run ABK workflow with the task — bypasses CLI arg parsing.
             // TUI mode is enabled to suppress ABK's console output (stdout/stderr).
             // Output events flow through TuiSink directly to the TUI display.
-            let result: Result<(), String> = {
-                abk::observability::set_tui_mode(true);
+            abk::observability::set_tui_mode(true);
 
-                let res = abk::cli::run_task_from_raw_config(
-                    &config_toml,
-                    secrets,
-                    build_info,
-                    &command,
-                    Some(tui_sink),
-                ).await.map_err(|e| e.to_string());
+            let result: abk::cli::TaskResult = abk::cli::run_task_from_raw_config(
+                &config_toml,
+                secrets,
+                build_info,
+                &command,
+                Some(tui_sink),
+                resume_info,
+            ).await.unwrap_or_else(|e| abk::cli::TaskResult {
+                success: false,
+                error: Some(e.to_string()),
+                resume_info: None,
+            });
 
-                abk::observability::set_tui_mode(false);
+            abk::observability::set_tui_mode(false);
 
-                res
+            // Send completion message
+            let msg = if result.success {
+                TuiMessage::WorkflowCompleted
+            } else {
+                TuiMessage::WorkflowError(result.error.unwrap_or_default())
             };
-            
-            match result {
-                Ok(()) => {
-                    tx.send(TuiMessage::WorkflowCompleted).ok();
-                }
-                Err(e) => {
-                    tx.send(TuiMessage::WorkflowError(format!("{}", e))).ok();
-                }
-            }
+            tx.send(msg).ok();
+
+            // Send resume info back for storage in App
+            tx.send(TuiMessage::ResumeInfo(result.resume_info)).ok();
         });
         
         // Clear input buffer and reset cursor
