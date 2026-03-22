@@ -45,11 +45,20 @@ pub enum TuiMessage {
 /// Build information for ABK (forward declaration)
 pub type BuildInfo = abk::cli::BuildInfo;
 
+/// Convert a char index to a byte offset in a string.
+/// Panics if `char_idx` > number of chars in `s`.
+fn char_to_byte_offset(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(byte_pos, _)| byte_pos)
+        .unwrap_or(s.len())
+}
+
 /// Main application state for the TUI
 pub struct App {
     /// Input buffer for user commands
     pub input: String,
-    /// Cursor position in input buffer
+    /// Cursor position in input buffer (char index, not byte offset)
     pub cursor_position: usize,
     /// Output log lines
     pub output_lines: Vec<String>,
@@ -191,14 +200,17 @@ impl App {
                 // Task 24: Backspace - delete character before cursor
                 KeyCode::Backspace => {
                     if self.cursor_position > 0 {
-                        self.input.remove(self.cursor_position - 1);
+                        let byte_pos = char_to_byte_offset(&self.input, self.cursor_position - 1);
+                        self.input.remove(byte_pos);
                         self.cursor_position -= 1;
                     }
                 }
                 // Delete key - delete character at cursor
                 KeyCode::Delete => {
-                    if self.cursor_position < self.input.len() {
-                        self.input.remove(self.cursor_position);
+                    let char_count = self.input.chars().count();
+                    if self.cursor_position < char_count {
+                        let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
+                        self.input.remove(byte_pos);
                     }
                 }
                 // Task 25: Scroll up with arrow up
@@ -232,7 +244,7 @@ impl App {
                 }
                 // Task 24: End - move cursor to end
                 KeyCode::End => {
-                    self.cursor_position = self.input.len();
+                    self.cursor_position = self.input.chars().count();
                 }
                 // Task 24: Left arrow - move cursor left
                 KeyCode::Left => {
@@ -242,13 +254,15 @@ impl App {
                 }
                 // Task 24: Right arrow - move cursor right
                 KeyCode::Right => {
-                    if self.cursor_position < self.input.len() {
+                    let char_count = self.input.chars().count();
+                    if self.cursor_position < char_count {
                         self.cursor_position += 1;
                     }
                 }
                 // Task 24: Character input
                 KeyCode::Char(c) => {
-                    self.input.insert(self.cursor_position, c);
+                    let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
+                    self.input.insert(byte_pos, c);
                     self.cursor_position += 1;
                 }
                 _ => {}
@@ -450,7 +464,8 @@ impl App {
 
         // Task 24: Render input box with cursor tracking
         // Display input text with cursor position indicator
-        let input_text = if self.cursor_position < self.input.len() {
+        let char_count = self.input.chars().count();
+        let input_text = if self.cursor_position < char_count {
             // Cursor is in the middle - show cursor position with underline
             let before: String = self.input.chars().take(self.cursor_position).collect();
             let at: String = self.input.chars().skip(self.cursor_position).take(1).collect();
