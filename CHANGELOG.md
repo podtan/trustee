@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.29] - 2026-03-22
+
+### Added
+- TUI session continuity: multiple commands in the TUI now continue the same session instead of starting fresh each time — ABK returns `ResumeInfo` after each task and the TUI passes it back on the next command
+
+### Changed
+- Updated to abk 0.5.19 (in-memory ResumeInfo for session continuity)
+- Updated trustee-tui to 0.1.11 (session continuity integration)
+
 ## [0.1.28] - 2026-03-22
 
 ### Changed
