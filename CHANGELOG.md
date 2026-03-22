@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.28] - 2026-03-22
+
+### Changed
+- Updated to abk 0.5.18 (ReasoningChunk output events)
+- Updated trustee-tui to 0.1.10 (grey reasoning display)
+
 ## [0.1.27] - 2026-03-21
 
 ### Fixed

@@ -15,7 +15,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::Text,
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
@@ -31,6 +31,8 @@ pub enum TuiMessage {
     OutputLine(String),
     /// A streaming delta to append to the last line (print-style, not println)
     StreamDelta(String),
+    /// A reasoning delta to append to the last line (displayed in grey)
+    ReasoningDelta(String),
     /// Workflow completed
     WorkflowCompleted,
     /// Workflow error
@@ -266,6 +268,20 @@ impl App {
                 // Auto-scroll to bottom on new output
                 self.scroll = u16::MAX;
             }
+            TuiMessage::ReasoningDelta(delta) => {
+                // Same as StreamDelta but prefix with \x01 marker for grey rendering.
+                // The marker is stripped during render and the line is styled grey.
+                if let Some(last) = self.output_lines.last_mut() {
+                    if !last.starts_with('\x01') {
+                        // First reasoning on this line — mark it
+                        last.insert(0, '\x01');
+                    }
+                    last.push_str(&delta);
+                } else {
+                    self.output_lines.push(format!("\x01{}", delta));
+                }
+                self.scroll = u16::MAX;
+            }
             TuiMessage::WorkflowCompleted => {
                 self.output_lines.push("✓ Workflow completed".to_string());
                 self.output_lines.push("".to_string());
@@ -371,12 +387,28 @@ impl App {
         // Output area title
         let output_title = "Output (↑/↓ to scroll)".to_string();
 
-        // Render output area with scrollable content
-        let display_text = self.output_lines.join("\n");
+        // Render output area with scrollable content.
+        // Lines prefixed with \x01 are reasoning lines and rendered in dark grey.
+        let grey_style = Style::default().fg(Color::DarkGray);
+        let normal_style = Style::default();
+        let styled_lines: Vec<Line> = self.output_lines.iter().flat_map(|raw| {
+            let (style, text) = if let Some(stripped) = raw.strip_prefix('\x01') {
+                (grey_style, stripped)
+            } else {
+                (normal_style, raw.as_str())
+            };
+            // A single output_line may contain embedded newlines (e.g. tool output).
+            // Split them so ratatui wraps correctly.
+            text.split('\n').map(move |segment| {
+                Line::from(Span::styled(segment.to_string(), style))
+            }).collect::<Vec<_>>()
+        }).collect();
+
+        let display_text = Text::from(styled_lines);
         // Clamp scroll so the viewport doesn't scroll past the end of content.
         // Without this, the last visible page shows content at the top with empty
         // space below, and u16::MAX sentinel can scroll past all text entirely.
-        let content_height = display_text.lines().count();
+        let content_height = display_text.lines.len();
         let viewport_height = main_chunks[0].height.saturating_sub(2) as usize; // -2 for borders
         let max_scroll = content_height.saturating_sub(viewport_height) as u16;
         let clamped_scroll = if self.scroll == u16::MAX {
@@ -386,7 +418,7 @@ impl App {
             self.scroll.min(max_scroll)
         };
 
-        let output_paragraph = Paragraph::new(Text::from(display_text))
+        let output_paragraph = Paragraph::new(display_text)
             .block(
                 Block::default()
                     .title(output_title)

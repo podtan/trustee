@@ -5,6 +5,7 @@
 //! ratatui display via `mpsc::UnboundedSender<TuiMessage>`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 use abk::orchestration::output::{OutputEvent, OutputSink, SharedSink};
@@ -17,12 +18,14 @@ use crate::app::TuiMessage;
 /// ratatui render loop can display it in the output pane.
 pub struct TuiSink {
     tx: mpsc::UnboundedSender<TuiMessage>,
+    /// Whether we're inside a reasoning block (to start it on a new line).
+    in_reasoning: AtomicBool,
 }
 
 impl TuiSink {
     /// Create a new `TuiSink` wrapping the given channel sender.
     pub fn new(tx: mpsc::UnboundedSender<TuiMessage>) -> Self {
-        Self { tx }
+        Self { tx, in_reasoning: AtomicBool::new(false) }
     }
 
     /// Convenience helper: wrap in an `Arc` for use as `SharedSink`.
@@ -40,6 +43,10 @@ impl OutputSink for TuiSink {
             OutputEvent::StreamingChunk { delta } => {
                 if delta.is_empty() {
                     return;
+                }
+                // If transitioning from reasoning to content, start a new line.
+                if self.in_reasoning.swap(false, Ordering::Relaxed) {
+                    let _ = self.tx.send(TuiMessage::OutputLine(String::new()));
                 }
                 // Use a dedicated message type so handle_workflow_message can append
                 // rather than push a new line.
@@ -112,6 +119,20 @@ impl OutputSink for TuiSink {
                 } else {
                     TuiMessage::OutputLine(format!("❌ Error: {}", message))
                 }
+            }
+
+            // Reasoning chunks — send as ReasoningDelta for grey rendering
+            // (ratatui applies DarkGray style via the \x01 marker convention)
+            OutputEvent::ReasoningChunk { delta } => {
+                if delta.is_empty() {
+                    return;
+                }
+                // First reasoning chunk → push a new line so it doesn't append
+                // to the previous OutputLine (e.g. API Call info).
+                if !self.in_reasoning.swap(true, Ordering::Relaxed) {
+                    let _ = self.tx.send(TuiMessage::OutputLine(String::new()));
+                }
+                TuiMessage::ReasoningDelta(delta)
             }
         };
 
