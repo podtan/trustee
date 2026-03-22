@@ -7,7 +7,7 @@
 use std::io;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyModifiers, EnableBracketedPaste, DisableBracketedPaste},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -122,7 +122,7 @@ impl App {
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
@@ -155,7 +155,7 @@ impl App {
 
         // Restore terminal
         disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableBracketedPaste)?;
         terminal.show_cursor()?;
 
         Ok(())
@@ -180,6 +180,18 @@ impl App {
 
     /// Handle a terminal event
     fn handle_event(&mut self, event: Event) -> Result<()> {
+        // Handle bracketed paste: pasted text arrives as a single event,
+        // newlines are replaced with spaces to prevent auto-submit.
+        if let Event::Paste(text) = event {
+            let sanitized = text.replace('\n', " ").replace('\r', "");
+            for c in sanitized.chars() {
+                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
+                self.input.insert(byte_pos, c);
+                self.cursor_position += 1;
+            }
+            return Ok(());
+        }
+
         if let Event::Key(key) = event {
             // Task 26: Enhanced keyboard event handling
             match key.code {
