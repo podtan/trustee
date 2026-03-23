@@ -56,6 +56,17 @@ fn char_to_byte_offset(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+/// Estimate the number of visual (wrapped) lines a Text will occupy.
+fn estimate_visual_lines(text: &Text, viewport_width: u16) -> usize {
+    let w = viewport_width.saturating_sub(2).max(1) as usize;
+    text.lines.iter().map(|line| {
+        let chars: usize = line.spans.iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        if chars <= w { 1 } else { (chars + w - 1) / w }
+    }).sum()
+}
+
 /// Main application state for the TUI
 pub struct App {
     /// Input buffer for user commands
@@ -64,8 +75,12 @@ pub struct App {
     pub cursor_position: usize,
     /// Output log lines
     pub output_lines: Vec<String>,
-    /// Scroll position in output (vertical)
+    /// Scroll position in output (vertical). u16::MAX = auto-follow bottom.
     pub scroll: u16,
+    /// Whether auto-scroll is enabled (follows new output)
+    pub auto_scroll: bool,
+    /// Cached max scroll value from last render (for keyboard navigation)
+    max_scroll_cache: u16,
     /// Whether the app should quit
     pub should_quit: bool,
     /// Receiver for messages from async workflows
@@ -101,10 +116,11 @@ impl App {
                 "Keyboard shortcuts:".to_string(),
                 "  ↑/↓ or Page Up/Down - Scroll output".to_string(),
                 "  Enter - Execute task".to_string(),
-                "  Backspace - Delete character".to_string(),
                 "  Esc or Ctrl+C - Exit".to_string(),
             ],
             scroll: 0,
+            auto_scroll: true,
+            max_scroll_cache: 0,
             should_quit: false,
             workflow_rx,
             workflow_tx,
@@ -230,30 +246,43 @@ impl App {
                         self.input.remove(byte_pos);
                     }
                 }
-                // Task 25: Scroll up with arrow up
+                // Scroll up
                 KeyCode::Up => {
+                    self.auto_scroll = false;
                     if self.scroll == u16::MAX {
-                        // Coming from auto-scroll bottom: start at the actual end
-                        self.scroll = self.output_lines.len().saturating_sub(1) as u16;
+                        self.scroll = self.max_scroll_cache;
                     }
                     self.scroll = self.scroll.saturating_sub(1);
                 }
-                // Task 25: Scroll down with arrow down
+                // Scroll down
                 KeyCode::Down => {
-                    if self.scroll < u16::MAX {
-                        self.scroll = self.scroll.saturating_add(1);
+                    if self.scroll == u16::MAX {
+                        return Ok(());
+                    }
+                    self.scroll = self.scroll.saturating_add(1);
+                    if self.scroll >= self.max_scroll_cache {
+                        self.auto_scroll = true;
+                        self.scroll = u16::MAX;
                     }
                 }
-                // Task 25: Page Up - scroll up by 10 lines
+                // Page Up
                 KeyCode::PageUp => {
+                    self.auto_scroll = false;
                     if self.scroll == u16::MAX {
-                        self.scroll = self.output_lines.len().saturating_sub(1) as u16;
+                        self.scroll = self.max_scroll_cache;
                     }
                     self.scroll = self.scroll.saturating_sub(10);
                 }
-                // Task 25: Page Down - scroll down by 10 lines
+                // Page Down
                 KeyCode::PageDown => {
+                    if self.scroll == u16::MAX {
+                        return Ok(());
+                    }
                     self.scroll = self.scroll.saturating_add(10);
+                    if self.scroll >= self.max_scroll_cache {
+                        self.auto_scroll = true;
+                        self.scroll = u16::MAX;
+                    }
                 }
                 // Task 24: Home - move cursor to beginning
                 KeyCode::Home => {
@@ -302,8 +331,6 @@ impl App {
                 } else {
                     self.output_lines.push(delta);
                 }
-                // Auto-scroll to bottom on new output
-                self.scroll = u16::MAX;
             }
             TuiMessage::ReasoningDelta(delta) => {
                 // Same as StreamDelta but prefix with \x01 marker for grey rendering.
@@ -317,19 +344,16 @@ impl App {
                 } else {
                     self.output_lines.push(format!("\x01{}", delta));
                 }
-                self.scroll = u16::MAX;
             }
             TuiMessage::WorkflowCompleted => {
                 self.output_lines.push("✓ Workflow completed".to_string());
                 self.output_lines.push("".to_string());
                 self.workflow_running = false;
-                self.scroll = u16::MAX;
             }
             TuiMessage::WorkflowError(err) => {
                 self.output_lines.push(format!("✗ Error: {}", err));
                 self.output_lines.push("".to_string());
                 self.workflow_running = false;
-                self.scroll = u16::MAX;
             }
             TuiMessage::TodoUpdate(content) => {
                 self.todo_lines = content.lines().map(|l| l.to_string()).collect();
@@ -340,6 +364,10 @@ impl App {
                     self.output_lines.push("🔄 Session preserved — next command will continue this session".to_string());
                 }
             }
+        }
+        // Auto-scroll to bottom when enabled
+        if self.auto_scroll {
+            self.scroll = u16::MAX;
         }
     }
 
@@ -375,8 +403,9 @@ impl App {
         // Take resume_info (one-time use — consumed on next command)
         let resume_info = self.resume_info.take();
         
-        // Mark workflow as running
+        // Mark workflow as running, re-enable auto-scroll
         self.workflow_running = true;
+        self.auto_scroll = true;
         
         // Spawn the workflow with TuiSink-based output
         tokio::spawn(async move {
@@ -425,7 +454,7 @@ impl App {
     }
 
     /// Render the TUI
-    pub fn render(&self, frame: &mut Frame) {
+    pub fn render(&mut self, frame: &mut Frame) {
         // Create main layout: output takes remaining space, input gets fixed height
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -436,17 +465,16 @@ impl App {
             ])
             .split(frame.area());
 
-        // Split output area horizontally: 80% output, 20% todo panel
+        // Split output area horizontally: 70% output, 30% todo panel
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(80), // Main output
-                Constraint::Percentage(20), // Todo panel
+                Constraint::Percentage(70), // Main output
+                Constraint::Percentage(30), // Todo panel
             ])
             .split(main_chunks[0]);
 
-        // Output area title
-        let output_title = "Output (↑/↓ to scroll)".to_string();
+        // Output area title shows scroll mode
 
         // Render output area with scrollable content.
         // Lines prefixed with \x01 are reasoning lines and rendered in dark grey.
@@ -466,17 +494,20 @@ impl App {
         }).collect();
 
         let display_text = Text::from(styled_lines);
-        // Clamp scroll so the viewport doesn't scroll past the end of content.
-        // Without this, the last visible page shows content at the top with empty
-        // space below, and u16::MAX sentinel can scroll past all text entirely.
-        let content_height = display_text.lines.len();
-        let viewport_height = content_chunks[0].height.saturating_sub(2) as usize; // -2 for borders
+        // Use wrapped visual line count for scroll clamping (not raw line count).
+        let content_height = estimate_visual_lines(&display_text, content_chunks[0].width);
+        let viewport_height = content_chunks[0].height.saturating_sub(2) as usize;
         let max_scroll = content_height.saturating_sub(viewport_height) as u16;
+        self.max_scroll_cache = max_scroll;
         let clamped_scroll = if self.scroll == u16::MAX {
-            // Auto-scroll sentinel: jump to last visible page
             max_scroll
         } else {
             self.scroll.min(max_scroll)
+        };
+        let output_title = if self.auto_scroll {
+            "Output (↑/↓ to scroll)".to_string()
+        } else {
+            format!("Output (line {}/{} — ↓ to follow)", clamped_scroll, max_scroll)
         };
 
         let output_paragraph = Paragraph::new(display_text)
@@ -530,6 +561,20 @@ impl App {
             format!("Input (Ready) - cursor: {}", self.cursor_position)
         };
 
+        // Compute input scroll to keep cursor visible in the input box
+        let input_inner_width = main_chunks[1].width.saturating_sub(2).max(1) as usize;
+        let input_inner_height = main_chunks[1].height.saturating_sub(2) as usize;
+        let input_scroll = if input_inner_width > 0 && input_inner_height > 0 {
+            let chars_before_cursor = self.cursor_position;
+            let visual_cursor_line = chars_before_cursor / input_inner_width;
+            if visual_cursor_line >= input_inner_height {
+                (visual_cursor_line - input_inner_height + 1) as u16
+            } else {
+                0
+            }
+        } else {
+            0
+        };
         let input_paragraph = Paragraph::new(Text::from(input_text.as_str()))
             .block(
                 Block::default()
@@ -539,7 +584,8 @@ impl App {
                     .border_style(Style::default().fg(Color::Green)),
             )
             .style(Style::default().fg(Color::White))
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((input_scroll, 0));
         frame.render_widget(input_paragraph, main_chunks[1]);
     }
 }
