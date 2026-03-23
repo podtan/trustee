@@ -109,8 +109,13 @@ impl OutputSink for TuiSink {
                 success,
                 content,
             } => {
-                let status = if success { "Result" } else { "Error" };
-                TuiMessage::OutputLine(format!("Tool: {}\n{}: {}", tool_name, status, content))
+                // Intercept todowrite to update the todo panel
+                if tool_name == "todowrite" && success {
+                    let _ = self.tx.send(TuiMessage::TodoUpdate(content.clone()));
+                }
+                // Show a compact summary line for all tool completions
+                let status = if success { "✓" } else { "✗" };
+                TuiMessage::OutputLine(format!("{} {}", status, tool_name))
             }
 
             // Error events

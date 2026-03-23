@@ -40,6 +40,8 @@ pub enum TuiMessage {
     WorkflowError(String),
     /// Resume info from the completed workflow for session continuity
     ResumeInfo(Option<ResumeInfo>),
+    /// Todo list update from LLM todowrite tool
+    TodoUpdate(String),
 }
 
 /// Build information for ABK (forward declaration)
@@ -80,6 +82,8 @@ pub struct App {
     pub build_info: Option<BuildInfo>,
     /// Resume info from the last completed task for session continuity
     pub resume_info: Option<ResumeInfo>,
+    /// Latest todo list from LLM todowrite tool
+    pub todo_lines: Vec<String>,
 }
 
 impl App {
@@ -109,6 +113,7 @@ impl App {
             secrets: None,
             build_info: None,
             resume_info: None,
+            todo_lines: Vec::new(),
         }
     }
 
@@ -326,6 +331,9 @@ impl App {
                 self.workflow_running = false;
                 self.scroll = u16::MAX;
             }
+            TuiMessage::TodoUpdate(content) => {
+                self.todo_lines = content.lines().map(|l| l.to_string()).collect();
+            }
             TuiMessage::ResumeInfo(info) => {
                 self.resume_info = info;
                 if self.resume_info.is_some() {
@@ -423,10 +431,19 @@ impl App {
             .direction(Direction::Vertical)
             .margin(2)
             .constraints([
-                Constraint::Min(0),    // Output area - all remaining space
+                Constraint::Min(0),    // Output + Todo area - all remaining space
                 Constraint::Length(7), // Input area - fixed 7 rows (5 content + 2 borders)
             ])
             .split(frame.area());
+
+        // Split output area horizontally: 80% output, 20% todo panel
+        let content_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(80), // Main output
+                Constraint::Percentage(20), // Todo panel
+            ])
+            .split(main_chunks[0]);
 
         // Output area title
         let output_title = "Output (↑/↓ to scroll)".to_string();
@@ -453,7 +470,7 @@ impl App {
         // Without this, the last visible page shows content at the top with empty
         // space below, and u16::MAX sentinel can scroll past all text entirely.
         let content_height = display_text.lines.len();
-        let viewport_height = main_chunks[0].height.saturating_sub(2) as usize; // -2 for borders
+        let viewport_height = content_chunks[0].height.saturating_sub(2) as usize; // -2 for borders
         let max_scroll = content_height.saturating_sub(viewport_height) as u16;
         let clamped_scroll = if self.scroll == u16::MAX {
             // Auto-scroll sentinel: jump to last visible page
@@ -472,7 +489,25 @@ impl App {
             )
             .wrap(Wrap { trim: false })
             .scroll((clamped_scroll, 0));
-        frame.render_widget(output_paragraph, main_chunks[0]);
+        frame.render_widget(output_paragraph, content_chunks[0]);
+
+        // Render todo panel on the right side
+        let todo_title = format!("Todos ({})", self.todo_lines.len());
+        let todo_text = if self.todo_lines.is_empty() {
+            Text::from("No tasks")
+        } else {
+            Text::from(self.todo_lines.iter().map(|l| Line::from(l.as_str())).collect::<Vec<_>>())
+        };
+        let todo_paragraph = Paragraph::new(todo_text)
+            .block(
+                Block::default()
+                    .title(todo_title)
+                    .title_style(Style::default().add_modifier(Modifier::BOLD))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(todo_paragraph, content_chunks[1]);
 
         // Task 24: Render input box with cursor tracking
         // Display input text with cursor position indicator
