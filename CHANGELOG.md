@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.30] - 2026-03-23
+
+### Added
+- TUI: Vertical todo list panel (20% width, right side) that shows the LLM's task list from `todowrite` tool calls
+- TUI: Tool call descriptions in output — bash commands show `🔧 bash — <description>` instead of raw output
+- TUI: Context token count in API call info line (`Context=<n>` between call number and mode)
+
+### Changed
+- Updated to abk 0.5.20 (ToolCompleted events emitted, description field on ToolExecutionResult)
+- Updated trustee-tui to 0.1.12 (todo panel, tool descriptions, context tokens)
+
 ## [0.1.29] - 2026-03-22
 
 ### Added
