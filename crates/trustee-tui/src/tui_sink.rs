@@ -86,11 +86,12 @@ impl OutputSink for TuiSink {
                 model,
                 tool_count,
                 streaming,
+                context_tokens,
             } => {
                 let mode = if streaming { "Streaming" } else { "Non-streaming" };
                 TuiMessage::OutputLine(format!(
-                    "🔥 API Call {} | {} | Model: {} | Tools: {}",
-                    call_number, mode, model, tool_count
+                    "🔥 API Call {} | Context={} | {} | Model: {} | Tools: {}",
+                    call_number, context_tokens, mode, model, tool_count
                 ))
             }
 
