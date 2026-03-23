@@ -108,14 +108,22 @@ impl OutputSink for TuiSink {
                 tool_name,
                 success,
                 content,
+                description,
             } => {
                 // Intercept todowrite to update the todo panel
                 if tool_name == "todowrite" && success {
                     let _ = self.tx.send(TuiMessage::TodoUpdate(content.clone()));
                 }
-                // Show a compact summary line for all tool completions
-                let status = if success { "✓" } else { "✗" };
-                TuiMessage::OutputLine(format!("{} {}", status, tool_name))
+                // Show compact one-liner with description when available
+                match description {
+                    Some(desc) => {
+                        TuiMessage::OutputLine(format!("🔧 {} — {}", tool_name, desc))
+                    }
+                    None => {
+                        let status = if success { "✓" } else { "✗" };
+                        TuiMessage::OutputLine(format!("{} {}", status, tool_name))
+                    }
+                }
             }
 
             // Error events
