@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.32] - 2026-03-24
+
+### Changed
+- Updated to abk 0.5.23 (fixes TUI session continuity iteration counter reset bug)
+- Updated trustee-tui to 0.1.14
+
 ## [0.1.31] - 2026-03-24
 
 ### Added
