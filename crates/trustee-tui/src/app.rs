@@ -7,13 +7,13 @@
 use std::io;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, EnableBracketedPaste, DisableBracketedPaste},
+    event::{self, Event, KeyCode, KeyModifiers, MouseEventKind, EnableBracketedPaste, DisableBracketedPaste, EnableMouseCapture, DisableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -65,14 +65,18 @@ fn char_to_byte_offset(s: &str, char_idx: usize) -> usize {
 }
 
 /// Estimate the number of visual (wrapped) lines a Text will occupy.
+/// Adds +1 buffer because ratatui word-wraps which can produce more lines
+/// than a simple character-division estimate.
 fn estimate_visual_lines(text: &Text, viewport_width: u16) -> usize {
     let w = viewport_width.saturating_sub(2).max(1) as usize;
-    text.lines.iter().map(|line| {
+    let raw: usize = text.lines.iter().map(|line| {
         let chars: usize = line.spans.iter()
             .map(|s| s.content.chars().count())
             .sum();
-        if chars <= w { 1 } else { (chars + w - 1) / w }
-    }).sum()
+        if chars == 0 { 1 } else { (chars + w - 1) / w }
+    }).sum();
+    // Add 1 to compensate for word-wrap producing extra lines vs char-division
+    raw + 1
 }
 
 /// Main application state for the TUI
@@ -119,6 +123,10 @@ pub struct App {
     pub todo_lines: Vec<String>,
     /// Cached inner width of input box (characters per visual line)
     input_inner_width_cache: usize,
+    /// Cached panel rectangles for mouse hit-testing (set during render)
+    output_rect: Rect,
+    todo_rect: Rect,
+    input_rect: Rect,
 }
 
 impl App {
@@ -156,6 +164,9 @@ impl App {
             resume_info: None,
             todo_lines: Vec::new(),
             input_inner_width_cache: 80,
+            output_rect: Rect::default(),
+            todo_rect: Rect::default(),
+            input_rect: Rect::default(),
         }
     }
 
@@ -169,7 +180,7 @@ impl App {
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
@@ -202,7 +213,7 @@ impl App {
 
         // Restore terminal
         disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableBracketedPaste)?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableBracketedPaste, DisableMouseCapture)?;
         terminal.show_cursor()?;
 
         Ok(())
@@ -235,6 +246,55 @@ impl App {
                 let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
                 self.input.insert(byte_pos, c);
                 self.cursor_position += 1;
+            }
+            return Ok(());
+        }
+
+        // Handle mouse events: click to focus, scroll wheel to scroll panel
+        if let Event::Mouse(mouse) = event {
+            let col = mouse.column;
+            let row = mouse.row;
+            match mouse.kind {
+                MouseEventKind::Down(_) => {
+                    // Click sets focus to the panel under the cursor
+                    if self.output_rect.contains((col, row).into()) {
+                        self.focus = FocusPanel::Output;
+                    } else if self.todo_rect.contains((col, row).into()) {
+                        self.focus = FocusPanel::Todo;
+                    } else if self.input_rect.contains((col, row).into()) {
+                        self.focus = FocusPanel::Input;
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    if self.output_rect.contains((col, row).into()) {
+                        self.auto_scroll = false;
+                        if self.scroll == u16::MAX {
+                            self.scroll = self.max_scroll_cache;
+                        }
+                        self.scroll = self.scroll.saturating_sub(3);
+                    } else if self.todo_rect.contains((col, row).into()) {
+                        self.todo_scroll = self.todo_scroll.saturating_sub(3);
+                    } else if self.input_rect.contains((col, row).into()) {
+                        self.input_scroll = self.input_scroll.saturating_sub(1);
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if self.output_rect.contains((col, row).into()) {
+                        if self.scroll == u16::MAX { return Ok(()); }
+                        self.scroll = self.scroll.saturating_add(3);
+                        if self.scroll >= self.max_scroll_cache {
+                            self.auto_scroll = true;
+                            self.scroll = u16::MAX;
+                        }
+                    } else if self.todo_rect.contains((col, row).into()) {
+                        self.todo_scroll = self.todo_scroll.saturating_add(3)
+                            .min(self.todo_max_scroll_cache);
+                    } else if self.input_rect.contains((col, row).into()) {
+                        self.input_scroll = self.input_scroll.saturating_add(1)
+                            .min(self.input_max_scroll_cache);
+                    }
+                }
+                _ => {}
             }
             return Ok(());
         }
@@ -587,6 +647,9 @@ impl App {
             ])
             .split(frame.area());
 
+        // Cache rects for mouse hit-testing
+        self.input_rect = main_chunks[1];
+
         // Split output area horizontally: 70% output, 30% todo panel
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -595,6 +658,10 @@ impl App {
                 Constraint::Percentage(30), // Todo panel
             ])
             .split(main_chunks[0]);
+
+        // Cache rects for mouse hit-testing
+        self.output_rect = content_chunks[0];
+        self.todo_rect = content_chunks[1];
 
         // Output area title shows scroll mode
 
