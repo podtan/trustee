@@ -25,6 +25,14 @@ use anyhow::Result;
 use crate::tui_sink::TuiSink;
 use abk::cli::ResumeInfo;
 
+/// Which panel currently has keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusPanel {
+    Output,
+    Todo,
+    Input,
+}
+
 /// Messages that can be sent to the TUI from async workflows
 #[derive(Debug, Clone)]
 pub enum TuiMessage {
@@ -81,6 +89,16 @@ pub struct App {
     pub auto_scroll: bool,
     /// Cached max scroll value from last render (for keyboard navigation)
     max_scroll_cache: u16,
+    /// Which panel has keyboard focus (Tab cycles)
+    pub focus: FocusPanel,
+    /// Scroll position in todo panel
+    pub todo_scroll: u16,
+    /// Cached max scroll for todo panel
+    todo_max_scroll_cache: u16,
+    /// Manual scroll offset for input box (user-driven)
+    pub input_scroll: u16,
+    /// Cached max scroll for input box
+    input_max_scroll_cache: u16,
     /// Whether the app should quit
     pub should_quit: bool,
     /// Receiver for messages from async workflows
@@ -99,6 +117,8 @@ pub struct App {
     pub resume_info: Option<ResumeInfo>,
     /// Latest todo list from LLM todowrite tool
     pub todo_lines: Vec<String>,
+    /// Cached inner width of input box (characters per visual line)
+    input_inner_width_cache: usize,
 }
 
 impl App {
@@ -121,6 +141,11 @@ impl App {
             scroll: 0,
             auto_scroll: true,
             max_scroll_cache: 0,
+            focus: FocusPanel::Input,
+            todo_scroll: 0,
+            todo_max_scroll_cache: 0,
+            input_scroll: 0,
+            input_max_scroll_cache: 0,
             should_quit: false,
             workflow_rx,
             workflow_tx,
@@ -130,6 +155,7 @@ impl App {
             build_info: None,
             resume_info: None,
             todo_lines: Vec::new(),
+            input_inner_width_cache: 80,
         }
     }
 
@@ -214,105 +240,201 @@ impl App {
         }
 
         if let Event::Key(key) = event {
-            // Task 26: Enhanced keyboard event handling
+            // Global keys — work regardless of focus
             match key.code {
-                // Exit with Ctrl+C
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.should_quit = true;
+                    return Ok(());
                 }
-                // Exit with Esc
                 KeyCode::Esc => {
                     self.should_quit = true;
+                    return Ok(());
                 }
-                // Submit task with Enter
-                KeyCode::Enter => {
-                    if !self.input.is_empty() && !self.workflow_running {
-                        self.execute_command();
-                    }
+                // Tab cycles focus: Input → Output → Todo → Input
+                KeyCode::Tab => {
+                    self.focus = match self.focus {
+                        FocusPanel::Input  => FocusPanel::Output,
+                        FocusPanel::Output => FocusPanel::Todo,
+                        FocusPanel::Todo   => FocusPanel::Input,
+                    };
+                    return Ok(());
                 }
-                // Task 24: Backspace - delete character before cursor
-                KeyCode::Backspace => {
-                    if self.cursor_position > 0 {
-                        let byte_pos = char_to_byte_offset(&self.input, self.cursor_position - 1);
-                        self.input.remove(byte_pos);
-                        self.cursor_position -= 1;
-                    }
-                }
-                // Delete key - delete character at cursor
-                KeyCode::Delete => {
-                    let char_count = self.input.chars().count();
-                    if self.cursor_position < char_count {
-                        let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                        self.input.remove(byte_pos);
-                    }
-                }
-                // Scroll up
-                KeyCode::Up => {
-                    self.auto_scroll = false;
-                    if self.scroll == u16::MAX {
-                        self.scroll = self.max_scroll_cache;
-                    }
-                    self.scroll = self.scroll.saturating_sub(1);
-                }
-                // Scroll down
-                KeyCode::Down => {
-                    if self.scroll == u16::MAX {
-                        return Ok(());
-                    }
-                    self.scroll = self.scroll.saturating_add(1);
-                    if self.scroll >= self.max_scroll_cache {
-                        self.auto_scroll = true;
-                        self.scroll = u16::MAX;
-                    }
-                }
-                // Page Up
-                KeyCode::PageUp => {
-                    self.auto_scroll = false;
-                    if self.scroll == u16::MAX {
-                        self.scroll = self.max_scroll_cache;
-                    }
-                    self.scroll = self.scroll.saturating_sub(10);
-                }
-                // Page Down
-                KeyCode::PageDown => {
-                    if self.scroll == u16::MAX {
-                        return Ok(());
-                    }
-                    self.scroll = self.scroll.saturating_add(10);
-                    if self.scroll >= self.max_scroll_cache {
-                        self.auto_scroll = true;
-                        self.scroll = u16::MAX;
-                    }
-                }
-                // Task 24: Home - move cursor to beginning
-                KeyCode::Home => {
-                    self.cursor_position = 0;
-                }
-                // Task 24: End - move cursor to end
-                KeyCode::End => {
-                    self.cursor_position = self.input.chars().count();
-                }
-                // Task 24: Left arrow - move cursor left
-                KeyCode::Left => {
-                    if self.cursor_position > 0 {
-                        self.cursor_position -= 1;
-                    }
-                }
-                // Task 24: Right arrow - move cursor right
-                KeyCode::Right => {
-                    let char_count = self.input.chars().count();
-                    if self.cursor_position < char_count {
-                        self.cursor_position += 1;
-                    }
-                }
-                // Task 24: Character input
-                KeyCode::Char(c) => {
-                    let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                    self.input.insert(byte_pos, c);
-                    self.cursor_position += 1;
+                // Shift+Tab cycles backwards: Input → Todo → Output → Input
+                KeyCode::BackTab => {
+                    self.focus = match self.focus {
+                        FocusPanel::Input  => FocusPanel::Todo,
+                        FocusPanel::Todo   => FocusPanel::Output,
+                        FocusPanel::Output => FocusPanel::Input,
+                    };
+                    return Ok(());
                 }
                 _ => {}
             }
+
+            // Focus-specific key handling
+            match self.focus {
+                FocusPanel::Output => self.handle_output_keys(key.code)?,
+                FocusPanel::Todo   => self.handle_todo_keys(key.code)?,
+                FocusPanel::Input  => self.handle_input_keys(key.code)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Keys when Output panel is focused: scroll output
+    fn handle_output_keys(&mut self, code: KeyCode) -> Result<()> {
+        match code {
+            KeyCode::Up => {
+                self.auto_scroll = false;
+                if self.scroll == u16::MAX {
+                    self.scroll = self.max_scroll_cache;
+                }
+                self.scroll = self.scroll.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if self.scroll == u16::MAX { return Ok(()); }
+                self.scroll = self.scroll.saturating_add(1);
+                if self.scroll >= self.max_scroll_cache {
+                    self.auto_scroll = true;
+                    self.scroll = u16::MAX;
+                }
+            }
+            KeyCode::PageUp => {
+                self.auto_scroll = false;
+                if self.scroll == u16::MAX {
+                    self.scroll = self.max_scroll_cache;
+                }
+                self.scroll = self.scroll.saturating_sub(10);
+            }
+            KeyCode::PageDown => {
+                if self.scroll == u16::MAX { return Ok(()); }
+                self.scroll = self.scroll.saturating_add(10);
+                if self.scroll >= self.max_scroll_cache {
+                    self.auto_scroll = true;
+                    self.scroll = u16::MAX;
+                }
+            }
+            KeyCode::Home => {
+                self.auto_scroll = false;
+                self.scroll = 0;
+            }
+            KeyCode::End => {
+                self.auto_scroll = true;
+                self.scroll = u16::MAX;
+            }
+            // Typing while output focused → switch to input and type there
+            KeyCode::Char(c) => {
+                self.focus = FocusPanel::Input;
+                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
+                self.input.insert(byte_pos, c);
+                self.cursor_position += 1;
+            }
+            KeyCode::Enter => {
+                if !self.input.is_empty() && !self.workflow_running {
+                    self.focus = FocusPanel::Input;
+                    self.execute_command();
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Keys when Todo panel is focused: scroll todo list
+    fn handle_todo_keys(&mut self, code: KeyCode) -> Result<()> {
+        match code {
+            KeyCode::Up => {
+                self.todo_scroll = self.todo_scroll.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                self.todo_scroll = self.todo_scroll.saturating_add(1)
+                    .min(self.todo_max_scroll_cache);
+            }
+            KeyCode::PageUp => {
+                self.todo_scroll = self.todo_scroll.saturating_sub(10);
+            }
+            KeyCode::PageDown => {
+                self.todo_scroll = self.todo_scroll.saturating_add(10)
+                    .min(self.todo_max_scroll_cache);
+            }
+            KeyCode::Home => { self.todo_scroll = 0; }
+            KeyCode::End => { self.todo_scroll = self.todo_max_scroll_cache; }
+            // Typing while todo focused → switch to input
+            KeyCode::Char(c) => {
+                self.focus = FocusPanel::Input;
+                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
+                self.input.insert(byte_pos, c);
+                self.cursor_position += 1;
+            }
+            KeyCode::Enter => {
+                if !self.input.is_empty() && !self.workflow_running {
+                    self.focus = FocusPanel::Input;
+                    self.execute_command();
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Keys when Input panel is focused: edit text + scroll input
+    fn handle_input_keys(&mut self, code: KeyCode) -> Result<()> {
+        match code {
+            KeyCode::Enter => {
+                if !self.input.is_empty() && !self.workflow_running {
+                    self.execute_command();
+                }
+            }
+            KeyCode::Backspace => {
+                if self.cursor_position > 0 {
+                    let byte_pos = char_to_byte_offset(&self.input, self.cursor_position - 1);
+                    self.input.remove(byte_pos);
+                    self.cursor_position -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                let char_count = self.input.chars().count();
+                if self.cursor_position < char_count {
+                    let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
+                    self.input.remove(byte_pos);
+                }
+            }
+            KeyCode::Up => {
+                // Move cursor up by one visual line width
+                let w = self.input_inner_width_cache.max(1);
+                if self.cursor_position >= w {
+                    self.cursor_position -= w;
+                } else {
+                    self.cursor_position = 0;
+                }
+            }
+            KeyCode::Down => {
+                let w = self.input_inner_width_cache.max(1);
+                let char_count = self.input.chars().count();
+                self.cursor_position = (self.cursor_position + w).min(char_count);
+            }
+            KeyCode::PageUp => {
+                self.input_scroll = self.input_scroll.saturating_sub(3);
+            }
+            KeyCode::PageDown => {
+                self.input_scroll = self.input_scroll.saturating_add(3)
+                    .min(self.input_max_scroll_cache);
+            }
+            KeyCode::Home => { self.cursor_position = 0; }
+            KeyCode::End => { self.cursor_position = self.input.chars().count(); }
+            KeyCode::Left => {
+                if self.cursor_position > 0 { self.cursor_position -= 1; }
+            }
+            KeyCode::Right => {
+                let char_count = self.input.chars().count();
+                if self.cursor_position < char_count { self.cursor_position += 1; }
+            }
+            KeyCode::Char(c) => {
+                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
+                self.input.insert(byte_pos, c);
+                self.cursor_position += 1;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -510,13 +632,18 @@ impl App {
             format!("Output (line {}/{} — ↓ to follow)", clamped_scroll, max_scroll)
         };
 
+        let output_border = if self.focus == FocusPanel::Output {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
         let output_paragraph = Paragraph::new(display_text)
             .block(
                 Block::default()
                     .title(output_title)
                     .title_style(Style::default().add_modifier(Modifier::BOLD))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan)),
+                    .border_style(output_border),
             )
             .wrap(Wrap { trim: false })
             .scroll((clamped_scroll, 0));
@@ -529,15 +656,26 @@ impl App {
         } else {
             Text::from(self.todo_lines.iter().map(|l| Line::from(l.as_str())).collect::<Vec<_>>())
         };
+        let todo_content_height = estimate_visual_lines(&todo_text, content_chunks[1].width);
+        let todo_viewport = content_chunks[1].height.saturating_sub(2) as usize;
+        let todo_max = todo_content_height.saturating_sub(todo_viewport) as u16;
+        self.todo_max_scroll_cache = todo_max;
+        let todo_clamped = self.todo_scroll.min(todo_max);
+        let todo_border = if self.focus == FocusPanel::Todo {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
         let todo_paragraph = Paragraph::new(todo_text)
             .block(
                 Block::default()
                     .title(todo_title)
                     .title_style(Style::default().add_modifier(Modifier::BOLD))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow)),
+                    .border_style(todo_border),
             )
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((todo_clamped, 0));
         frame.render_widget(todo_paragraph, content_chunks[1]);
 
         // Task 24: Render input box with cursor tracking
@@ -561,19 +699,30 @@ impl App {
             format!("Input (Ready) - cursor: {}", self.cursor_position)
         };
 
-        // Compute input scroll to keep cursor visible in the input box
+        // Compute input scroll: auto-follow cursor, but allow manual override
         let input_inner_width = main_chunks[1].width.saturating_sub(2).max(1) as usize;
+        self.input_inner_width_cache = input_inner_width;
         let input_inner_height = main_chunks[1].height.saturating_sub(2) as usize;
-        let input_scroll = if input_inner_width > 0 && input_inner_height > 0 {
-            let chars_before_cursor = self.cursor_position;
-            let visual_cursor_line = chars_before_cursor / input_inner_width;
-            if visual_cursor_line >= input_inner_height {
-                (visual_cursor_line - input_inner_height + 1) as u16
-            } else {
-                0
-            }
+        let input_char_count = self.input.chars().count();
+        let input_total_visual = if input_inner_width > 0 {
+            ((input_char_count + input_inner_width - 1) / input_inner_width).max(1)
+        } else { 1 };
+        let input_max = input_total_visual.saturating_sub(input_inner_height) as u16;
+        self.input_max_scroll_cache = input_max;
+        // Auto-scroll to keep cursor visible
+        let cursor_visual_line = if input_inner_width > 0 {
+            (self.cursor_position / input_inner_width) as u16
+        } else { 0 };
+        if cursor_visual_line < self.input_scroll {
+            self.input_scroll = cursor_visual_line;
+        } else if cursor_visual_line >= self.input_scroll + input_inner_height as u16 {
+            self.input_scroll = cursor_visual_line - input_inner_height as u16 + 1;
+        }
+        self.input_scroll = self.input_scroll.min(input_max);
+        let input_border = if self.focus == FocusPanel::Input {
+            Style::default().fg(Color::Green)
         } else {
-            0
+            Style::default().fg(Color::DarkGray)
         };
         let input_paragraph = Paragraph::new(Text::from(input_text.as_str()))
             .block(
@@ -581,11 +730,11 @@ impl App {
                     .title(input_title)
                     .title_style(Style::default().add_modifier(Modifier::BOLD))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Green)),
+                    .border_style(input_border),
             )
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: false })
-            .scroll((input_scroll, 0));
+            .scroll((self.input_scroll, 0));
         frame.render_widget(input_paragraph, main_chunks[1]);
     }
 }
