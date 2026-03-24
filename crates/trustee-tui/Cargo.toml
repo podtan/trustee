@@ -1,6 +1,6 @@
 [package]
 name = "trustee-tui"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 description = "TUI interface for Trustee agent"
 license = "MIT OR Apache-2.0"

@@ -1,6 +1,6 @@
 [package]
 name = "trustee"
-version = "0.1.30"
+version = "0.1.31"
 edition = "2021"
 description = "A general-purpose agent that can morph into different specialized agents using WASM lifecycle plugins"
 license = "MIT OR Apache-2.0"
@@ -35,7 +35,7 @@ tokio = { version = "1.0", features = ["full"] }
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
 tokio-util = { version = "0.7", optional = true }
-trustee-tui = { version = "0.1.12", path = "crates/trustee-tui", optional = true }
+trustee-tui = { version = "0.1.13", path = "crates/trustee-tui", optional = true }
 
 [workspace]
 members = ["crates/trustee-tui"]

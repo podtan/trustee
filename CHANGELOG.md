@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.31] - 2026-03-24
+
+### Added
+- TUI: Tab-based focus cycling across Output, Todo, and Input panels with visual border indicators
+- TUI: Visible block cursor in input box for clear editing position
+- TUI: Mouse click-to-focus support — click on any panel to switch focus
+- TUI: Mouse scroll wheel support — scroll the panel under the cursor
+
+### Fixed
+- TUI: Improved scroll behavior, input scrolling, and layout width calculations
+- TUI: Fixed last line of output/input cut off from view (scroll estimation buffer)
+
+### Changed
+- Updated to abk 0.5.22
+- Updated trustee-tui to 0.1.13
+
 ## [0.1.30] - 2026-03-23
 
 ### Added

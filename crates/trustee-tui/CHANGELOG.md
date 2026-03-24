@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.13] - 2026-03-24
+
+### Added
+- Tab-based focus cycling across Output, Todo, and Input panels with bright border on focused panel
+- Visible block cursor in input box (SetCursorStyle::SteadyBlock) for clear editing position
+- Mouse click-to-focus support — click on any panel to switch focus via cached Rects
+- Mouse scroll wheel support — scroll the panel under the cursor (output/todo/input)
+- Panel Rect caching during render for mouse hit-testing
+
+### Fixed
+- Improved scroll behavior, input scrolling, and layout width calculations
+- Fixed last line of output/input cut off from view — added +1 buffer in `estimate_visual_lines()` to compensate for ratatui word-wrapping
+
+### Changed
+- Updated to abk 0.5.22
+
+## [0.1.12] - 2026-03-23
+
+### Added
+- Todo panel: vertical todo list (20% width, right side) showing LLM's task list from `todowrite` tool calls
+- Tool call descriptions in output: bash commands show `🔧 bash — <description>` instead of raw output
+- Context token count in API call info line (`Context=<n>` between call number and mode)
+
+### Changed
+- Updated to abk 0.5.20 (ToolCompleted events, description field on ToolExecutionResult)
+
 ## [0.1.11] - 2026-03-22
 
 ### Added
