@@ -678,25 +678,36 @@ impl App {
             .scroll((todo_clamped, 0));
         frame.render_widget(todo_paragraph, content_chunks[1]);
 
-        // Task 24: Render input box with cursor tracking
-        // Display input text with cursor position indicator
+        // Render input text with a visible block cursor (reversed colors).
         let char_count = self.input.chars().count();
-        let input_text = if self.cursor_position < char_count {
-            // Cursor is in the middle - show cursor position with underline
+        let cursor_style = if self.focus == FocusPanel::Input {
+            Style::default().fg(Color::Black).bg(Color::White)
+        } else {
+            Style::default().fg(Color::Black).bg(Color::DarkGray)
+        };
+        let input_spans = if self.cursor_position < char_count {
             let before: String = self.input.chars().take(self.cursor_position).collect();
             let at: String = self.input.chars().skip(self.cursor_position).take(1).collect();
             let after: String = self.input.chars().skip(self.cursor_position + 1).collect();
-            format!("{}{}{}", before, at, after)
+            vec![
+                Span::raw(before),
+                Span::styled(at, cursor_style),
+                Span::raw(after),
+            ]
         } else {
-            // Cursor is at the end
-            self.input.clone()
+            // Cursor at end — show a block space as the cursor
+            vec![
+                Span::raw(self.input.clone()),
+                Span::styled(" ", cursor_style),
+            ]
         };
+        let input_text = Text::from(Line::from(input_spans));
 
         // Show status in input title
         let input_title = if self.workflow_running {
-            format!("Input (Running...) - cursor: {}", self.cursor_position)
+            "Input (Running...)".to_string()
         } else {
-            format!("Input (Ready) - cursor: {}", self.cursor_position)
+            "Input (Ready)".to_string()
         };
 
         // Compute input scroll: auto-follow cursor, but allow manual override
@@ -724,7 +735,7 @@ impl App {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let input_paragraph = Paragraph::new(Text::from(input_text.as_str()))
+        let input_paragraph = Paragraph::new(input_text)
             .block(
                 Block::default()
                     .title(input_title)
