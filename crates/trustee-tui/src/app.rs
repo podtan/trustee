@@ -143,6 +143,7 @@ impl App {
                 "".to_string(),
                 "Keyboard shortcuts:".to_string(),
                 "  ↑/↓ or Page Up/Down - Scroll output".to_string(),
+                "  y - Copy visible text (Output/Todo)".to_string(),
                 "  Enter - Execute task".to_string(),
                 "  Esc or Ctrl+C - Exit".to_string(),
             ],
@@ -382,18 +383,21 @@ impl App {
                 self.auto_scroll = true;
                 self.scroll = u16::MAX;
             }
-            // Typing while output focused → switch to input and type there
-            KeyCode::Char(c) => {
-                self.focus = FocusPanel::Input;
-                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                self.input.insert(byte_pos, c);
-                self.cursor_position += 1;
+            KeyCode::Char('y') => {
+                self.copy_output_to_clipboard();
             }
             KeyCode::Enter => {
                 if !self.input.is_empty() && !self.workflow_running {
                     self.focus = FocusPanel::Input;
                     self.execute_command();
                 }
+            }
+            // Typing while output focused → switch to input and type there
+            KeyCode::Char(c) => {
+                self.focus = FocusPanel::Input;
+                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
+                self.input.insert(byte_pos, c);
+                self.cursor_position += 1;
             }
             _ => {}
         }
@@ -419,8 +423,10 @@ impl App {
             }
             KeyCode::Home => { self.todo_scroll = 0; }
             KeyCode::End => { self.todo_scroll = self.todo_max_scroll_cache; }
+            // y = copy todo text to clipboard (must be before the generic Char catch-all)
+            KeyCode::Char('y') => self.copy_to_clipboard(self.todo_lines.join("\n")),
             // Typing while todo focused → switch to input
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if c != 'y' => {
                 self.focus = FocusPanel::Input;
                 let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
                 self.input.insert(byte_pos, c);
@@ -497,6 +503,33 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Copy output panel text to the system clipboard.
+    fn copy_output_to_clipboard(&mut self) {
+        // Strip the \x01 reasoning marker from each line before copying
+        let clean: String = self.output_lines.iter()
+            .map(|l| l.strip_prefix('\x01').unwrap_or(l).to_owned())
+            .collect::<Vec<String>>()
+            .join("\n");
+        self.copy_to_clipboard(clean);
+    }
+
+    /// Copy a string to the system clipboard and show brief feedback.
+    fn copy_to_clipboard(&mut self, text: String) {
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => match clipboard.set_text(&text) {
+                Ok(()) => {
+                    self.output_lines.push("📋 Copied to clipboard".to_string());
+                }
+                Err(e) => {
+                    self.output_lines.push(format!("✗ Clipboard error: {}", e));
+                }
+            },
+            Err(e) => {
+                self.output_lines.push(format!("✗ Clipboard unavailable: {}", e));
+            }
+        }
     }
 
     /// Handle messages from async workflows

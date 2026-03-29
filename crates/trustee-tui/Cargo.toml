@@ -21,3 +21,5 @@ anyhow = "1.0"
 abk = { version = "0.5.23", features = ["cli", "orchestration", "agent", "observability", "extension"] }
 # Config parsing for log file path
 toml = "0.8"
+# Clipboard support
+arboard = "3"
