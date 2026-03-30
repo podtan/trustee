@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.33] - 2026-03-30
+
+### Added
+- TUI: Mouse passthrough toggle (`Ctrl+O`) — temporarily disables mouse capture to allow native terminal text selection and copy. Any keypress returns to normal TUI mode. Visual banner shown during passthrough.
+
+### Changed
+- Updated trustee-tui to 0.1.15
+
 ## [0.1.32] - 2026-03-24
 
 ### Changed

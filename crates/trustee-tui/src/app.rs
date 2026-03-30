@@ -127,6 +127,8 @@ pub struct App {
     output_rect: Rect,
     todo_rect: Rect,
     input_rect: Rect,
+    /// Whether mouse events are passed through to terminal (for native text selection)
+    mouse_passthrough: bool,
 }
 
 impl App {
@@ -145,6 +147,7 @@ impl App {
                 "  ↑/↓ or Page Up/Down - Scroll output".to_string(),
                 "  y - Copy visible text (Output/Todo)".to_string(),
                 "  Enter - Execute task".to_string(),
+                "  Ctrl+O - Toggle mouse passthrough (select text)".to_string(),
                 "  Esc or Ctrl+C - Exit".to_string(),
             ],
             scroll: 0,
@@ -168,6 +171,7 @@ impl App {
             output_rect: Rect::default(),
             todo_rect: Rect::default(),
             input_rect: Rect::default(),
+            mouse_passthrough: false,
         }
     }
 
@@ -253,6 +257,10 @@ impl App {
 
         // Handle mouse events: click to focus, scroll wheel to scroll panel
         if let Event::Mouse(mouse) = event {
+            // In passthrough mode, ignore all mouse events (terminal handles them)
+            if self.mouse_passthrough {
+                return Ok(());
+            }
             let col = mouse.column;
             let row = mouse.row;
             match mouse.kind {
@@ -301,6 +309,13 @@ impl App {
         }
 
         if let Event::Key(key) = event {
+            // Exit passthrough mode on any keypress — re-enable mouse capture
+            if self.mouse_passthrough {
+                execute!(std::io::stdout(), EnableMouseCapture).ok();
+                self.mouse_passthrough = false;
+                return Ok(());
+            }
+
             // Global keys — work regardless of focus
             match key.code {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -327,6 +342,12 @@ impl App {
                         FocusPanel::Todo   => FocusPanel::Output,
                         FocusPanel::Output => FocusPanel::Input,
                     };
+                    return Ok(());
+                }
+                // Ctrl+O: toggle mouse passthrough for native text selection
+                KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    execute!(std::io::stdout(), DisableMouseCapture).ok();
+                    self.mouse_passthrough = true;
                     return Ok(());
                 }
                 _ => {}
@@ -847,6 +868,21 @@ impl App {
             .wrap(Wrap { trim: false })
             .scroll((self.input_scroll, 0));
         frame.render_widget(input_paragraph, main_chunks[1]);
+
+        // Render mouse passthrough banner if active
+        if self.mouse_passthrough {
+            let banner = Paragraph::new(Span::styled(
+                "📋 Mouse passthrough — select text, press any key to return",
+                Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+            ));
+            let banner_area = Rect {
+                x: frame.area().x,
+                y: frame.area().y + frame.area().height.saturating_sub(1),
+                width: frame.area().width,
+                height: 1,
+            };
+            frame.render_widget(banner, banner_area);
+        }
     }
 }
 
