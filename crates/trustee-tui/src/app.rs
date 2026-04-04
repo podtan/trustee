@@ -20,6 +20,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use anyhow::Result;
 
 use crate::tui_sink::TuiSink;
@@ -50,6 +51,8 @@ pub enum TuiMessage {
     ResumeInfo(Option<ResumeInfo>),
     /// Todo list update from LLM todowrite tool
     TodoUpdate(String),
+    /// Workflow was cancelled by user (ESC pressed during execution)
+    WorkflowCancelled,
 }
 
 /// Build information for ABK (forward declaration)
@@ -129,6 +132,8 @@ pub struct App {
     input_rect: Rect,
     /// Whether mouse events are passed through to terminal (for native text selection)
     mouse_passthrough: bool,
+    /// Cancellation token for aborting the current workflow
+    cancel_token: CancellationToken,
 }
 
 impl App {
@@ -148,7 +153,8 @@ impl App {
                 "  y - Copy visible text (Output/Todo)".to_string(),
                 "  Enter - Execute task".to_string(),
                 "  Ctrl+O - Toggle mouse passthrough (select text)".to_string(),
-                "  Esc or Ctrl+C - Exit".to_string(),
+                "  Esc - Cancel workflow / Exit".to_string(),
+                "  Ctrl+C - Exit".to_string(),
             ],
             scroll: 0,
             auto_scroll: true,
@@ -172,6 +178,7 @@ impl App {
             todo_rect: Rect::default(),
             input_rect: Rect::default(),
             mouse_passthrough: false,
+            cancel_token: CancellationToken::new(),
         }
     }
 
@@ -323,7 +330,14 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Esc => {
-                    self.should_quit = true;
+                    if self.workflow_running {
+                        // Cancel the running workflow and return to idle.
+                        // self.cancel_token is replaced with a fresh token each
+                        // execute_command() so cancelling here is always safe.
+                        self.cancel_token.cancel();
+                    } else {
+                        self.should_quit = true;
+                    }
                     return Ok(());
                 }
                 // Tab cycles focus: Input → Output → Todo → Input
@@ -556,6 +570,11 @@ impl App {
     /// Handle messages from async workflows
     fn handle_workflow_message(&mut self, msg: TuiMessage) {
         match msg {
+            TuiMessage::WorkflowCancelled => {
+                self.output_lines.push("⏹ Workflow cancelled".to_string());
+                self.output_lines.push("".to_string());
+                self.workflow_running = false;
+            }
             TuiMessage::OutputLine(line) => {
                 self.output_lines.push(line);
             }
@@ -642,7 +661,27 @@ impl App {
         // Mark workflow as running, re-enable auto-scroll
         self.workflow_running = true;
         self.auto_scroll = true;
-        
+
+        // Create a fresh cancellation token for this workflow run.
+        // Each command gets its own token so ESC cancelling one workflow
+        // doesn't affect the next one (CancellationToken never un-cancel).
+        self.cancel_token = CancellationToken::new();
+        let child_token = self.cancel_token.clone();
+
+        // Create channel for incremental resume_info from ABK checkpoints.
+        // ABK sends resume_info after every iteration checkpoint so the TUI
+        // always has up-to-date session state — even if ESC cancels mid-workflow.
+        let (resume_tx, mut resume_rx) = mpsc::unbounded_channel();
+
+        // Spawn a forwarder task that relays incremental resume_info
+        // from ABK's checkpoint channel into the TUI message channel.
+        let resume_forward_tx = tx.clone();
+        tokio::spawn(async move {
+            while let Some(info) = resume_rx.recv().await {
+                resume_forward_tx.send(TuiMessage::ResumeInfo(info)).ok();
+            }
+        });
+
         // Spawn the workflow with TuiSink-based output
         tokio::spawn(async move {
             // Create TuiSink that bridges OutputEvent → TuiMessage channel.
@@ -654,18 +693,29 @@ impl App {
             // Output events flow through TuiSink directly to the TUI display.
             abk::observability::set_tui_mode(true);
 
-            let result: abk::cli::TaskResult = abk::cli::run_task_from_raw_config(
-                &config_toml,
-                secrets,
-                build_info,
-                &command,
-                Some(tui_sink),
-                resume_info,
-            ).await.unwrap_or_else(|e| abk::cli::TaskResult {
-                success: false,
-                error: Some(e.to_string()),
-                resume_info: None,
-            });
+            let result: abk::cli::TaskResult = tokio::select! {
+                _ = child_token.cancelled() => {
+                    // Workflow was cancelled by user
+                    abk::observability::set_tui_mode(false);
+                    let _ = tx.send(TuiMessage::WorkflowCancelled);
+                    return;
+                }
+                result = abk::cli::run_task_from_raw_config(
+                    &config_toml,
+                    secrets,
+                    build_info,
+                    &command,
+                    Some(tui_sink),
+                    resume_info,
+                    Some(resume_tx),
+                ) => {
+                    result.unwrap_or_else(|e| abk::cli::TaskResult {
+                        success: false,
+                        error: Some(e.to_string()),
+                        resume_info: None,
+                    })
+                }
+            };
 
             abk::observability::set_tui_mode(false);
 
@@ -677,7 +727,7 @@ impl App {
             };
             tx.send(msg).ok();
 
-            // Send resume info back for storage in App
+            // Send final resume info back for storage in App
             tx.send(TuiMessage::ResumeInfo(result.resume_info)).ok();
         });
         
@@ -826,7 +876,7 @@ impl App {
 
         // Show status in input title
         let input_title = if self.workflow_running {
-            "Input (Running...)".to_string()
+            "Input (Running... Esc to cancel)".to_string()
         } else {
             "Input (Ready)".to_string()
         };
