@@ -334,7 +334,10 @@ impl App {
                         // Cancel the running workflow and return to idle.
                         // self.cancel_token is replaced with a fresh token each
                         // execute_command() so cancelling here is always safe.
+                        // Immediately mark as not running so the UI is responsive
+                        // even if the ABK workflow hasn't yielded yet.
                         self.cancel_token.cancel();
+                        self.workflow_running = false;
                     } else {
                         self.should_quit = true;
                     }
@@ -693,42 +696,35 @@ impl App {
             // Output events flow through TuiSink directly to the TUI display.
             abk::observability::set_tui_mode(true);
 
-            let result: abk::cli::TaskResult = tokio::select! {
-                _ = child_token.cancelled() => {
-                    // Workflow was cancelled by user
-                    abk::observability::set_tui_mode(false);
-                    let _ = tx.send(TuiMessage::WorkflowCancelled);
-                    return;
-                }
-                result = abk::cli::run_task_from_raw_config(
-                    &config_toml,
-                    secrets,
-                    build_info,
-                    &command,
-                    Some(tui_sink),
-                    resume_info,
-                    Some(resume_tx),
-                ) => {
-                    result.unwrap_or_else(|e| abk::cli::TaskResult {
-                        success: false,
-                        error: Some(e.to_string()),
-                        resume_info: None,
-                    })
-                }
-            };
+            let result = abk::cli::run_task_from_raw_config(
+                &config_toml,
+                secrets,
+                build_info,
+                &command,
+                Some(tui_sink),
+                resume_info,
+                Some(resume_tx),
+                Some(child_token),
+            ).await;
 
             abk::observability::set_tui_mode(false);
 
+            let task_result = result.unwrap_or_else(|e| abk::cli::TaskResult {
+                success: false,
+                error: Some(e.to_string()),
+                resume_info: None,
+            });
+
             // Send completion message
-            let msg = if result.success {
+            let msg = if task_result.success {
                 TuiMessage::WorkflowCompleted
             } else {
-                TuiMessage::WorkflowError(result.error.unwrap_or_default())
+                TuiMessage::WorkflowError(task_result.error.unwrap_or_default())
             };
             tx.send(msg).ok();
 
             // Send final resume info back for storage in App
-            tx.send(TuiMessage::ResumeInfo(result.resume_info)).ok();
+            tx.send(TuiMessage::ResumeInfo(task_result.resume_info)).ok();
         });
         
         // Clear input buffer and reset cursor
