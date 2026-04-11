@@ -5,12 +5,17 @@
 //! ratatui display via `mpsc::UnboundedSender<TuiMessage>`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::mpsc;
 
 use abk::orchestration::output::{OutputEvent, OutputSink, SharedSink};
 
 use crate::app::TuiMessage;
+
+/// Stream state machine constants (3-state lock-free state machine).
+const STREAM_IDLE: u8 = 0;
+const STREAM_REASONING: u8 = 1;
+const STREAM_CONTENT: u8 = 2;
 
 /// A sink that forwards ABK `OutputEvent`s to the TUI event channel.
 ///
@@ -18,14 +23,16 @@ use crate::app::TuiMessage;
 /// ratatui render loop can display it in the output pane.
 pub struct TuiSink {
     tx: mpsc::UnboundedSender<TuiMessage>,
-    /// Whether we're inside a reasoning block (to start it on a new line).
-    in_reasoning: AtomicBool,
+    /// 3-state atomic: IDLE(0), REASONING(1), CONTENT(2).
+    /// Tracks whether we're inside a reasoning or content stream so
+    /// that transitions between states insert a blank separator line.
+    stream_state: AtomicU8,
 }
 
 impl TuiSink {
     /// Create a new `TuiSink` wrapping the given channel sender.
     pub fn new(tx: mpsc::UnboundedSender<TuiMessage>) -> Self {
-        Self { tx, in_reasoning: AtomicBool::new(false) }
+        Self { tx, stream_state: AtomicU8::new(STREAM_IDLE) }
     }
 
     /// Convenience helper: wrap in an `Arc` for use as `SharedSink`.
@@ -44,13 +51,12 @@ impl OutputSink for TuiSink {
                 if delta.is_empty() {
                     return;
                 }
-                // If transitioning from reasoning to content, start a new line.
-                if self.in_reasoning.swap(false, Ordering::Relaxed) {
+                let prev = self.stream_state.swap(STREAM_CONTENT, Ordering::Relaxed);
+                if prev != STREAM_CONTENT {
                     let _ = self.tx.send(TuiMessage::OutputLine(String::new()));
                 }
-                // Use a dedicated message type so handle_workflow_message can append
-                // rather than push a new line.
-                TuiMessage::StreamDelta(delta)
+                let _ = self.tx.send(TuiMessage::StreamDelta(delta));
+                return; // delta path: skip the IDLE reset below
             }
 
             // Full LLM responses — display with model info
@@ -141,16 +147,19 @@ impl OutputSink for TuiSink {
                 if delta.is_empty() {
                     return;
                 }
-                // First reasoning chunk → push a new line so it doesn't append
-                // to the previous OutputLine (e.g. API Call info).
-                if !self.in_reasoning.swap(true, Ordering::Relaxed) {
+                let prev = self.stream_state.swap(STREAM_REASONING, Ordering::Relaxed);
+                if prev != STREAM_REASONING {
                     let _ = self.tx.send(TuiMessage::OutputLine(String::new()));
                 }
-                TuiMessage::ReasoningDelta(delta)
+                let _ = self.tx.send(TuiMessage::ReasoningDelta(delta));
+                return; // delta path: skip the IDLE reset below
             }
         };
 
-        // Best-effort send — if the receiver is dropped the TUI has exited
+        // Non-delta path: reset state to IDLE before sending the message.
+        // This ensures the next delta chunk (reasoning or content) will
+        // correctly insert a blank separator line.
+        self.stream_state.store(STREAM_IDLE, Ordering::Relaxed);
         let _ = self.tx.send(msg);
     }
 }
