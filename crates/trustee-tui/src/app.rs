@@ -630,7 +630,12 @@ impl App {
                 self.resume_info = info;
                 self.workflow_busy = false; // NOW fully idle
                 if self.resume_info.is_some() {
-                    self.output_lines.push("🔄 Session preserved — next command will continue this session".to_string());
+                    if std::env::var("RUST_LOG")
+                        .map(|v| v.to_lowercase().contains("debug"))
+                        .unwrap_or(false)
+                    {
+                        self.output_lines.push("🔄 Session preserved — next command will continue this session".to_string());
+                    }
                 }
                 // Auto-execute pending command if any
                 if let Some(cmd) = self.pending_command.take() {
