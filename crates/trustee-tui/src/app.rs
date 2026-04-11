@@ -134,6 +134,11 @@ pub struct App {
     mouse_passthrough: bool,
     /// Cancellation token for aborting the current workflow
     cancel_token: CancellationToken,
+    /// True while spawned workflow task is still alive (even if UI shows idle).
+    /// Unlike workflow_running, stays true until ResumeInfo is received.
+    workflow_busy: bool,
+    /// Command buffered by user during cancellation wind-down.
+    pending_command: Option<String>,
 }
 
 impl App {
@@ -179,6 +184,8 @@ impl App {
             input_rect: Rect::default(),
             mouse_passthrough: false,
             cancel_token: CancellationToken::new(),
+            workflow_busy: false,
+            pending_command: None,
         }
     }
 
@@ -338,6 +345,8 @@ impl App {
                         // even if the ABK workflow hasn't yielded yet.
                         self.cancel_token.cancel();
                         self.workflow_running = false;
+                        self.output_lines.push("⏹ Cancelling...".to_string());
+                        // workflow_busy stays true — prevents execute_command while old task finishes
                     } else {
                         self.should_quit = true;
                     }
@@ -577,6 +586,7 @@ impl App {
                 self.output_lines.push("⏹ Workflow cancelled".to_string());
                 self.output_lines.push("".to_string());
                 self.workflow_running = false;
+                // Don't set workflow_busy = false — ResumeInfo still coming
             }
             TuiMessage::OutputLine(line) => {
                 self.output_lines.push(line);
@@ -618,8 +628,14 @@ impl App {
             }
             TuiMessage::ResumeInfo(info) => {
                 self.resume_info = info;
+                self.workflow_busy = false; // NOW fully idle
                 if self.resume_info.is_some() {
                     self.output_lines.push("🔄 Session preserved — next command will continue this session".to_string());
+                }
+                // Auto-execute pending command if any
+                if let Some(cmd) = self.pending_command.take() {
+                    self.input = cmd;
+                    self.execute_command();
                 }
             }
         }
@@ -636,9 +652,22 @@ impl App {
     fn execute_command(&mut self) {
         let command = self.input.trim().to_string();
         
-        // Clear welcome text and start fresh for this task
-        self.output_lines.clear();
-        self.scroll = 0;
+        // If previous workflow still winding down, buffer the command
+        if self.workflow_busy {
+            self.pending_command = Some(command);
+            self.output_lines.push("⏳ Previous workflow finishing — command queued".to_string());
+            self.input.clear();
+            self.cursor_position = 0;
+            return;
+        }
+
+        let is_continuation = self.resume_info.is_some();
+        
+        // Only clear output for truly new sessions (Bug #3 fix)
+        if !is_continuation {
+            self.output_lines.clear();
+            self.scroll = 0;
+        }
         
         // Add command to output
         self.output_lines.push(format!("> {}", command));
@@ -663,6 +692,7 @@ impl App {
         
         // Mark workflow as running, re-enable auto-scroll
         self.workflow_running = true;
+        self.workflow_busy = true;
         self.auto_scroll = true;
 
         // Create a fresh cancellation token for this workflow run.
