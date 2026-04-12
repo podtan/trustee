@@ -23,3 +23,6 @@ abk = { path = "../../../abk", features = ["cli", "orchestration", "agent", "obs
 toml = "0.8"
 # Clipboard support
 arboard = "3"
+# Unicode handling (for grapheme-level word-wrap counting)
+unicode-width = "0.2"
+unicode-segmentation = "1"

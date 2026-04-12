@@ -13,14 +13,15 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span, StyledGrapheme, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use unicode_segmentation::UnicodeSegmentation;
 use anyhow::Result;
 
 use crate::tui_sink::TuiSink;
@@ -67,19 +68,105 @@ fn char_to_byte_offset(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-/// Estimate the number of visual (wrapped) lines a Text will occupy.
-/// Adds +1 buffer because ratatui word-wraps which can produce more lines
-/// than a simple character-division estimate.
+/// NBSP constant — not treated as whitespace by ratatui's WordWrapper.
+const NBSP: &str = "\u{00a0}";
+/// Zero-width space — treated as whitespace by ratatui's WordWrapper.
+const ZWSP: &str = "\u{200b}";
+
+/// Count the number of visual (word-wrapped) lines a Text will occupy.
+/// Mirrors ratatui's word-wrap algorithm (Wrap { trim: false }) exactly
+/// by using grapheme-level iteration to match the Paragraph widget's rendering.
+///
+/// The old character-division estimate under-counted because ratatui breaks
+/// on word boundaries, which can produce significantly more visual lines than
+/// a naive ceil(chars / width) calculation.
 fn estimate_visual_lines(text: &Text, viewport_width: u16) -> usize {
-    let w = viewport_width.saturating_sub(2).max(1) as usize;
-    let raw: usize = text.lines.iter().map(|line| {
-        let chars: usize = line.spans.iter()
-            .map(|s| s.content.chars().count())
-            .sum();
-        if chars == 0 { 1 } else { (chars + w - 1) / w }
-    }).sum();
-    // Add 1 to compensate for word-wrap producing extra lines vs char-division
-    raw + 1
+    let w = viewport_width.saturating_sub(2).max(1) as u16;
+    if w == 0 {
+        return 1;
+    }
+    if text.lines.is_empty() {
+        return 1;
+    }
+
+    let mut count = 0usize;
+
+    for line in &text.lines {
+        let mut line_width: u16 = 0;
+        let mut word_width: u16 = 0;
+        let mut whitespace_width: u16 = 0;
+        let mut non_whitespace_previous = false;
+
+        for grapheme in line.styled_graphemes(Style::default()) {
+            // Inline ratatui's StyledGrapheme::is_whitespace (pub(crate)):
+            // ZWSP counts as whitespace; NBSP does NOT.
+            let is_whitespace =
+                grapheme.symbol == ZWSP
+                || (grapheme.symbol.chars().all(char::is_whitespace) && grapheme.symbol != NBSP);
+            let symbol_width = unicode_width::UnicodeWidthStr::width(grapheme.symbol) as u16;
+
+            // ignore symbols wider than line limit
+            if symbol_width > w {
+                continue;
+            }
+
+            let word_found = non_whitespace_previous && is_whitespace;
+            // current full word (including whitespace) would overflow (trim=false path)
+            let untrimmed_overflow = line_width == 0
+                && word_width + whitespace_width + symbol_width > w;
+
+            // append finished segment to current line
+            if word_found || untrimmed_overflow {
+                // not trimming, so always append whitespace
+                line_width += whitespace_width;
+                line_width += word_width;
+                whitespace_width = 0;
+                word_width = 0;
+            }
+
+            // pending line fills up limit
+            let line_full = line_width >= w;
+            // pending word would overflow line limit
+            let pending_word_overflow = symbol_width > 0
+                && line_width + whitespace_width + word_width >= w;
+
+            if line_full || pending_word_overflow {
+                count += 1;
+                line_width = 0;
+                whitespace_width = 0;
+
+                // don't count first whitespace toward next word
+                if is_whitespace {
+                    continue;
+                }
+            }
+
+            if is_whitespace {
+                whitespace_width += symbol_width;
+            } else {
+                word_width += symbol_width;
+            }
+
+            non_whitespace_previous = !is_whitespace;
+        }
+
+        // append remaining text parts
+        if line_width == 0 && word_width == 0 && whitespace_width > 0 {
+            count += 1;
+        }
+        line_width += whitespace_width;
+        line_width += word_width;
+        if line_width > 0 {
+            count += 1;
+        }
+
+        // ratatui always emits at least one line per input Line
+        if count == 0 {
+            count += 1;
+        }
+    }
+
+    count.max(1)
 }
 
 /// Main application state for the TUI
@@ -208,19 +295,24 @@ impl App {
             // Draw the UI
             terminal.draw(|f| self.render(f))?;
 
-            // Use tokio::select! to handle both terminal events and workflow messages
+            // Use tokio::select! to handle both terminal events and workflow messages.
+            // biased; prioritizes workflow messages over the 50ms event poll so
+            // rapid output bursts (e.g. streaming API tokens) update the panel
+            // without competing with idle poll timeouts.
             tokio::select! {
+                biased;
+
+                // Handle messages from async workflows (higher priority)
+                msg = self.workflow_rx.recv() => {
+                    if let Some(msg) = msg {
+                        self.handle_workflow_message(msg);
+                    }
+                }
+
                 // Handle terminal events (non-blocking poll)
                 result = Self::poll_event() => {
                     if let Some(event) = result? {
                         self.handle_event(event)?;
-                    }
-                }
-
-                // Handle messages from async workflows
-                msg = self.workflow_rx.recv() => {
-                    if let Some(msg) = msg {
-                        self.handle_workflow_message(msg);
                     }
                 }
             }
