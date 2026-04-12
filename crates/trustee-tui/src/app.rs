@@ -917,20 +917,24 @@ impl App {
             "Input (Ready)".to_string()
         };
 
-        // Compute input scroll: auto-follow cursor, but allow manual override
-        let input_inner_width = main_chunks[1].width.saturating_sub(2).max(1) as usize;
-        self.input_inner_width_cache = input_inner_width;
+        // Compute input scroll: use word-wrap aware line count (same as
+        // estimate_visual_lines) so scroll matches what Paragraph actually renders.
+        let input_inner_width = main_chunks[1].width.saturating_sub(2).max(1);
+        self.input_inner_width_cache = input_inner_width as usize;
         let input_inner_height = main_chunks[1].height.saturating_sub(2) as usize;
-        let input_char_count = self.input.chars().count();
-        let input_total_visual = if input_inner_width > 0 {
-            ((input_char_count + input_inner_width - 1) / input_inner_width).max(1)
-        } else { 1 };
+        let input_total_visual = estimate_visual_lines(&input_text, main_chunks[1].width);
         let input_max = input_total_visual.saturating_sub(input_inner_height) as u16;
         self.input_max_scroll_cache = input_max;
-        // Auto-scroll to keep cursor visible
-        let cursor_visual_line = if input_inner_width > 0 {
-            (self.cursor_position / input_inner_width) as u16
-        } else { 0 };
+        // Auto-scroll to keep cursor visible.
+        // Build text up to cursor position to find which visual line it lands on.
+        let cursor_text = if self.cursor_position < char_count {
+            let before: String = self.input.chars().take(self.cursor_position + 1).collect();
+            Text::from(Line::from(before))
+        } else {
+            input_text.clone()
+        };
+        let cursor_visual_line = estimate_visual_lines(&cursor_text, main_chunks[1].width)
+            .saturating_sub(1) as u16;
         if cursor_visual_line < self.input_scroll {
             self.input_scroll = cursor_visual_line;
         } else if cursor_visual_line >= self.input_scroll + input_inner_height as u16 {
