@@ -13,15 +13,14 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, StyledGrapheme, Text},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use unicode_segmentation::UnicodeSegmentation;
 use anyhow::Result;
 
 use crate::tui_sink::TuiSink;
@@ -68,105 +67,19 @@ fn char_to_byte_offset(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-/// NBSP constant — not treated as whitespace by ratatui's WordWrapper.
-const NBSP: &str = "\u{00a0}";
-/// Zero-width space — treated as whitespace by ratatui's WordWrapper.
-const ZWSP: &str = "\u{200b}";
-
 /// Count the number of visual (word-wrapped) lines a Text will occupy.
-/// Mirrors ratatui's word-wrap algorithm (Wrap { trim: false }) exactly
-/// by using grapheme-level iteration to match the Paragraph widget's rendering.
-///
-/// The old character-division estimate under-counted because ratatui breaks
-/// on word boundaries, which can produce significantly more visual lines than
-/// a naive ceil(chars / width) calculation.
+/// Uses ratatui's own Paragraph.line_count() which runs the exact same
+/// WordWrapper algorithm that the Paragraph widget uses for rendering,
+/// so the count is guaranteed to match.
 fn estimate_visual_lines(text: &Text, viewport_width: u16) -> usize {
-    let w = viewport_width.saturating_sub(2).max(1) as u16;
-    if w == 0 {
-        return 1;
-    }
+    let w = viewport_width.saturating_sub(2).max(1);
     if text.lines.is_empty() {
         return 1;
     }
-
-    let mut count = 0usize;
-
-    for line in &text.lines {
-        let mut line_width: u16 = 0;
-        let mut word_width: u16 = 0;
-        let mut whitespace_width: u16 = 0;
-        let mut non_whitespace_previous = false;
-
-        for grapheme in line.styled_graphemes(Style::default()) {
-            // Inline ratatui's StyledGrapheme::is_whitespace (pub(crate)):
-            // ZWSP counts as whitespace; NBSP does NOT.
-            let is_whitespace =
-                grapheme.symbol == ZWSP
-                || (grapheme.symbol.chars().all(char::is_whitespace) && grapheme.symbol != NBSP);
-            let symbol_width = unicode_width::UnicodeWidthStr::width(grapheme.symbol) as u16;
-
-            // ignore symbols wider than line limit
-            if symbol_width > w {
-                continue;
-            }
-
-            let word_found = non_whitespace_previous && is_whitespace;
-            // current full word (including whitespace) would overflow (trim=false path)
-            let untrimmed_overflow = line_width == 0
-                && word_width + whitespace_width + symbol_width > w;
-
-            // append finished segment to current line
-            if word_found || untrimmed_overflow {
-                // not trimming, so always append whitespace
-                line_width += whitespace_width;
-                line_width += word_width;
-                whitespace_width = 0;
-                word_width = 0;
-            }
-
-            // pending line fills up limit
-            let line_full = line_width >= w;
-            // pending word would overflow line limit
-            let pending_word_overflow = symbol_width > 0
-                && line_width + whitespace_width + word_width >= w;
-
-            if line_full || pending_word_overflow {
-                count += 1;
-                line_width = 0;
-                whitespace_width = 0;
-
-                // don't count first whitespace toward next word
-                if is_whitespace {
-                    continue;
-                }
-            }
-
-            if is_whitespace {
-                whitespace_width += symbol_width;
-            } else {
-                word_width += symbol_width;
-            }
-
-            non_whitespace_previous = !is_whitespace;
-        }
-
-        // append remaining text parts
-        if line_width == 0 && word_width == 0 && whitespace_width > 0 {
-            count += 1;
-        }
-        line_width += whitespace_width;
-        line_width += word_width;
-        if line_width > 0 {
-            count += 1;
-        }
-
-        // ratatui always emits at least one line per input Line
-        if count == 0 {
-            count += 1;
-        }
-    }
-
-    count.max(1)
+    Paragraph::new(text.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(w)
+        .max(1)
 }
 
 /// Main application state for the TUI
