@@ -455,7 +455,14 @@ impl App {
             KeyCode::Char('y') => {
                 self.copy_output_to_clipboard();
             }
-            // Typing while todo focused → switch to input (blocked during Running/Cancelling)
+            // Enter while output focused → switch to input and execute
+            KeyCode::Enter => {
+                if !self.input.is_empty() && self.workflow_state == WorkflowState::Idle {
+                    self.focus = FocusPanel::Input;
+                    self.execute_command();
+                }
+            }
+            // Typing while output focused → switch to input (blocked during Running/Cancelling)
             KeyCode::Char(c) if c != 'y' => {
                 if self.workflow_state != WorkflowState::Idle {
                     return Ok(());
@@ -661,8 +668,13 @@ impl App {
             }
             TuiMessage::ResumeInfo(info) => {
                 self.resume_info = info;
-                // Cancelling → Idle (or Running → Idle if normal completion)
-                self.workflow_state = WorkflowState::Idle;
+                // Only transition Cancelling → Idle (old task fully wound down).
+                // During Running, ResumeInfo is just a checkpoint snapshot —
+                // don't touch the state. ABK sends ResumeInfo after session init
+                // and after each iteration checkpoint, which must not reset the UI.
+                if self.workflow_state == WorkflowState::Cancelling {
+                    self.workflow_state = WorkflowState::Idle;
+                }
                 if self.resume_info.is_some() {
                     if std::env::var("RUST_LOG")
                         .map(|v| v.to_lowercase().contains("debug"))
