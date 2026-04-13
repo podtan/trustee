@@ -34,6 +34,28 @@ pub enum FocusPanel {
     Input,
 }
 
+/// Workflow lifecycle state machine.
+///
+/// Replaces the previous two-flag approach (`workflow_running` + `workflow_busy`)
+/// with a proper 3-state enum that prevents the ESC-cancel race condition where
+/// the input box accepted commands during the cancellation wind-down window.
+///
+/// | State      | Input Title                          | Typing | Enter |
+/// |------------|--------------------------------------|--------|-------|
+/// | `Idle`     | "Input (Ready)"                     | ✅     | ✅    |
+/// | `Running`  | "Input (Running... Esc to cancel)"  | ✅     | ❌    |
+/// | `Cancelling`| "Input (Cancelling...)"            | ❌     | ❌    |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowState {
+    /// No workflow is active — input accepts commands.
+    Idle,
+    /// A workflow is running — input is read-only, ESC will cancel.
+    Running,
+    /// ESC was pressed, cancel token fired, waiting for old task to finish.
+    /// Input is fully locked (no typing, no Enter) until ResumeInfo arrives.
+    Cancelling,
+}
+
 /// Messages that can be sent to the TUI from async workflows
 #[derive(Debug, Clone)]
 pub enum TuiMessage {
@@ -112,8 +134,8 @@ pub struct App {
     pub workflow_rx: mpsc::UnboundedReceiver<TuiMessage>,
     /// Sender for messages from async workflows (clone and pass to workflow runners)
     pub workflow_tx: mpsc::UnboundedSender<TuiMessage>,
-    /// Whether a workflow is currently running
-    pub workflow_running: bool,
+    /// Current workflow lifecycle state (replaces workflow_running + workflow_busy).
+    pub workflow_state: WorkflowState,
     /// Configuration TOML for ABK workflows (Task 50)
     pub config_toml: Option<String>,
     /// Secrets for ABK workflows (Task 50)
@@ -134,9 +156,6 @@ pub struct App {
     mouse_passthrough: bool,
     /// Cancellation token for aborting the current workflow
     cancel_token: CancellationToken,
-    /// True while spawned workflow task is still alive (even if UI shows idle).
-    /// Unlike workflow_running, stays true until ResumeInfo is received.
-    workflow_busy: bool,
     /// Command buffered by user during cancellation wind-down.
     pending_command: Option<String>,
 }
@@ -172,7 +191,7 @@ impl App {
             should_quit: false,
             workflow_rx,
             workflow_tx,
-            workflow_running: false,
+            workflow_state: WorkflowState::Idle,
             config_toml: None,
             secrets: None,
             build_info: None,
@@ -184,7 +203,6 @@ impl App {
             input_rect: Rect::default(),
             mouse_passthrough: false,
             cancel_token: CancellationToken::new(),
-            workflow_busy: false,
             pending_command: None,
         }
     }
@@ -342,19 +360,18 @@ impl App {
                     return Ok(());
                 }
                 KeyCode::Esc => {
-                    if self.workflow_running {
-                        // Cancel the running workflow and return to idle.
-                        // self.cancel_token is replaced with a fresh token each
-                        // execute_command() so cancelling here is always safe.
-                        // Immediately mark as not running so the UI is responsive
-                        // even if the ABK workflow hasn't yielded yet.
+                    if self.workflow_state == WorkflowState::Running {
+                        // Transition Running → Cancelling.
+                        // The cancel token signals the spawned workflow task to stop,
+                        // but it may still be inside an API call or tool execution.
+                        // Input is now fully locked until ResumeInfo arrives.
                         self.cancel_token.cancel();
-                        self.workflow_running = false;
+                        self.workflow_state = WorkflowState::Cancelling;
                         self.output_lines.push("⏹ Cancelling...".to_string());
-                        // workflow_busy stays true — prevents execute_command while old task finishes
-                    } else {
+                    } else if self.workflow_state == WorkflowState::Idle {
                         self.should_quit = true;
                     }
+                    // Cancelling + ESC: ignore (already cancelling, don't quit)
                     return Ok(());
                 }
                 // Tab cycles focus: Input → Output → Todo → Input
@@ -438,14 +455,11 @@ impl App {
             KeyCode::Char('y') => {
                 self.copy_output_to_clipboard();
             }
-            KeyCode::Enter => {
-                if !self.input.is_empty() && !self.workflow_running {
-                    self.focus = FocusPanel::Input;
-                    self.execute_command();
+            // Typing while todo focused → switch to input (blocked during Running/Cancelling)
+            KeyCode::Char(c) if c != 'y' => {
+                if self.workflow_state != WorkflowState::Idle {
+                    return Ok(());
                 }
-            }
-            // Typing while output focused → switch to input and type there
-            KeyCode::Char(c) => {
                 self.focus = FocusPanel::Input;
                 let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
                 self.input.insert(byte_pos, c);
@@ -477,15 +491,18 @@ impl App {
             KeyCode::End => { self.todo_scroll = self.todo_max_scroll_cache; }
             // y = copy todo text to clipboard (must be before the generic Char catch-all)
             KeyCode::Char('y') => self.copy_to_clipboard(self.todo_lines.join("\n")),
-            // Typing while todo focused → switch to input
+            // Typing while todo focused → switch to input (blocked during Running/Cancelling)
             KeyCode::Char(c) if c != 'y' => {
+                if self.workflow_state != WorkflowState::Idle {
+                    return Ok(());
+                }
                 self.focus = FocusPanel::Input;
                 let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
                 self.input.insert(byte_pos, c);
                 self.cursor_position += 1;
             }
             KeyCode::Enter => {
-                if !self.input.is_empty() && !self.workflow_running {
+                if !self.input.is_empty() && self.workflow_state == WorkflowState::Idle {
                     self.focus = FocusPanel::Input;
                     self.execute_command();
                 }
@@ -499,7 +516,7 @@ impl App {
     fn handle_input_keys(&mut self, code: KeyCode) -> Result<()> {
         match code {
             KeyCode::Enter => {
-                if !self.input.is_empty() && !self.workflow_running {
+                if !self.input.is_empty() && self.workflow_state == WorkflowState::Idle {
                     self.execute_command();
                 }
             }
@@ -548,6 +565,10 @@ impl App {
                 if self.cursor_position < char_count { self.cursor_position += 1; }
             }
             KeyCode::Char(c) => {
+                // Block typing during Running and Cancelling states.
+                if self.workflow_state != WorkflowState::Idle {
+                    return Ok(());
+                }
                 let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
                 self.input.insert(byte_pos, c);
                 self.cursor_position += 1;
@@ -590,8 +611,8 @@ impl App {
             TuiMessage::WorkflowCancelled => {
                 self.output_lines.push("⏹ Workflow cancelled".to_string());
                 self.output_lines.push("".to_string());
-                self.workflow_running = false;
-                // Don't set workflow_busy = false — ResumeInfo still coming
+                self.workflow_state = WorkflowState::Cancelling;
+                // Stay in Cancelling — ResumeInfo will transition to Idle
             }
             TuiMessage::OutputLine(line) => {
                 self.output_lines.push(line);
@@ -621,19 +642,27 @@ impl App {
             TuiMessage::WorkflowCompleted => {
                 self.output_lines.push("✓ Workflow completed".to_string());
                 self.output_lines.push("".to_string());
-                self.workflow_running = false;
+                // Transition to Cancelling while waiting for ResumeInfo.
+                // This blocks input until the old task is fully wound down.
+                if self.workflow_state == WorkflowState::Running {
+                    self.workflow_state = WorkflowState::Cancelling;
+                }
             }
             TuiMessage::WorkflowError(err) => {
                 self.output_lines.push(format!("✗ Error: {}", err));
                 self.output_lines.push("".to_string());
-                self.workflow_running = false;
+                // Same as WorkflowCompleted: transition to Cancelling
+                if self.workflow_state == WorkflowState::Running {
+                    self.workflow_state = WorkflowState::Cancelling;
+                }
             }
             TuiMessage::TodoUpdate(content) => {
                 self.todo_lines = content.lines().map(|l| l.to_string()).collect();
             }
             TuiMessage::ResumeInfo(info) => {
                 self.resume_info = info;
-                self.workflow_busy = false; // NOW fully idle
+                // Cancelling → Idle (or Running → Idle if normal completion)
+                self.workflow_state = WorkflowState::Idle;
                 if self.resume_info.is_some() {
                     if std::env::var("RUST_LOG")
                         .map(|v| v.to_lowercase().contains("debug"))
@@ -663,7 +692,7 @@ impl App {
         let command = self.input.trim().to_string();
         
         // If previous workflow still winding down, buffer the command
-        if self.workflow_busy {
+        if self.workflow_state != WorkflowState::Idle {
             self.pending_command = Some(command);
             self.output_lines.push("⏳ Previous workflow finishing — command queued".to_string());
             self.input.clear();
@@ -701,8 +730,7 @@ impl App {
         let resume_info = self.resume_info.take();
         
         // Mark workflow as running, re-enable auto-scroll
-        self.workflow_running = true;
-        self.workflow_busy = true;
+        self.workflow_state = WorkflowState::Running;
         self.auto_scroll = true;
 
         // Create a fresh cancellation token for this workflow run.
@@ -910,11 +938,11 @@ impl App {
         };
         let input_text = Text::from(Line::from(input_spans));
 
-        // Show status in input title
-        let input_title = if self.workflow_running {
-            "Input (Running... Esc to cancel)".to_string()
-        } else {
-            "Input (Ready)".to_string()
+        // Show status in input title based on workflow state
+        let input_title = match self.workflow_state {
+            WorkflowState::Running => "Input (Running... Esc to cancel)".to_string(),
+            WorkflowState::Cancelling => "Input (Cancelling...)".to_string(),
+            WorkflowState::Idle => "Input (Ready)".to_string(),
         };
 
         // Compute input scroll: use word-wrap aware line count (same as
