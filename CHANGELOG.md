@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.34] - 2026-04-15
+
+### Changed
+- Switched abk and umf dependencies from local paths to published crates (abk 0.5.26, umf 0.2.5)
+- Updated trustee-tui to 0.1.16
+
 ## [0.1.33] - 2026-03-30
 
 ### Added
