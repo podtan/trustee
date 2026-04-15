@@ -21,7 +21,7 @@ tui = ["dep:ratatui", "dep:crossterm", "dep:tokio-util", "dep:trustee-tui"]
 
 [dependencies]
 # ABK with registry-mcp for MCP tool aggregation
-abk = { version = "0.5.26", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "extension", "registry-mcp"] }
+abk = { path = "../abk", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "extension", "registry-mcp"] }
 # UMF with MCP support
 umf = { version = "0.2.5", features = ["streaming", "mcp"] }
 # Layered configuration merging (defaults + user overrides)

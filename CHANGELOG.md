@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.35] - 2026-04-15
+
+### Changed
+- Updated abk dependency to 0.5.27
+
+### Fixed
+- Fixed infinite retry cascade on slow LLM providers — streaming workflow now has a retry counter (max 3) with exponential backoff instead of infinite retries
+- Increased connection pool idle timeout from 60s to 600s to prevent slow streaming connections from being killed mid-response
+- `pool_idle_timeout` is now configurable via `LLM_POOL_IDLE_SECONDS` env var
+
 ## [0.1.34] - 2026-04-15
 
 ### Changed
