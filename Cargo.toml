@@ -1,6 +1,6 @@
 [package]
 name = "trustee"
-version = "0.1.34"
+version = "0.1.36"
 edition = "2021"
 description = "A general-purpose agent that can morph into different specialized agents using WASM lifecycle plugins"
 license = "MIT OR Apache-2.0"
@@ -21,9 +21,9 @@ tui = ["dep:ratatui", "dep:crossterm", "dep:tokio-util", "dep:trustee-tui"]
 
 [dependencies]
 # ABK with registry-mcp for MCP tool aggregation
-abk = { version = "0.5.27", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "extension", "registry-mcp"] }
+abk = { version = "0.5.28", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "extension", "registry-mcp"] }
 # UMF with MCP support
-umf = { version = "0.2.5", features = ["streaming", "mcp"] }
+umf = { version = "0.2.6", features = ["streaming", "mcp"] }
 # Layered configuration merging (defaults + user overrides)
 figment = { version = "0.10", features = ["toml"] }
 toml = "0.8"
@@ -35,7 +35,7 @@ tokio = { version = "1.0", features = ["full"] }
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
 tokio-util = { version = "0.7", optional = true }
-trustee-tui = { version = "0.1.16", path = "crates/trustee-tui", optional = true }
+trustee-tui = { version = "0.1.17", path = "crates/trustee-tui", optional = true }
 
 [workspace]
 members = ["crates/trustee-tui"]

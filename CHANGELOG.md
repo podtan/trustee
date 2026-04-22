@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.36] - 2026-04-22
+
+### Changed
+- Updated `abk` dependency to 0.5.28
+- Updated `umf` dependency to 0.2.6
+
 ## [0.1.35] - 2026-04-15
 
 ### Changed
