@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.37] - 2026-04-29
+
+### Changed
+- Updated `abk` dependency to 0.5.33
+- Updated `trustee-tui` dependency to 0.1.18
+
 ## [0.1.36] - 2026-04-22
 
 ### Changed
