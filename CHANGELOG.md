@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.39] - 2026-04-29
+
+### Changed
+- **deps: bump abk to 0.5.34, trustee-tui to 0.1.19** — picks up cats 0.1.20 with
+  clearer EOF truncation errors, multiedit atomicity messages, and compact log
+  truncation markers.
+
 ## [0.1.38] - 2026-04-29
 
 ### Fixed
