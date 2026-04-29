@@ -213,10 +213,17 @@ async fn load_remote_config(
 
 /// Merge embedded defaults with user overrides using figment.
 /// Returns the merged TOML string ready for ABK.
+/// The binary version (from Cargo.toml at compile time) is always injected as the
+/// highest-priority layer so [agent].version never needs to be set manually.
 fn merge_config(user_config_toml: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let version_override = format!(
+        "[agent]\nversion = \"{v}\"\n\n[cli]\nversion = \"{v}\"\n",
+        v = env!("CARGO_PKG_VERSION")
+    );
     let merged: toml::Table = Figment::new()
         .merge(Toml::string(DEFAULT_CONFIG))
         .merge(Toml::string(user_config_toml))
+        .merge(Toml::string(&version_override))
         .extract()
         .map_err(|e| format!("Failed to merge configuration: {}", e))?;
 
