@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.38] - 2026-04-29
+
+### Fixed
+- **config: hardcoded version in trustee_default.toml** — removed `[cli].version` from the
+  default config file; both `[agent].version` and `[cli].version` are now injected at runtime
+  from `CARGO_PKG_VERSION` so they always match the binary without manual updates.
+
 ## [0.1.37] - 2026-04-29
 
 ### Changed
