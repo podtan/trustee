@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.40] - 2026-05-02
+
+### Changed
+- **deps: bump abk to 0.5.35, trustee-tui to 0.1.20** — picks up cats 0.1.21:
+  `edit` multiple-matches error now shows exact line numbers and surrounding
+  context, preventing the loop of retries and bash-append duplicates.
+
 ## [0.1.39] - 2026-04-29
 
 ### Changed
