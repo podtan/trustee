@@ -2,11 +2,7 @@
 name = "trustee-tui"
 version = "0.1.22"
 edition = "2021"
-description = "TUI interface for Trustee agent"
-license = "MIT OR Apache-2.0"
-authors = ["Podtan Team"]
-keywords = ["tui", "terminal", "agent"]
-categories = ["command-line-utilities"]
+publish = false
 
 [dependencies]
 # TUI framework

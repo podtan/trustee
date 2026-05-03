@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.43] - 2026-05-03
+
+### Changed
+- **chore: trustee-tui is now a private workspace crate** — removed from crates.io
+  (`publish = false`). It has no standalone value outside trustee and is versioned
+  together with the main binary. No functional changes.
+
+### Fixed
+- **fix(tui): duplicate spinner lines for parallel same-name tool calls** — switched
+  `pending_tool_lines` from `HashMap` to `Vec<(name, idx, hint)>` so parallel calls
+  (e.g. 3× `nghr_get_task`) each get their own spinner line instead of overwriting
+  each other's index, which left orphan spinners that never cleared.
+- **fix(tui): `✓ read <file>` now shows the actual file path** — carried the hint
+  captured at `ToolPending` time (from `extract_hint` in abk) forward through the
+  Vec entry so `ToolDone` can reuse it without re-parsing content.
+
 ## [0.1.41] - 2026-05-03
 
 ### Changed
