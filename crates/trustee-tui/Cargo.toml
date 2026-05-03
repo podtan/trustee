@@ -1,6 +1,6 @@
 [package]
 name = "trustee-tui"
-version = "0.1.20"
+version = "0.1.21"
 edition = "2021"
 description = "TUI interface for Trustee agent"
 license = "MIT OR Apache-2.0"
@@ -18,7 +18,7 @@ tokio-util = "0.7"
 # Error handling
 anyhow = "1.0"
 # ABK for workflow execution
-abk = { version = "0.5.35", features = ["cli", "orchestration", "agent", "observability", "extension"] }
+abk = { version = "0.5.36", features = ["cli", "orchestration", "agent", "observability", "extension"] }
 # Config parsing for log file path
 toml = "0.8"
 # Clipboard support
@@ -26,3 +26,4 @@ arboard = "3"
 # Unicode handling (for grapheme-level word-wrap counting)
 unicode-width = "0.2"
 unicode-segmentation = "1"
+serde_json = "1.0"

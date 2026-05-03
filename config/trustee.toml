@@ -21,6 +21,13 @@ transport = "http"
 auto_init = true
 
 
+[[mcp.servers]]
+name = "trp"
+url = "http://127.0.0.1:8010"
+transport = "http"
+auto_init = true
+
+
 # Uncomment below to override checkpoint storage to DocumentDB:
 # [checkpointing.storage_backend]
 # backend_type = "documentdb"

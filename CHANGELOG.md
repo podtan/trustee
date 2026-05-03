@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.41] - 2026-05-03
+
+### Changed
+- **deps: bump abk to 0.5.36, trustee-tui to 0.1.21** — animated spinner tool
+  display: each native tool call shows a live braille spinner that resolves to
+  ✓/✗ in-place; file path shown for read/edit/write tools, command/description
+  for bash. The old `🔧 Executing N tools: [...]` header is removed.
+
 ## [0.1.40] - 2026-05-02
 
 ### Changed

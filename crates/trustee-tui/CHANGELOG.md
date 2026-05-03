@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.21] - 2026-05-03
+
+### Changed
+- **Spinner tool display** — native tool calls (read/edit/bash/…) no longer show
+  a batch `🔧 Executing N tools: [...]` header. Instead each tool gets its own
+  animated braille spinner line that updates in-place to ✓/✗ when done.
+- **Useful context on every tool line** — read/edit/write/multiedit show the
+  relevant file path; bash shows the description or truncated command.
+- **deps: bump abk to 0.5.36** — picks up the `ToolsExecuting.hints` field.
+
 ## [0.1.20] - 2026-05-02
 
 ### Changed

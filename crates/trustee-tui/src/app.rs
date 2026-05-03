@@ -75,6 +75,10 @@ pub enum TuiMessage {
     TodoUpdate(String),
     /// Workflow was cancelled by user (ESC pressed during execution)
     WorkflowCancelled,
+    /// A native tool call has started (shows spinner)
+    ToolPending { tool_name: String, hint: Option<String> },
+    /// A native tool call has finished (replaces spinner with ✓/✗)
+    ToolDone { tool_name: String, success: bool, hint: Option<String> },
 }
 
 /// Build information for ABK (forward declaration)
@@ -158,6 +162,11 @@ pub struct App {
     cancel_token: CancellationToken,
     /// Command buffered by user during cancellation wind-down.
     pending_command: Option<String>,
+    /// Maps tool_name → output_lines index for in-flight spinner replacement.
+    /// Only tracks native (CATS) tools, not MCP tools.
+    pending_tool_lines: std::collections::HashMap<String, usize>,
+    /// Spinner frame counter — advances on each render tick.
+    spinner_tick: u8,
 }
 
 impl App {
@@ -204,6 +213,8 @@ impl App {
             mouse_passthrough: false,
             cancel_token: CancellationToken::new(),
             pending_command: None,
+            pending_tool_lines: std::collections::HashMap::new(),
+            spinner_tick: 0,
         }
     }
 
@@ -223,6 +234,20 @@ impl App {
 
         // Main async loop with tokio::select!
         loop {
+            // Advance spinner tick and refresh any in-flight spinner lines.
+            // The 8-frame braille spinner cycles at ~50ms per frame (poll timeout).
+            const FRAMES: [char; 8] = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧'];
+            self.spinner_tick = self.spinner_tick.wrapping_add(1);
+            let frame = FRAMES[(self.spinner_tick as usize) % FRAMES.len()];
+            for (name, &idx) in &self.pending_tool_lines {
+                if idx < self.output_lines.len() {
+                    // Replace only the spinner char (first char), keep the rest.
+                    let rest: String = self.output_lines[idx].chars().skip(1).collect();
+                    self.output_lines[idx] = format!("{}{}", frame, rest);
+                }
+                let _ = name; // suppress unused warning
+            }
+
             // Draw the UI
             terminal.draw(|f| self.render(f))?;
 
@@ -665,6 +690,32 @@ impl App {
             }
             TuiMessage::TodoUpdate(content) => {
                 self.todo_lines = content.lines().map(|l| l.to_string()).collect();
+            }
+            TuiMessage::ToolPending { tool_name, hint } => {
+                let label = match &hint {
+                    Some(h) => format!("⠋ {} {}", tool_name, h),
+                    None    => format!("⠋ {}", tool_name),
+                };
+                let idx = self.output_lines.len();
+                self.output_lines.push(label);
+                // Last writer wins — if the same tool fires twice, keep latest index.
+                self.pending_tool_lines.insert(tool_name, idx);
+            }
+            TuiMessage::ToolDone { tool_name, success, hint } => {
+                let status = if success { "✓" } else { "✗" };
+                let label = match &hint {
+                    Some(h) => format!("{} {} {}", status, tool_name, h),
+                    None    => format!("{} {}", status, tool_name),
+                };
+                if let Some(&idx) = self.pending_tool_lines.get(&tool_name) {
+                    if idx < self.output_lines.len() {
+                        self.output_lines[idx] = label;
+                        self.pending_tool_lines.remove(&tool_name);
+                        return; // skip the auto-scroll push below
+                    }
+                }
+                // Fallback: no pending line found, just append.
+                self.output_lines.push(label);
             }
             TuiMessage::ResumeInfo(info) => {
                 self.resume_info = info;

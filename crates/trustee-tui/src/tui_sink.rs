@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::mpsc;
 
 use abk::orchestration::output::{OutputEvent, OutputSink, SharedSink};
+use serde_json;
 
 use crate::app::TuiMessage;
 
@@ -104,12 +105,14 @@ impl OutputSink for TuiSink {
             }
 
             // Tool execution events
-            OutputEvent::ToolsExecuting { tool_names } => {
-                TuiMessage::OutputLine(format!(
-                    "🔧 Executing {} tools: [{}]",
-                    tool_names.len(),
-                    tool_names.join(", ")
-                ))
+            // ToolsExecuting fires BEFORE execution — emit one ToolPending per
+            // native tool (spinner line). Suppress the old batch-header line.
+            OutputEvent::ToolsExecuting { tool_names, hints } => {
+                for (name, hint) in tool_names.into_iter().zip(hints.into_iter()) {
+                    let _ = self.tx.send(TuiMessage::ToolPending { tool_name: name, hint });
+                }
+                self.stream_state.store(STREAM_IDLE, Ordering::Relaxed);
+                return;
             }
 
             OutputEvent::ToolCompleted {
@@ -122,16 +125,12 @@ impl OutputSink for TuiSink {
                 if tool_name == "todowrite" && success {
                     let _ = self.tx.send(TuiMessage::TodoUpdate(content.clone()));
                 }
-                // Show compact one-liner with description when available
-                match description {
-                    Some(desc) => {
-                        TuiMessage::OutputLine(format!("🔧 {} — {}", tool_name, desc))
-                    }
-                    None => {
-                        let status = if success { "✓" } else { "✗" };
-                        TuiMessage::OutputLine(format!("{} {}", status, tool_name))
-                    }
-                }
+                // Derive the best hint for the done line:
+                // prefer explicit description (bash), otherwise extract path from content header.
+                let hint = description.or_else(|| extract_path_from_content(&tool_name, &content));
+                let _ = self.tx.send(TuiMessage::ToolDone { tool_name, success, hint });
+                self.stream_state.store(STREAM_IDLE, Ordering::Relaxed);
+                return;
             }
 
             // Error events
@@ -163,5 +162,41 @@ impl OutputSink for TuiSink {
         // correctly insert a blank separator line.
         self.stream_state.store(STREAM_IDLE, Ordering::Relaxed);
         let _ = self.tx.send(msg);
+    }
+}
+
+/// Extract a short path hint from a tool's result content for tools that don't
+/// have a `description` param (read, edit, write, multiedit).
+///
+/// cats result headers look like:
+///   `<file>` block with a `file_path:` key in the compact log JSON, or
+///   the content starts with the path on line 1.
+///
+/// We look for the `file_path` key in the first 200 bytes of a JSON object,
+/// or fall back to the first non-empty line for file tools.
+fn extract_path_from_content(tool: &str, content: &str) -> Option<String> {
+    match tool {
+        "read" | "edit" | "write" | "multiedit" => {
+            // cats compact log: {"file_path":"/foo/bar.rs",...}
+            let snippet = &content[..content.len().min(300)];
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(snippet) {
+                if let Some(p) = v.get("file_path").and_then(|p| p.as_str()) {
+                    return Some(short_path(p));
+                }
+            }
+            // Fallback: first non-empty line often contains the path
+            content.lines().find(|l| !l.trim().is_empty()).map(|l| short_path(l.trim()))
+        }
+        _ => None,
+    }
+}
+
+/// Return the last two path components of a file path string.
+fn short_path(p: &str) -> String {
+    let parts: Vec<&str> = p.trim_end_matches('/').rsplitn(3, '/').collect();
+    match parts.len() {
+        1 => parts[0].to_string(),
+        2 => format!("{}/{}", parts[1], parts[0]),
+        _ => format!("…/{}/{}", parts[1], parts[0]),
     }
 }
