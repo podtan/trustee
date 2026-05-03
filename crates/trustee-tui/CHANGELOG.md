@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.24] - 2026-05-03
+
+### Fixed
+- **fix: `✓ read <file>` regression** — `ToolDone` was sending `hint = Some("<file>")`
+  (parsed from the first line of cats `read` output) which shadowed the correct
+  path hint already captured at `ToolPending` time from the call arguments.
+  Fixed by removing `extract_path_from_content` entirely from `tui_sink.rs` —
+  `ToolDone` now sends only `description` (present for bash tools only), and
+  `app.rs` falls back to the pending-side hint for file tools.
+- **chore: remove unused `serde_json` dep** — no longer needed after the above fix.
+
 ## [0.1.23] - 2026-05-03
 
 ### Changed

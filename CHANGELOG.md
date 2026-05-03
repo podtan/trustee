@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.45] - 2026-05-03
+
+### Fixed
+- **fix(tui): `✓ read <file>` regression** — `ToolDone` in `tui_sink.rs` was
+  sending `hint = Some("<file>")` from parsing cats tool output (whose first
+  line is literally `<file>`), shadowing the correct path hint captured at
+  `ToolPending` time. Removed `extract_path_from_content` — ToolDone now only
+  passes `description` (bash tools) as hint; file tools fall back to the pending
+  hint in `app.rs`. Bumps trustee-tui to 0.1.24.
+
 ## [0.1.44] - 2026-05-03
 
 ### Changed

@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::mpsc;
 
 use abk::orchestration::output::{OutputEvent, OutputSink, SharedSink};
-use serde_json;
 
 use crate::app::TuiMessage;
 
@@ -125,9 +124,12 @@ impl OutputSink for TuiSink {
                 if tool_name == "todowrite" && success {
                     let _ = self.tx.send(TuiMessage::TodoUpdate(content.clone()));
                 }
-                // Derive the best hint for the done line:
-                // prefer explicit description (bash), otherwise extract path from content header.
-                let hint = description.or_else(|| extract_path_from_content(&tool_name, &content));
+                // Only use description (bash tools) as the done-side hint.
+                // For file tools (read/edit/write/multiedit) description is None —
+                // the correct path hint was already captured at ToolPending time
+                // from the call arguments and will be reused by app.rs from the
+                // pending_tool_lines Vec entry.
+                let hint = description;
                 let _ = self.tx.send(TuiMessage::ToolDone { tool_name, success, hint });
                 self.stream_state.store(STREAM_IDLE, Ordering::Relaxed);
                 return;
@@ -165,38 +167,3 @@ impl OutputSink for TuiSink {
     }
 }
 
-/// Extract a short path hint from a tool's result content for tools that don't
-/// have a `description` param (read, edit, write, multiedit).
-///
-/// cats result headers look like:
-///   `<file>` block with a `file_path:` key in the compact log JSON, or
-///   the content starts with the path on line 1.
-///
-/// We look for the `file_path` key in the first 200 bytes of a JSON object,
-/// or fall back to the first non-empty line for file tools.
-fn extract_path_from_content(tool: &str, content: &str) -> Option<String> {
-    match tool {
-        "read" | "edit" | "write" | "multiedit" => {
-            // cats compact log: {"file_path":"/foo/bar.rs",...}
-            let snippet = &content[..content.len().min(300)];
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(snippet) {
-                if let Some(p) = v.get("file_path").and_then(|p| p.as_str()) {
-                    return Some(short_path(p));
-                }
-            }
-            // Fallback: first non-empty line often contains the path
-            content.lines().find(|l| !l.trim().is_empty()).map(|l| short_path(l.trim()))
-        }
-        _ => None,
-    }
-}
-
-/// Return the last two path components of a file path string.
-fn short_path(p: &str) -> String {
-    let parts: Vec<&str> = p.trim_end_matches('/').rsplitn(3, '/').collect();
-    match parts.len() {
-        1 => parts[0].to_string(),
-        2 => format!("{}/{}", parts[1], parts[0]),
-        _ => format!("…/{}/{}", parts[1], parts[0]),
-    }
-}
