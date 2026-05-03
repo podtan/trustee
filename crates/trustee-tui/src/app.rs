@@ -162,9 +162,9 @@ pub struct App {
     cancel_token: CancellationToken,
     /// Command buffered by user during cancellation wind-down.
     pending_command: Option<String>,
-    /// Maps tool_name → output_lines index for in-flight spinner replacement.
-    /// Only tracks native (CATS) tools, not MCP tools.
-    pending_tool_lines: std::collections::HashMap<String, usize>,
+    /// In-flight spinner entries: (tool_name, output_lines_index, hint).
+    /// Vec (not HashMap) so duplicate tool names (parallel calls) each get their own line.
+    pending_tool_lines: Vec<(String, usize, Option<String>)>,
     /// Spinner frame counter — advances on each render tick.
     spinner_tick: u8,
 }
@@ -213,7 +213,7 @@ impl App {
             mouse_passthrough: false,
             cancel_token: CancellationToken::new(),
             pending_command: None,
-            pending_tool_lines: std::collections::HashMap::new(),
+            pending_tool_lines: Vec::new(),
             spinner_tick: 0,
         }
     }
@@ -239,13 +239,12 @@ impl App {
             const FRAMES: [char; 8] = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧'];
             self.spinner_tick = self.spinner_tick.wrapping_add(1);
             let frame = FRAMES[(self.spinner_tick as usize) % FRAMES.len()];
-            for (name, &idx) in &self.pending_tool_lines {
-                if idx < self.output_lines.len() {
+            for (_, idx, _) in &self.pending_tool_lines {
+                if *idx < self.output_lines.len() {
                     // Replace only the spinner char (first char), keep the rest.
-                    let rest: String = self.output_lines[idx].chars().skip(1).collect();
-                    self.output_lines[idx] = format!("{}{}", frame, rest);
+                    let rest: String = self.output_lines[*idx].chars().skip(1).collect();
+                    self.output_lines[*idx] = format!("{}{}", frame, rest);
                 }
-                let _ = name; // suppress unused warning
             }
 
             // Draw the UI
@@ -698,24 +697,35 @@ impl App {
                 };
                 let idx = self.output_lines.len();
                 self.output_lines.push(label);
-                // Last writer wins — if the same tool fires twice, keep latest index.
-                self.pending_tool_lines.insert(tool_name, idx);
+                // Push new entry — same tool can appear multiple times in parallel.
+                self.pending_tool_lines.push((tool_name, idx, hint));
             }
             TuiMessage::ToolDone { tool_name, success, hint } => {
                 let status = if success { "✓" } else { "✗" };
-                let label = match &hint {
-                    Some(h) => format!("{} {} {}", status, tool_name, h),
-                    None    => format!("{} {}", status, tool_name),
-                };
-                if let Some(&idx) = self.pending_tool_lines.get(&tool_name) {
+                // Find the first pending entry for this tool name.
+                if let Some(pos) = self.pending_tool_lines.iter().position(|(n, _, _)| *n == tool_name) {
+                    let (_, idx, pending_hint) = self.pending_tool_lines.remove(pos);
+                    // Prefer hint from ToolDone (bash description); fall back to the
+                    // hint we already captured at ToolPending time (file path).
+                    let h = hint.or(pending_hint);
+                    let label = match &h {
+                        Some(h) => format!("{} {} {}", status, tool_name, h),
+                        None    => format!("{} {}", status, tool_name),
+                    };
                     if idx < self.output_lines.len() {
                         self.output_lines[idx] = label;
-                        self.pending_tool_lines.remove(&tool_name);
                         return; // skip the auto-scroll push below
                     }
+                    // idx out of range — fall through to append
+                    self.output_lines.push(label);
+                } else {
+                    // No pending entry — append directly.
+                    let label = match &hint {
+                        Some(h) => format!("{} {} {}", status, tool_name, h),
+                        None    => format!("{} {}", status, tool_name),
+                    };
+                    self.output_lines.push(label);
                 }
-                // Fallback: no pending line found, just append.
-                self.output_lines.push(label);
             }
             TuiMessage::ResumeInfo(info) => {
                 self.resume_info = info;
