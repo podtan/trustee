@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.23] - 2026-05-03
+
+### Changed
+- **chore: restore normal crates.io publishing** — reverted the short-lived
+  `publish = false` experiment. trustee-tui continues to be published alongside
+  trustee as before. No functional changes.
+
+## [0.1.22] - 2026-05-03
+
+### Fixed
+- **fix: duplicate spinner lines for parallel same-name tool calls** — switched
+  `pending_tool_lines` from `HashMap<String, usize>` to
+  `Vec<(String, usize, Option<String>)>` so parallel calls with the same name
+  (e.g. 3× `nghr_get_task`) each get their own spinner line instead of
+  overwriting each other's index, which left orphan spinners that never cleared.
+- **fix: `✓ read <file>` now shows the actual file path** — the hint captured
+  at `ToolPending` time (file path via `extract_hint` in abk) is now carried
+  forward in the Vec entry and reused by `ToolDone`, so the completion line
+  shows the real path instead of `<file>`.
+
 ## [0.1.21] - 2026-05-03
 
 ### Changed
