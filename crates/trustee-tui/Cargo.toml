@@ -5,6 +5,7 @@ edition = "2021"
 description = "TUI interface for Trustee agent (internal — use trustee instead)"
 license = "MIT OR Apache-2.0"
 authors = ["Podtan Team"]
+publish = false  # internal workspace crate — use trustee instead
 
 [dependencies]
 # TUI framework
