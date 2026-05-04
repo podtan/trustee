@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.51] - 2026-05-04
+
+### Added
+- **feat(tui): session handoff (Ctrl+H)** — pressing Ctrl+H in trustee-tui
+  generates an LLM-authored briefing (up to 50 lines) from the current session
+  and immediately starts a brand-new session with the briefing as the first user
+  message. Provides a clean context handoff when conversations grow large.
+  - Ctrl+H while idle: triggers handoff immediately
+  - Ctrl+H while running: cancels the workflow first, then hands off
+  - Ctrl+H with no prior session: shows "Nothing to hand off" and does nothing
+  - Briefing generation uses same provider/config as the running session
+  - New session is created under the same project hash (preserving continuity)
+  - Old session checkpoint files are never deleted (non-destructive)
+  Bumps trustee-tui to 0.1.29.
+
 ## [0.1.50] - 2026-05-04
 
 ### Fixed

@@ -25,6 +25,7 @@ use anyhow::Result;
 
 use crate::tui_sink::TuiSink;
 use abk::cli::ResumeInfo;
+use abk::orchestration::output::{OutputEvent, OutputSink};
 
 /// Which panel currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +76,8 @@ pub enum TuiMessage {
     TodoUpdate(String),
     /// Workflow was cancelled by user (ESC pressed during execution)
     WorkflowCancelled,
+    /// LLM-generated handoff briefing ready — start a fresh session with it
+    HandoffReady(String),
     /// A native tool call has started (shows spinner)
     ToolPending { tool_name: String, hint: Option<String> },
     /// A native tool call has finished (replaces spinner with ✓/✗)
@@ -83,6 +86,27 @@ pub enum TuiMessage {
 
 /// Build information for ABK (forward declaration)
 pub type BuildInfo = abk::cli::BuildInfo;
+
+/// Sink used during handoff briefing — captures only LLM response text.
+/// All other events are discarded so the briefing call is invisible in
+/// the main output panel.
+struct HandoffCaptureSink {
+    tx: mpsc::UnboundedSender<String>,
+}
+
+impl OutputSink for HandoffCaptureSink {
+    fn emit(&self, event: OutputEvent) {
+        match event {
+            OutputEvent::StreamingChunk { delta } if !delta.is_empty() => {
+                let _ = self.tx.send(delta);
+            }
+            OutputEvent::LlmResponse { text, .. } if !text.is_empty() => {
+                let _ = self.tx.send(text);
+            }
+            _ => {}
+        }
+    }
+}
 
 /// Convert a char index to a byte offset in a string.
 /// Panics if `char_idx` > number of chars in `s`.
@@ -162,6 +186,8 @@ pub struct App {
     cancel_token: CancellationToken,
     /// Command buffered by user during cancellation wind-down.
     pending_command: Option<String>,
+    /// Whether a session handoff (Ctrl+H) should fire once the current workflow cancels.
+    handoff_pending: bool,
     /// In-flight spinner entries: (tool_name, output_lines_index, hint).
     /// Vec (not HashMap) so duplicate tool names (parallel calls) each get their own line.
     pending_tool_lines: Vec<(String, usize, Option<String>)>,
@@ -185,6 +211,7 @@ impl App {
                 "  ↑/↓ or Page Up/Down - Scroll output".to_string(),
                 "  y - Copy visible text (Output/Todo)".to_string(),
                 "  Enter - Execute task".to_string(),
+                "  Ctrl+H - Session handoff (fresh context with briefing)".to_string(),
                 "  Ctrl+O - Toggle mouse passthrough (select text)".to_string(),
                 "  Esc - Cancel workflow / Exit".to_string(),
                 "  Ctrl+C - Exit".to_string(),
@@ -213,6 +240,7 @@ impl App {
             mouse_passthrough: false,
             cancel_token: CancellationToken::new(),
             pending_command: None,
+            handoff_pending: false,
             pending_tool_lines: Vec::new(),
             spinner_tick: 0,
         }
@@ -420,6 +448,22 @@ impl App {
                 KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     execute!(std::io::stdout(), DisableMouseCapture).ok();
                     self.mouse_passthrough = true;
+                    return Ok(());
+                }
+                // Ctrl+H: session handoff — generate LLM briefing, start fresh context
+                KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    match self.workflow_state {
+                        WorkflowState::Idle => self.trigger_handoff(),
+                        WorkflowState::Running => {
+                            self.cancel_token.cancel();
+                            self.workflow_state = WorkflowState::Cancelling;
+                            self.handoff_pending = true;
+                            self.output_lines.push("⏹ Cancelling before handoff...".to_string());
+                        }
+                        WorkflowState::Cancelling => {
+                            self.handoff_pending = true;
+                        }
+                    }
                     return Ok(());
                 }
                 _ => {}
@@ -744,17 +788,106 @@ impl App {
                         self.output_lines.push("🔄 Session preserved — next command will continue this session".to_string());
                     }
                 }
-                // Auto-execute pending command if any
-                if let Some(cmd) = self.pending_command.take() {
+                // If a handoff was queued (Ctrl+H while running), fire it now
+                // instead of auto-executing any pending command.
+                if self.workflow_state == WorkflowState::Idle && self.handoff_pending {
+                    self.handoff_pending = false;
+                    self.trigger_handoff();
+                } else if let Some(cmd) = self.pending_command.take() {
                     self.input = cmd;
                     self.execute_command();
                 }
+            }
+            TuiMessage::HandoffReady(briefing) => {
+                // Briefing generation complete — transition out of Running state,
+                // clear resume_info (fresh session), then fire the briefing as a
+                // new task. ABK will create a new session checkpoint automatically
+                // with the briefing as the first user message.
+                self.workflow_state = WorkflowState::Idle;
+                self.resume_info = None;
+                self.input = briefing;
+                self.cursor_position = self.input.chars().count();
+                self.execute_command();
             }
         }
         // Auto-scroll to bottom when enabled
         if self.auto_scroll {
             self.scroll = u16::MAX;
         }
+    }
+
+    /// Trigger a session handoff (Ctrl+H):
+    /// 1. Guard — requires a prior session (`resume_info` must be set)
+    /// 2. Run a single LLM call via `run_task_from_raw_config` using the current
+    ///    session's `resume_info`; a `HandoffCaptureSink` captures only the text
+    ///    response (invisible in the main output panel)
+    /// 3. On completion, sends `TuiMessage::HandoffReady(briefing)` which starts
+    ///    a brand-new session with the briefing as the first user message
+    fn trigger_handoff(&mut self) {
+        if self.resume_info.is_none() {
+            self.output_lines.push("ℹ Nothing to hand off — run a task first".to_string());
+            return;
+        }
+
+        let config_toml = match &self.config_toml {
+            Some(c) => c.clone(),
+            None => {
+                self.output_lines.push("✗ Error: Configuration not loaded".to_string());
+                return;
+            }
+        };
+
+        let secrets = self.secrets.clone().unwrap_or_default();
+        let build_info = self.build_info.clone();
+        let tx = self.workflow_tx.clone();
+        let resume_info = self.resume_info.take();
+
+        self.workflow_state = WorkflowState::Running;
+        self.auto_scroll = true;
+        self.cancel_token = CancellationToken::new();
+        let child_token = self.cancel_token.clone();
+
+        self.output_lines.push("🔀 Generating session handoff briefing...".to_string());
+
+        tokio::spawn(async move {
+            let (cap_tx, mut cap_rx) = mpsc::unbounded_channel::<String>();
+            let cap_sink: abk::orchestration::output::SharedSink =
+                std::sync::Arc::new(HandoffCaptureSink { tx: cap_tx });
+
+            abk::observability::set_tui_mode(true);
+
+            let (dummy_tx, _dummy_rx) = mpsc::unbounded_channel();
+            let _res = abk::cli::run_task_from_raw_config(
+                &config_toml,
+                secrets,
+                build_info,
+                "Output a session handoff briefing in at most 50 lines. \
+                 Do NOT use any tools. Include: all project/task/workstream UUIDs \
+                 referenced, every file created or modified with its full path, all \
+                 commands run and their outcomes, the current state of the work, any \
+                 blockers, and the exact next action to take. \
+                 Output ONLY the briefing text — no preamble, headers, or closing remarks.",
+                Some(cap_sink),
+                resume_info,
+                Some(dummy_tx),
+                Some(child_token),
+            ).await;
+
+            abk::observability::set_tui_mode(false);
+
+            let mut briefing = String::new();
+            while let Ok(frag) = cap_rx.try_recv() {
+                briefing.push_str(&frag);
+            }
+
+            let briefing = if briefing.trim().is_empty() {
+                "Session handoff: briefing unavailable — continue from previous context.".to_string()
+            } else {
+                briefing.trim().to_string()
+            };
+
+            tx.send(TuiMessage::HandoffReady(briefing)).ok();
+        });
     }
 
     /// Execute the current command in the input buffer
