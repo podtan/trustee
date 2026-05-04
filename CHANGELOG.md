@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.50] - 2026-05-04
+
+### Fixed
+- **checkpoint: eliminate all `_final_` duplicate checkpoint files** —
+  `create_final_checkpoint_and_get_resume_info` no longer writes any checkpoint
+  file. It now exclusively returns `ResumeInfo` built from the latest existing
+  checkpoint written by the workflow loop, completely eliminating `_final_` files.
+  All checkpoint writes happen only via `create_checkpoint` (one `_analyze_` file
+  per iteration). Bumps abk to 0.5.39, trustee-tui to 0.1.28.
+
+## [0.1.49] - 2026-05-04
+
+### Changed
+- *(published in error — same code as 0.1.48, no functional changes)*
+
+## [0.1.48] - 2026-05-04
+
+### Fixed
+- **checkpoint: reduce duplicate `_analyze_` / `_final_` file pairs** —
+  `create_final_checkpoint_and_get_resume_info` now skips writing a `_final_`
+  file when a checkpoint for the current iteration already exists. Bumps abk
+  to 0.5.38, trustee-tui to 0.1.27.
+
 ## [0.1.47] - 2026-05-03
 
 ### Changed
