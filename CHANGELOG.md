@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.47] - 2026-05-03
+
+### Changed
+- **deps: bump trustee-tui to 0.1.25** — `list` tool now shows directory path
+  in spinner hints alongside read/edit/write/multiedit (abk 0.5.37 via tui).
+
+## [0.1.46] - 2026-05-03
+
+### Changed
+- *(pre-existing release — no changelog entry)*
+
 ## [0.1.45] - 2026-05-03
 
 ### Fixed
