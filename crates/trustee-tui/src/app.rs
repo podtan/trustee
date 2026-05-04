@@ -861,9 +861,11 @@ impl App {
                 &config_toml,
                 secrets,
                 build_info,
-                "Output a session handoff briefing in at most 50 lines. \
-                 Do NOT use any tools. Include: all project/task/workstream UUIDs \
-                 referenced, every file created or modified with its full path, all \
+                "Output a session handoff briefing in at most 300 lines. \
+                 Do NOT use any tools. Include: the FULL ABSOLUTE PATH of every \
+                 project/repository being worked on (e.g. /Projects/Foo/bar — never \
+                 omit the leading path), all project/task/workstream UUIDs referenced, \
+                 every file created or modified with its full absolute path, all \
                  commands run and their outcomes, the current state of the work, any \
                  blockers, and the exact next action to take. \
                  Output ONLY the briefing text — no preamble, headers, or closing remarks.",
