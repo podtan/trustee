@@ -178,6 +178,9 @@ pub struct App {
     pub build_info: Option<BuildInfo>,
     /// Resume info from the last completed task for session continuity
     pub resume_info: Option<ResumeInfo>,
+    /// Saved resume_info before execute_command consumes it; restored if task
+    /// is cancelled before producing a real checkpoint (mistake-ENTER recovery).
+    backup_resume_info: Option<ResumeInfo>,
     /// Latest todo list from LLM todowrite tool
     pub todo_lines: Vec<String>,
     /// Cached inner width of input box (characters per visual line)
@@ -238,6 +241,7 @@ impl App {
             secrets: None,
             build_info: None,
             resume_info: None,
+            backup_resume_info: None,
             todo_lines: Vec::new(),
             input_inner_width_cache: 80,
             output_rect: Rect::default(),
@@ -778,7 +782,15 @@ impl App {
                 }
             }
             TuiMessage::ResumeInfo(info) => {
-                self.resume_info = info;
+                // If the task was cancelled (Cancelling state) and returned no
+                // real checkpoint (None), restore the pre-command backup so the
+                // original session survives a mistake-ENTER+ESC sequence.
+                if self.workflow_state == WorkflowState::Cancelling && info.is_none() {
+                    self.resume_info = self.backup_resume_info.take();
+                } else {
+                    self.resume_info = info;
+                    self.backup_resume_info = None; // real checkpoint — discard backup
+                }
                 // Only transition Cancelling → Idle (old task fully wound down).
                 // During Running, ResumeInfo is just a checkpoint snapshot —
                 // don't touch the state. ABK sends ResumeInfo after session init
@@ -949,6 +961,11 @@ impl App {
         let build_info = self.build_info.clone();
         let tx = self.workflow_tx.clone();
         
+        // Snapshot resume_info before consuming it, so we can restore it if
+        // the task is cancelled before producing a real checkpoint (e.g. user
+        // pressed ENTER by mistake then ESC before the first iteration saved).
+        self.backup_resume_info = self.resume_info.clone();
+
         // Take resume_info (one-time use — consumed on next command)
         let resume_info = self.resume_info.take();
         

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.33] - 2026-05-11
+
+### Fixed
+- **fix(handoff): restore original session after mistake-ENTER+ESC** — `App` now saves a
+  `backup_resume_info` snapshot before `execute_command` consumes the live `resume_info`.
+  If the task is cancelled (ESC) before producing a real checkpoint (i.e. `ResumeInfo` comes
+  back as `None`), the original session's `resume_info` is automatically restored. This means
+  pressing ENTER by mistake, then ESC, then Ctrl+H correctly hands off the original session
+  instead of starting a new clean (history-less) one.
+
 ## [0.1.32] - 2026-05-11
 
 ### Fixed

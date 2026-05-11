@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.56] - 2026-05-11
+
+### Fixed
+- **fix(tui/handoff): restore original session after mistake-ENTER+ESC** — bumps
+  trustee-tui to 0.1.33. Pressing ENTER by mistake, then ESC, then Ctrl+H now correctly
+  performs a handoff using the original session context instead of starting a new
+  history-less session.
+
 ## [0.1.55] - 2026-05-11
 
 ### Fixed
