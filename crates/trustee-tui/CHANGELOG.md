@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.30] - 2026-05-11
+
+### Fixed
+- **fix(handoff): cancel briefing on tool calls, fix instruction order** — `HandoffCaptureSink`
+  now cancels the token immediately when the LLM makes a tool call (disobeying "Do NOT use
+  any tools"), preventing the old session from being polluted. The hardcoded briefing
+  instruction is now placed first so the LLM sees constraints before any user hint text;
+  an optional hint from the input box is appended only if non-empty.
+
 ## [0.1.25] - 2026-05-03
 
 ### Changed

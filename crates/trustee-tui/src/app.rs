@@ -87,11 +87,11 @@ pub enum TuiMessage {
 /// Build information for ABK (forward declaration)
 pub type BuildInfo = abk::cli::BuildInfo;
 
-/// Sink used during handoff briefing — captures only LLM response text.
-/// All other events are discarded so the briefing call is invisible in
-/// the main output panel.
+/// Sink used during handoff briefing — captures LLM response text and
+/// cancels the loop immediately if the LLM makes a tool call.
 struct HandoffCaptureSink {
     tx: mpsc::UnboundedSender<String>,
+    cancel: CancellationToken,
 }
 
 impl OutputSink for HandoffCaptureSink {
@@ -102,6 +102,12 @@ impl OutputSink for HandoffCaptureSink {
             }
             OutputEvent::LlmResponse { text, .. } if !text.is_empty() => {
                 let _ = self.tx.send(text);
+            }
+            // LLM disobeyed "Do NOT use any tools" — cancel immediately.
+            // Whatever text was captured before this point becomes the briefing;
+            // the empty-briefing fallback handles the case where nothing was captured.
+            OutputEvent::ToolsExecuting { .. } => {
+                self.cancel.cancel();
             }
             _ => {}
         }
@@ -453,7 +459,7 @@ impl App {
                 // Ctrl+H: session handoff — generate LLM briefing, start fresh context
                 KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     match self.workflow_state {
-                        WorkflowState::Idle => self.trigger_handoff(),
+                        WorkflowState::Idle => self.trigger_handoff(self.input.trim().to_string()),
                         WorkflowState::Running => {
                             self.cancel_token.cancel();
                             self.workflow_state = WorkflowState::Cancelling;
@@ -792,7 +798,7 @@ impl App {
                 // instead of auto-executing any pending command.
                 if self.workflow_state == WorkflowState::Idle && self.handoff_pending {
                     self.handoff_pending = false;
-                    self.trigger_handoff();
+                    self.trigger_handoff(String::new());
                 } else if let Some(cmd) = self.pending_command.take() {
                     self.input = cmd;
                     self.execute_command();
@@ -823,7 +829,7 @@ impl App {
     ///    response (invisible in the main output panel)
     /// 3. On completion, sends `TuiMessage::HandoffReady(briefing)` which starts
     ///    a brand-new session with the briefing as the first user message
-    fn trigger_handoff(&mut self) {
+    fn trigger_handoff(&mut self, hint: String) {
         if self.resume_info.is_none() {
             self.output_lines.push("ℹ Nothing to hand off — run a task first".to_string());
             return;
@@ -852,23 +858,32 @@ impl App {
         tokio::spawn(async move {
             let (cap_tx, mut cap_rx) = mpsc::unbounded_channel::<String>();
             let cap_sink: abk::orchestration::output::SharedSink =
-                std::sync::Arc::new(HandoffCaptureSink { tx: cap_tx });
+                std::sync::Arc::new(HandoffCaptureSink { tx: cap_tx, cancel: child_token.clone() });
 
             abk::observability::set_tui_mode(true);
 
-            let (dummy_tx, _dummy_rx) = mpsc::unbounded_channel();
-            let _res = abk::cli::run_task_from_raw_config(
-                &config_toml,
-                secrets,
-                build_info,
-                "Output a session handoff briefing in at most 300 lines. \
+            // Instruction comes first so the LLM sees the constraint before any user text.
+            // User hint (if non-empty) is appended as additional briefing focus — never prepended.
+            let base = "Output a session handoff briefing in at most 300 lines. \
                  Do NOT use any tools. Include: the FULL ABSOLUTE PATH of every \
                  project/repository being worked on (e.g. /Projects/Foo/bar — never \
                  omit the leading path), all project/task/workstream UUIDs referenced, \
                  every file created or modified with its full absolute path, all \
                  commands run and their outcomes, the current state of the work, any \
                  blockers, and the exact next action to take. \
-                 Output ONLY the briefing text — no preamble, headers, or closing remarks.",
+                 Output ONLY the briefing text — no preamble, headers, or closing remarks.";
+            let prompt = if hint.is_empty() {
+                base.to_string()
+            } else {
+                format!("{base}\n\nIn the briefing also consider: {hint}")
+            };
+
+            let (dummy_tx, _dummy_rx) = mpsc::unbounded_channel();
+            let _res = abk::cli::run_task_from_raw_config(
+                &config_toml,
+                secrets,
+                build_info,
+                &prompt,
                 Some(cap_sink),
                 resume_info,
                 Some(dummy_tx),

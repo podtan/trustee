@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.52] - 2026-05-11
+
+### Fixed
+- **fix(tui/handoff): cancel briefing on tool calls, fix instruction order** — bumps
+  trustee-tui to 0.1.30 which fixes Ctrl+H session handoff: briefing is cancelled
+  immediately if the LLM makes a tool call, and the hardcoded instruction is now
+  prepended before any user hint text to prevent LLM confusion.
+
 ## [0.1.51] - 2026-05-04
 
 ### Added
