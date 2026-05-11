@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.54] - 2026-05-11
+## [0.1.55] - 2026-05-11
 
 ### Fixed
 - **fix(tui/handoff): cancel briefing on tool calls, fix instruction order** — bumps
