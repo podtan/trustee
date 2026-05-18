@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.57] - 2026-05-18
+
+### Changed
+- **deps: bump abk to 0.5.41** — fix trustee resume.
+
 ## [0.1.56] - 2026-05-11
 
 ### Fixed
