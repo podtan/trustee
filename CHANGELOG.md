@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.60] - 2026-05-19
+
+### Fixed
+- **fix(tui): restore terminal cleanly on panic, SIGTERM, and abnormal exit** — panic hook
+  now sends `DisableMouseCapture`, `DisableBracketedPaste`, and `cursor::Show` in addition
+  to `LeaveAlternateScreen`; a SIGTERM handler restores the terminal and exits cleanly;
+  bumps trustee-tui to 0.1.35.
+
+## [0.1.59] - 2026-05-18
+
 ## [0.1.58] - 2026-05-18
 
 ### Changed

@@ -315,10 +315,10 @@ impl App {
             }
         }
 
-        // Restore terminal
-        disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableBracketedPaste, DisableMouseCapture)?;
-        terminal.show_cursor()?;
+        // Restore terminal — use let _ so all steps run even if one fails
+        let _ = disable_raw_mode();
+        let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableBracketedPaste, DisableMouseCapture);
+        let _ = terminal.show_cursor();
 
         Ok(())
     }

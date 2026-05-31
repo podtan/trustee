@@ -233,6 +233,20 @@ fn merge_config(user_config_toml: &str) -> Result<String, Box<dyn std::error::Er
     Ok(merged_toml)
 }
 
+/// Restore terminal to normal state — called from panic hook and signal handlers.
+/// Uses `let _` so all steps run even if one fails.
+#[cfg(feature = "tui")]
+fn restore_terminal() {
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::event::DisableBracketedPaste,
+        crossterm::event::DisableMouseCapture,
+        crossterm::cursor::Show,
+    );
+}
+
 /// Setup panic hook to restore terminal state before showing panic message.
 /// This is critical for TUI mode - if code panics while ratatui is in raw mode,
 /// the terminal becomes unusable without this hook.
@@ -240,12 +254,7 @@ fn merge_config(user_config_toml: &str) -> Result<String, Box<dyn std::error::Er
 fn setup_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        // Restore terminal before showing panic
-        let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::LeaveAlternateScreen
-        );
+        restore_terminal();
         original_hook(panic_info);
     }));
 }
@@ -295,7 +304,18 @@ async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
     
     // Merge embedded defaults with user overrides
     let merged_config = merge_config(&user_config_toml)?;
-    
+
+    // Restore terminal cleanly on SIGTERM (e.g. `kill <pid>` from another terminal)
+    tokio::spawn(async {
+        if let Ok(mut sig) = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ) {
+            sig.recv().await;
+            restore_terminal();
+            std::process::exit(0);
+        }
+    });
+
     // Launch the TUI application with config
     trustee_tui::run(merged_config, secrets, build_info()).await?;
     Ok(())

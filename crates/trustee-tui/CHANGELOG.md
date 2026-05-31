@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.35] - 2026-05-19
+
+### Fixed
+- **fix(cleanup): all terminal-restore steps now run on abnormal exit** — cleanup code
+  switched from `?` to `let _ =` so `DisableMouseCapture`, `DisableBracketedPaste`, and
+  `show_cursor` all execute even if an earlier step fails. Eliminates garbage X10 mouse
+  tracking escape sequences (`56M35;83;...`) left in the terminal after a forced quit.
+
+## [0.1.34] - 2026-05-11
+
 ## [0.1.33] - 2026-05-11
 
 ### Fixed
