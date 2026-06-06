@@ -7,7 +7,7 @@
 use std::io;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, MouseEventKind, EnableBracketedPaste, DisableBracketedPaste, EnableMouseCapture, DisableMouseCapture},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind, EnableBracketedPaste, DisableBracketedPaste, EnableMouseCapture, DisableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -456,6 +456,12 @@ impl App {
         }
 
         if let Event::Key(key) = event {
+            // On Windows, crossterm reports both Press and Release events for every
+            // keystroke. Without this filter every character would be inserted twice.
+            if key.kind != KeyEventKind::Press {
+                return Ok(());
+            }
+
             // Exit passthrough mode on any keypress — re-enable mouse capture
             if self.mouse_passthrough {
                 execute!(std::io::stdout(), EnableMouseCapture).ok();
