@@ -36,6 +36,7 @@ impl TuiSink {
     }
 
     /// Convenience helper: wrap in an `Arc` for use as `SharedSink`.
+    #[allow(dead_code)]
     pub fn shared(tx: mpsc::UnboundedSender<TuiMessage>) -> SharedSink {
         Arc::new(Self::new(tx))
     }

@@ -306,6 +306,7 @@ async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
     let merged_config = merge_config(&user_config_toml)?;
 
     // Restore terminal cleanly on SIGTERM (e.g. `kill <pid>` from another terminal)
+    #[cfg(unix)]
     tokio::spawn(async {
         if let Ok(mut sig) = tokio::signal::unix::signal(
             tokio::signal::unix::SignalKind::terminate(),

@@ -16,6 +16,24 @@ All notable changes to this project will be documented in this file.
   `std::env::consts` + `hostname` crate. Trustee-tui now compiles on Linux, macOS, and
   Windows.
 
+## [0.1.62] - 2026-06-06
+
+### Added
+- **feat(tui): configurable auto-handoff** — new `[tui.auto_handoff]` section in
+  `trustee_default.toml` with `enabled` (default: false) and `context_threshold`
+  (default: 170000). When enabled, the TUI monitors context token counts and
+  automatically triggers a session handoff once the threshold is exceeded.
+
+### Fixed
+- **fix: cross-platform build (Windows/macOS/Linux)** — gate Unix-only SIGTERM
+  handler with `#[cfg(unix)]`, suppress unused `TuiSink::shared` warning.
+  Bumps abk to 0.5.44 which removes the unix-only `uname` crate.
+
+## [0.1.61] - 2026-06-06
+
+### Changed
+- **deps: bump abk to 0.5.44** — cross-platform checkpoint (removes unix-only uname).
+
 ## [0.1.60] - 2026-05-19
 
 ### Fixed
