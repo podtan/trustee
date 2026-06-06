@@ -147,6 +147,17 @@ sensitive_env_patterns = ["*KEY*", "*TOKEN*", "*PASSWORD*", "*SECRET*"]
 file_permission_strict = true
 max_file_size_mb = 10
 
+# TUI-specific configuration (only applies to trustee-tui)
+[tui]
+
+# Automatic session handoff when context grows too large.
+# When enabled, the TUI will automatically trigger a handoff (fresh context
+# with LLM-generated briefing) once the total context token count reaches
+# the configured threshold.
+[tui.auto_handoff]
+enabled = false              # Set to true to enable automatic handoff
+context_threshold = 170000   # Total context tokens that triggers auto-handoff
+
 # CLI Configuration
 [cli]
 name = "trustee"

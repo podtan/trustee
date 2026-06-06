@@ -28,9 +28,12 @@ pub async fn run(
     let mut app = App::new();
     
     // Store config and secrets in the app for workflow execution
-    app.config_toml = Some(config_toml);
+    app.config_toml = Some(config_toml.clone());
     app.secrets = Some(secrets);
     app.build_info = Some(build_info);
+    
+    // Parse [tui.auto_handoff] settings from the merged config
+    app.parse_auto_handoff_config();
     
     app.run().await
 }

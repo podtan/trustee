@@ -82,10 +82,33 @@ pub enum TuiMessage {
     ToolPending { tool_name: String, hint: Option<String> },
     /// A native tool call has finished (replaces spinner with ✓/✗)
     ToolDone { tool_name: String, success: bool, hint: Option<String> },
+    /// Context token count updated (for auto-handoff threshold checking)
+    ContextTokensUpdated(usize),
 }
 
 /// Build information for ABK (forward declaration)
 pub type BuildInfo = abk::cli::BuildInfo;
+
+/// Auto-handoff configuration parsed from `[tui.auto_handoff]` in trustee.toml.
+///
+/// When enabled, the TUI monitors context token counts reported by ABK and
+/// automatically triggers a session handoff once the threshold is exceeded.
+#[derive(Debug, Clone)]
+pub struct AutoHandoffConfig {
+    /// Whether automatic handoff is enabled.
+    pub enabled: bool,
+    /// Context token count threshold that triggers auto-handoff.
+    pub context_threshold: usize,
+}
+
+impl Default for AutoHandoffConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            context_threshold: 170_000,
+        }
+    }
+}
 
 /// Sink used during handoff briefing — captures LLM response text and
 /// cancels the loop immediately if the LLM makes a tool call.
@@ -202,6 +225,10 @@ pub struct App {
     pending_tool_lines: Vec<(String, usize, Option<String>)>,
     /// Spinner frame counter — advances on each render tick.
     spinner_tick: u8,
+    /// Current context token count (updated from ApiCallStarted events).
+    current_context_tokens: usize,
+    /// Auto-handoff configuration parsed from [tui.auto_handoff].
+    auto_handoff: AutoHandoffConfig,
 }
 
 impl App {
@@ -253,6 +280,27 @@ impl App {
             handoff_pending: false,
             pending_tool_lines: Vec::new(),
             spinner_tick: 0,
+            current_context_tokens: 0,
+            auto_handoff: AutoHandoffConfig::default(),
+        }
+    }
+
+    /// Parse [tui.auto_handoff] from the merged config TOML.
+    /// Called after `config_toml` is set (from `lib.rs` or whenever config arrives).
+    pub fn parse_auto_handoff_config(&mut self) {
+        if let Some(ref config_toml) = self.config_toml {
+            if let Ok(table) = config_toml.parse::<toml::Value>() {
+                if let Some(tui) = table.get("tui").and_then(|v| v.as_table()) {
+                    if let Some(ah) = tui.get("auto_handoff").and_then(|v| v.as_table()) {
+                        if let Some(enabled) = ah.get("enabled").and_then(|v| v.as_bool()) {
+                            self.auto_handoff.enabled = enabled;
+                        }
+                        if let Some(threshold) = ah.get("context_threshold").and_then(|v| v.as_integer()) {
+                            self.auto_handoff.context_threshold = threshold as usize;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -814,6 +862,25 @@ impl App {
                 } else if let Some(cmd) = self.pending_command.take() {
                     self.input = cmd;
                     self.execute_command();
+                }
+            }
+            TuiMessage::ContextTokensUpdated(count) => {
+                self.current_context_tokens = count;
+                // Auto-handoff: when context exceeds threshold during a running
+                // workflow, mark handoff_pending so it fires after the workflow
+                // completes. The existing ResumeInfo handler already checks
+                // handoff_pending and calls trigger_handoff().
+                if self.auto_handoff.enabled
+                    && count >= self.auto_handoff.context_threshold
+                    && self.workflow_state == WorkflowState::Running
+                    && !self.handoff_pending
+                    && self.resume_info.is_some()
+                {
+                    self.handoff_pending = true;
+                    self.output_lines.push(format!(
+                        "🔄 Auto-handoff scheduled: context tokens ({}) ≥ threshold ({})",
+                        count, self.auto_handoff.context_threshold
+                    ));
                 }
             }
             TuiMessage::HandoffReady(briefing) => {

@@ -80,6 +80,7 @@ impl OutputSink for TuiSink {
             }
 
             OutputEvent::IterationStarted { iteration, context_tokens } => {
+                let _ = self.tx.send(TuiMessage::ContextTokensUpdated(context_tokens));
                 TuiMessage::OutputLine(format!(
                     "📡 Iteration {} | Context = {} tokens",
                     iteration, context_tokens
@@ -97,6 +98,7 @@ impl OutputSink for TuiSink {
             } => {
                 let mode = if streaming { "Streaming" } else { "Non-streaming" };
                 let total = context_tokens + tool_tokens;
+                let _ = self.tx.send(TuiMessage::ContextTokensUpdated(total));
                 TuiMessage::OutputLine(format!(
                     "🔥 API Call {} | Ctx={}({}+{}) | {} | Model: {} | Tools: {}",
                     call_number, total, context_tokens, tool_tokens, mode, model, tool_count
