@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.36] - 2026-07-23
+
+### Added
+- **feat(tui/auto-handoff): configurable automatic session handoff when context exceeds threshold** —
+  new `[tui.auto_handoff]` config section in `trustee.toml` with `enabled` (default: false)
+  and `context_threshold` (default: 170000 tokens). When enabled, the TUI monitors context
+  token counts from ABK and automatically triggers a session handoff once the threshold is
+  exceeded, generating an LLM briefing and starting a fresh context.
+
+### Changed
+- **deps: bump abk to 0.5.44** — replaces unix-only `uname` crate with cross-platform
+  `std::env::consts` + `hostname`, enabling Windows/macOS/Linux support.
+
 ## [0.1.35] - 2026-05-19
 
 ### Fixed

@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.61] - 2026-05-22
+
+### Added
+- **feat(tui): configurable auto-handoff when context exceeds threshold** — new
+  `[tui.auto_handoff]` section in `trustee.toml` with `enabled` (default: false) and
+  `context_threshold` (default: 170000). When enabled, the TUI monitors context token
+  counts from ABK API calls and automatically triggers a session handoff (fresh context
+  with LLM-generated briefing) once the threshold is exceeded. No manual Ctrl+H needed.
+
+### Changed
+- **deps: bump abk to 0.5.44** — replaces unix-only `uname` crate with cross-platform
+  `std::env::consts` + `hostname` crate. Trustee-tui now compiles on Linux, macOS, and
+  Windows.
+
 ## [0.1.60] - 2026-05-19
 
 ### Fixed
