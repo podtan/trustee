@@ -867,9 +867,11 @@ impl App {
             TuiMessage::ContextTokensUpdated(count) => {
                 self.current_context_tokens = count;
                 // Auto-handoff: when context exceeds threshold during a running
-                // workflow, mark handoff_pending so it fires after the workflow
-                // completes. The existing ResumeInfo handler already checks
-                // handoff_pending and calls trigger_handoff().
+                // workflow, cancel immediately (same as Ctrl+H while running).
+                // The in-flight API call completes, then ABK sees the cancel
+                // token, sends ResumeInfo, and the existing ResumeInfo handler
+                // fires trigger_handoff(). This prevents further API calls
+                // that would exceed the LLM context limit.
                 if self.auto_handoff.enabled
                     && count >= self.auto_handoff.context_threshold
                     && self.workflow_state == WorkflowState::Running
@@ -877,8 +879,10 @@ impl App {
                     && self.resume_info.is_some()
                 {
                     self.handoff_pending = true;
+                    self.cancel_token.cancel();
+                    self.workflow_state = WorkflowState::Cancelling;
                     self.output_lines.push(format!(
-                        "🔄 Auto-handoff scheduled: context tokens ({}) ≥ threshold ({})",
+                        "🔄 Auto-handoff: cancelling workflow, context tokens ({}) ≥ threshold ({})",
                         count, self.auto_handoff.context_threshold
                     ));
                 }
