@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.65] - 2026-06-07
+
+### Changed
+- **deps: bump abk to 0.5.46** — bash tool (cats) and executor now use PowerShell
+  instead of CMD on Windows, fixing `%` expansion, quote mangling, and single-quote
+  issues. Linux/macOS behavior is unchanged.
+
 ## [0.1.63] - 2026-06-06
 
 ### Added
