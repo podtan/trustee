@@ -343,11 +343,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_init = args.get(1).map(|s| s.as_str()) == Some("init");
     
     if is_init {
-        // Init command uses the old path-based approach to set up the environment.
-        // It reads config/trustee.toml (the minimal user config) from the project directory.
-        // But we still need to merge with defaults so ABK gets a complete config.
-        let project_config = std::fs::read_to_string("config/trustee.toml")
-            .unwrap_or_default();
+        // Init command: prefer the user's existing config at ~/.trustee/config/trustee.toml
+        // over the project's config/trustee.toml. This prevents `trustee init --force`
+        // from overwriting user customizations (MCP servers, auto-handoff settings, etc.).
+        let (installed_config_path, _, _, _) = get_config_paths(agent_name);
+        let project_config = if installed_config_path.exists() {
+            eprintln!("[init] Using existing config: {}", installed_config_path.display());
+            std::fs::read_to_string(&installed_config_path)
+                .unwrap_or_else(|_| {
+                    std::fs::read_to_string("config/trustee.toml").unwrap_or_default()
+                })
+        } else {
+            std::fs::read_to_string("config/trustee.toml").unwrap_or_default()
+        };
         let merged = merge_config(&project_config)?;
         let secrets = HashMap::new();
         abk::cli::run_from_raw_config(&merged, secrets, Some(build_info())).await
