@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.62] - 2026-06-06
+## [0.1.63] - 2026-06-06
 
 ### Added
 - **feat(tui): configurable auto-handoff when context exceeds threshold** — new
@@ -20,6 +20,12 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - **fix: cross-platform build (Windows/macOS/Linux)** — gate Unix-only SIGTERM
   handler with `#[cfg(unix)]`, suppress unused `TuiSink::shared` warning.
+- **fix(init): prefer existing `~/.trustee/config/trustee.toml`** — `trustee init`
+  now reads the user's installed config first, only falling back to the project's
+  `config/trustee.toml` if no installed config exists. Prevents `init --force` from
+  overwriting user customizations.
+
+## [0.1.62] - 2026-06-06
 
 ## [0.1.61] - 2026-05-22
 
