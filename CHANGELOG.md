@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.68] - 2026-06-07
+
+### Changed
+- **deps: bump abk to 0.5.49** — `trustee resume` now uses case-insensitive path matching
+  on Windows so the current project's sessions appear under "Current Project" instead of
+  "Other Projects". Linux/macOS behavior is unchanged (case-sensitive).
+
+## [0.1.68] - 2026-06-07
+
+### Changed
+- **deps: bump abk to 0.5.49** — `trustee resume` now correctly identifies the current
+  project on Windows with case-insensitive path matching (`C:\Projects\Tanbal` matches
+  `C:\projects\tanbal`). On Linux/macOS, paths remain case-sensitive.
+
 ## [0.1.67] - 2026-06-07
 
 ### Fixed
