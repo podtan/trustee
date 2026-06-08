@@ -72,7 +72,9 @@ fn parse_env_content(content: &str, secrets: &mut HashMap<String, String>) {
 /// Get the paths for config and secrets based on agent name
 /// Returns (config_path, env_path, config_filename, env_filename)
 fn get_config_paths(agent_name: &str) -> (PathBuf, PathBuf, String, String) {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
     let share_dir = PathBuf::from(home).join(format!(".{}", agent_name));
     
     // Try to read local .env first to get custom file names

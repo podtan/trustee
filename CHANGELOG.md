@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.66] - 2026-06-07
+
+### Fixed
+- **fix(config): use USERPROFILE on Windows when HOME is not set** — `get_config_paths()`
+  now falls back `HOME` → `USERPROFILE` → `"."` so the config file
+  `~/.trustee/config/trustee.toml` is found correctly when opening a terminal directly
+  on Windows (where HOME is typically unset). Previously it fell back to `"."`, looking
+  for `.\.trustee\config\trustee.toml` in the current directory and failing.
+
 ## [0.1.65] - 2026-06-07
 
 ### Changed
