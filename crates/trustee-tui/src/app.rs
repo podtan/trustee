@@ -318,10 +318,66 @@ impl App {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        // Main async loop with tokio::select!
+        // Main event loop.
+        //
+        // Uses a multi-phase non-blocking strategy that guarantees terminal
+        // input (especially ESC to cancel) is processed every single iteration,
+        // even when the workflow channel is flooded with streaming tokens.
+        //
+        // Previously this used `tokio::select! { biased; ... }` which always
+        // prioritized workflow_rx.recv() over terminal events.  During LLM
+        // streaming, TuiSink sends one message per token, so the biased select
+        // consumed every delta before ever polling for keypresses — making ESC
+        // unresponsive until the stream paused.
+        //
+        // The new loop order:
+        //   1. Drain ALL pending terminal events (non-blocking, Duration::ZERO)
+        //   2. Early-exit check (should_quit)
+        //   3. Batch-drain workflow messages with try_recv() (up to 256/cycle)
+        //   4. Advance spinner + draw UI
+        //   5. If nothing was available, block briefly on select! (idle wait)
         loop {
+            // --- Phase 1: Non-blocking terminal event drain ---
+            //
+            // Read every event that is already buffered in the terminal input
+            // queue without blocking.  Duration::ZERO means "return immediately"
+            // so ESC and other keypresses are handled before we even look at
+            // the workflow channel.
+            loop {
+                if event::poll(std::time::Duration::from_millis(0))? {
+                    let ev = event::read()?;
+                    self.handle_event(ev)?;
+                } else {
+                    break;
+                }
+            }
+
+            // --- Phase 2: Early exit ---
+            if self.should_quit {
+                break;
+            }
+
+            // --- Phase 3: Batch-drain workflow messages ---
+            //
+            // Process ALL pending messages with try_recv() so the UI catches
+            // up quickly.  The 256-message cap prevents unbounded processing in
+            // pathological cases while still draining bursts efficiently.
+            // After draining, we immediately loop back to re-check terminal
+            // events (Phase 1), so keypresses are never starved.
+            let mut processed_any = false;
+            for _ in 0..256 {
+                match self.workflow_rx.try_recv() {
+                    Ok(msg) => {
+                        self.handle_workflow_message(msg);
+                        processed_any = true;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // --- Phase 4: Spinner animation + draw ---
             // Advance spinner tick and refresh any in-flight spinner lines.
-            // The 8-frame braille spinner cycles at ~50ms per frame (poll timeout).
+            // The 8-frame braille spinner cycles at ~50ms per frame.
             const FRAMES: [char; 8] = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧'];
             self.spinner_tick = self.spinner_tick.wrapping_add(1);
             let frame = FRAMES[(self.spinner_tick as usize) % FRAMES.len()];
@@ -336,30 +392,35 @@ impl App {
             // Draw the UI
             terminal.draw(|f| self.render(f))?;
 
-            // Use tokio::select! to handle both terminal events and workflow messages.
-            // biased; prioritizes workflow messages over the 50ms event poll so
-            // rapid output bursts (e.g. streaming API tokens) update the panel
-            // without competing with idle poll timeouts.
-            tokio::select! {
-                biased;
-
-                // Handle messages from async workflows (higher priority)
-                msg = self.workflow_rx.recv() => {
-                    if let Some(msg) = msg {
-                        self.handle_workflow_message(msg);
-                    }
-                }
-
-                // Handle terminal events (non-blocking poll)
-                result = Self::poll_event() => {
-                    if let Some(event) = result? {
-                        self.handle_event(event)?;
-                    }
-                }
-            }
-
+            // Re-check quit after drawing (handle_event may have set it)
             if self.should_quit {
                 break;
+            }
+
+            // --- Phase 5: Idle wait ---
+            //
+            // If no workflow messages were available in Phase 3, do a short
+            // blocking wait to avoid busy-looping.  If messages WERE available,
+            // skip the wait and immediately loop back to re-check terminal
+            // events (Phase 1) — this is the key fix for ESC responsiveness.
+            if !processed_any {
+                tokio::select! {
+                    biased;
+
+                    // Wait for the next workflow message
+                    msg = self.workflow_rx.recv() => {
+                        if let Some(msg) = msg {
+                            self.handle_workflow_message(msg);
+                        }
+                    }
+
+                    // Wait for the next terminal event (50ms poll keeps spinner alive)
+                    result = Self::poll_event() => {
+                        if let Some(event) = result? {
+                            self.handle_event(event)?;
+                        }
+                    }
+                }
             }
         }
 
