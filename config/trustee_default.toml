@@ -163,7 +163,7 @@ context_threshold = 170000   # Total context tokens that triggers auto-handoff
 name = "trustee"
 about = "A general-purpose agent that can morph into different specialized agents"
 default_command = "run"
-enabled_commands = ["run", "init", "config", "cache", "resume", "checkpoints", "sessions", "misc", "version"]
+enabled_commands = ["run", "init", "config", "cache", "resume", "checkpoints", "sessions", "misc", "version", "mcp"]
 show_progress = true
 interactive_mode = true
 require_confirmation = true
@@ -379,3 +379,74 @@ name = "clean"
 help = "Clean temporary files and logs"
 arg_type = "bool"
 long = "clean"
+
+# MCP command — Manage MCP server connections and authentication
+[cli.commands.mcp]
+description = "Manage MCP server connections and authentication"
+enabled = true
+
+[cli.commands.mcp.subcommands.auth]
+description = "Authenticate with an MCP credential via browser login (OAuth + PKCE)"
+enabled = true
+
+[[cli.commands.mcp.subcommands.auth.args]]
+name = "name"
+help = "Name of the MCP credential to authenticate with"
+arg_type = "string"
+required = true
+
+[cli.commands.mcp.subcommands.list]
+description = "List MCP servers and their authentication status"
+enabled = true
+
+[[cli.commands.mcp.subcommands.list.args]]
+name = "verbose"
+help = "Show detailed information"
+arg_type = "bool"
+long = "verbose"
+short = "v"
+
+[cli.commands.mcp.subcommands.add]
+description = "Register a new MCP server"
+enabled = true
+
+[[cli.commands.mcp.subcommands.add.args]]
+name = "name"
+help = "Name for the new MCP server"
+arg_type = "string"
+required = true
+
+[[cli.commands.mcp.subcommands.add.args]]
+name = "url"
+help = "MCP server URL"
+arg_type = "string"
+long = "url"
+required = true
+
+[[cli.commands.mcp.subcommands.add.args]]
+name = "auth_mode"
+help = "Authentication mode: static, service-account, or interactive"
+arg_type = "choice"
+choices = ["static", "service-account", "interactive"]
+long = "auth-mode"
+default = "interactive"
+
+[cli.commands.mcp.subcommands.logout]
+description = "Remove stored OAuth credentials for an MCP server"
+enabled = true
+
+[[cli.commands.mcp.subcommands.logout.args]]
+name = "name"
+help = "Name of the credential to remove"
+arg_type = "string"
+required = true
+
+[cli.commands.mcp.subcommands.debug]
+description = "Debug MCP connection and authentication"
+enabled = true
+
+[[cli.commands.mcp.subcommands.debug.args]]
+name = "name"
+help = "Name of the MCP server to debug"
+arg_type = "string"
+required = true
