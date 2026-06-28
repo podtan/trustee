@@ -27,6 +27,24 @@ use crate::tui_sink::TuiSink;
 use abk::cli::ResumeInfo;
 use abk::orchestration::output::{OutputEvent, OutputSink};
 
+/// Status of an MCP server connection (for the MCP status panel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpServerStatus {
+    /// Server connected and tools loaded successfully
+    Connected,
+    /// Server failed to connect (timeout, DNS error, auth failure, etc.)
+    Failed,
+}
+
+/// Information about a single MCP server shown in the status panel.
+#[derive(Debug, Clone)]
+pub struct McpServerInfo {
+    pub name: String,
+    pub status: McpServerStatus,
+    pub tool_count: usize,
+    pub error: Option<String>,
+}
+
 /// Which panel currently has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusPanel {
@@ -84,6 +102,13 @@ pub enum TuiMessage {
     ToolDone { tool_name: String, success: bool, hint: Option<String> },
     /// Context token count updated (for auto-handoff threshold checking)
     ContextTokensUpdated(usize),
+    /// MCP server status update from agent initialization
+    McpServerStatus {
+        name: String,
+        connected: bool,
+        tool_count: usize,
+        error: Option<String>,
+    },
 }
 
 /// Build information for ABK (forward declaration)
@@ -229,6 +254,8 @@ pub struct App {
     current_context_tokens: usize,
     /// Auto-handoff configuration parsed from [tui.auto_handoff].
     auto_handoff: AutoHandoffConfig,
+    /// MCP server statuses received from agent init
+    pub mcp_servers: Vec<McpServerInfo>,
 }
 
 impl App {
@@ -282,6 +309,7 @@ impl App {
             spinner_tick: 0,
             current_context_tokens: 0,
             auto_handoff: AutoHandoffConfig::default(),
+            mcp_servers: Vec::new(),
         }
     }
 
@@ -954,6 +982,16 @@ impl App {
                     ));
                 }
             }
+            TuiMessage::McpServerStatus { name, connected, tool_count, error } => {
+                let status = if connected { McpServerStatus::Connected } else { McpServerStatus::Failed };
+                if let Some(existing) = self.mcp_servers.iter_mut().find(|s| s.name == name) {
+                    existing.status = status;
+                    existing.tool_count = tool_count;
+                    existing.error = error;
+                } else {
+                    self.mcp_servers.push(McpServerInfo { name, status, tool_count, error });
+                }
+            }
             TuiMessage::HandoffReady(briefing) => {
                 // Briefing generation complete — transition out of Running state,
                 // clear resume_info (fresh session), then fire the briefing as a
@@ -1262,15 +1300,37 @@ impl App {
             .scroll((clamped_scroll, 0));
         frame.render_widget(output_paragraph, content_chunks[0]);
 
-        // Render todo panel on the right side
+        // Split the right panel vertically: Todos on top, MCP status on bottom.
+        // MCP panel height is dynamic based on server count.
+        let mcp_line_count = self.mcp_servers.len();
+        let failed_count = self.mcp_servers.iter()
+            .filter(|s| s.status == McpServerStatus::Failed && s.error.is_some())
+            .count();
+        // Min: 4 rows (border + "(none)" message). Max: half the right column height.
+        let mcp_height = (2 + mcp_line_count + failed_count)
+            .max(4)
+            .min((content_chunks[1].height / 2) as usize) as u16;
+
+        let right_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(0),              // Todos — takes remaining space
+                Constraint::Length(mcp_height),   // MCP Status — dynamic!
+            ])
+            .split(content_chunks[1]);
+
+        // Update todo_rect to only the todo portion for mouse hit-testing
+        self.todo_rect = right_chunks[0];
+
+        // Render todo panel on the top portion of the right side
         let todo_title = format!("Todos ({})", self.todo_lines.len());
         let todo_text = if self.todo_lines.is_empty() {
             Text::from("No tasks")
         } else {
             Text::from(self.todo_lines.iter().map(|l| Line::from(l.as_str())).collect::<Vec<_>>())
         };
-        let todo_content_height = estimate_visual_lines(&todo_text, content_chunks[1].width);
-        let todo_viewport = content_chunks[1].height.saturating_sub(2) as usize;
+        let todo_content_height = estimate_visual_lines(&todo_text, right_chunks[0].width);
+        let todo_viewport = right_chunks[0].height.saturating_sub(2) as usize;
         let todo_max = todo_content_height.saturating_sub(todo_viewport) as u16;
         self.todo_max_scroll_cache = todo_max;
         let todo_clamped = self.todo_scroll.min(todo_max);
@@ -1289,7 +1349,10 @@ impl App {
             )
             .wrap(Wrap { trim: false })
             .scroll((todo_clamped, 0));
-        frame.render_widget(todo_paragraph, content_chunks[1]);
+        frame.render_widget(todo_paragraph, right_chunks[0]);
+
+        // Render MCP status panel on the bottom portion of the right side
+        self.render_mcp_status(frame, right_chunks[1]);
 
         // Render input text with a visible block cursor (reversed colors).
         let char_count = self.input.chars().count();
@@ -1379,6 +1442,77 @@ impl App {
             };
             frame.render_widget(banner, banner_area);
         }
+    }
+
+    /// Render the MCP server status panel (bottom of right column).
+    ///
+    /// Shows ✓/✗ icons + server name + tool count for each MCP server.
+    /// Panel height is dynamic: grows with server count, capped at 50% of right column.
+    /// Failed servers show a truncated error message on the line below.
+    fn render_mcp_status(&self, frame: &mut Frame, area: Rect) {
+        let connected = self.mcp_servers.iter()
+            .filter(|s| s.status == McpServerStatus::Connected).count();
+        let mcp_title = format!("MCP ({}/{})", connected, self.mcp_servers.len());
+
+        let grey = Style::default().fg(Color::DarkGray);
+        let block = Block::default()
+            .title(mcp_title)
+            .title_style(Style::default().add_modifier(Modifier::BOLD))
+            .borders(Borders::ALL)
+            .border_style(grey);
+
+        if self.mcp_servers.is_empty() {
+            let paragraph = Paragraph::new(Text::from(Line::from(
+                Span::styled("(none)", grey)
+            )))
+            .block(block);
+            frame.render_widget(paragraph, area);
+            return;
+        }
+
+        let mut lines: Vec<Line> = Vec::new();
+        for s in &self.mcp_servers {
+            let (icon, color) = match s.status {
+                McpServerStatus::Connected => ("✓", Color::Green),
+                McpServerStatus::Failed => ("✗", Color::Red),
+            };
+            let count_str = if s.tool_count > 0 {
+                format!("{} tools", s.tool_count)
+            } else {
+                "--".to_string()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", icon), Style::default().fg(color)),
+                Span::raw(s.name.clone()),
+                Span::raw("  "),
+                Span::styled(count_str, grey),
+            ]));
+
+            // Show truncated error for failed servers
+            if s.status == McpServerStatus::Failed {
+                if let Some(ref err) = s.error {
+                    let max_len = (area.width as usize).saturating_sub(6);
+                    let truncated = if err.len() > max_len {
+                        format!("  {}", &err[..max_len.saturating_sub(1)])
+                    } else {
+                        format!("  {}", err)
+                    };
+                    lines.push(Line::from(
+                        Span::styled(truncated, grey)
+                    ));
+                }
+            }
+        }
+
+        // Scroll to show latest entries if content overflows
+        let content_lines = lines.len();
+        let viewport_lines = area.height.saturating_sub(2) as usize;
+        let scroll = content_lines.saturating_sub(viewport_lines) as u16;
+
+        let paragraph = Paragraph::new(Text::from(lines))
+            .block(block)
+            .scroll((scroll, 0));
+        frame.render_widget(paragraph, area);
     }
 }
 

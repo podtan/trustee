@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.83] - 2026-06-28
+
+### Added
+- **feat(tui): MCP Server Status Panel** — a dedicated panel in the right column
+  (below Todos) showing ✓/✗ status, server name, tool count, and truncated error
+  messages for each configured MCP server. Panel height is dynamic (scales with
+  server count, caps at 50% of the right column). Data flows through ABK's
+  `OutputEvent::McpServerStatus` — ABK stays TUI-agnostic.
+
+### Changed
+- **deps: bump abk to 0.7.1** — adds `OutputEvent::McpServerStatus` variant and
+  `emit_mcp_server_statuses()` on Agent.
+
 ## [0.1.82] - 2026-06-07
 
 ### Changed

@@ -160,6 +160,17 @@ impl OutputSink for TuiSink {
                 let _ = self.tx.send(TuiMessage::ReasoningDelta(delta));
                 return; // delta path: skip the IDLE reset below
             }
+
+            // MCP server status — forward to TUI for the MCP status panel
+            OutputEvent::McpServerStatus { name, connected, tool_count, error } => {
+                let _ = self.tx.send(TuiMessage::McpServerStatus {
+                    name,
+                    connected,
+                    tool_count,
+                    error,
+                });
+                return; // skip the default msg path below
+            }
         };
 
         // Non-delta path: reset state to IDLE before sending the message.
