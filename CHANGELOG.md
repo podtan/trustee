@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.80] - 2026-06-07
+
+### Changed
+- **deps: bump abk to 0.6.2** — updates cats to 0.1.28, which removes the interactive
+  command detector entirely. The bash tool no longer kills commands based on pattern
+  matching (e.g. `password:`, `Permission denied`, `[Y/n]`). This eliminates false
+  positives where legitimate commands were blocked because their output happened to
+  contain these words.
+
+## [0.1.79] - 2026-06-07
+
+### Added
+- **feat(mcp): interactive OAuth browser login (PKCE)** — `trustee mcp auth <name>` now
+  supports browser-based login with stored tokens and automatic refresh. New `interactive`
+  credential type for MCP servers.
+
 ## [0.1.69] - 2026-06-08
 
 ### Changed
