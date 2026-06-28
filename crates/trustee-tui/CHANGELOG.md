@@ -5,13 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.38] - 2026-06-07
+## [0.1.40] - 2026-06-07
+
+### Changed
+- **deps: bump abk to 0.7.0** — all raw `eprintln!` calls in abk now route through
+  `tee_eprintln()` which suppresses console output in TUI mode. This fixes TUI
+  corruption when MCP servers timeout or authentication fails (warnings no longer
+  write directly to stderr bypassing ratatui's alternate screen buffer).
+
+## [0.1.39] - 2026-06-07
 
 ### Changed
 - **deps: bump abk to 0.6.2** — updates cats to 0.1.28, which removes the interactive
   command detector from the bash tool (eliminates false positives).
 
-## [0.1.37] - 2026-06-07
+## [0.1.38] - 2026-06-07
 
 ### Changed
 - **deps: bump abk to 0.5.46** — bash tool (cats) and executor now use PowerShell

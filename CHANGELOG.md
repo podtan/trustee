@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.82] - 2026-06-07
+
+### Changed
+- **deps: bump abk to 0.7.0** — all raw `eprintln!` calls in abk now route through
+  `tee_eprintln()` which suppresses console output in TUI mode. Fixes TUI corruption
+  when MCP servers timeout or authentication fails.
+
+## [0.1.81] - 2026-06-07
+
+### Changed
+- **deps: bump abk to 0.6.3, cats to 0.1.28** — removes interactive command detector
+  (false-positive kills on commands containing `password:`, `Permission denied`, etc.)
+
 ## [0.1.80] - 2026-06-07
 
 ### Changed
