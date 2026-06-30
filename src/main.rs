@@ -341,6 +341,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Determine agent name from the project config (for init) or use "trustee" as default
     let agent_name = "trustee";
     
+    // Intercept the "upgrade" command — handled by trustee-upgrade, not ABK
+    let is_upgrade = args.get(1).map(|s| s.as_str()) == Some("upgrade");
+    if is_upgrade {
+        return run_upgrade_command(&args[2..]).await;
+    }
+
     // Check if this is the init command (special case - use project config)
     let is_init = args.get(1).map(|s| s.as_str()) == Some("init");
     
@@ -406,5 +412,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         // Run with merged config (ABK does NOT read files)
         abk::cli::run_from_raw_config(&merged_config, secrets, Some(build_info())).await
+    }
+}
+
+/// Handle the `trustee upgrade` command.
+///
+/// Parses upgrade-specific args and delegates to the trustee-upgrade crate.
+async fn run_upgrade_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use clap::{Arg, ArgAction, Command};
+
+    let cmd = Command::new("trustee upgrade")
+        .about("Download and install the latest trustee release")
+        .arg(
+            Arg::new("check")
+                .long("check")
+                .help("Only check for updates without installing")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("force")
+                .long("force")
+                .short('f')
+                .help("Force upgrade even if already up-to-date")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("version")
+                .long("version-target")
+                .short('v')
+                .help("Upgrade to a specific version (e.g. 0.1.84)")
+                .value_name("VERSION"),
+        )
+        .arg(
+            Arg::new("repo")
+                .long("repo")
+                .help("GitHub repository (owner/repo) to download from")
+                .value_name("REPO")
+                .default_value("podtan/trustee"),
+        )
+        .arg(
+            Arg::new("dry-run")
+                .long("dry-run")
+                .help("Show what would happen without making changes")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("prerelease")
+                .long("prerelease")
+                .help("Include pre-release versions")
+                .action(ArgAction::SetTrue),
+        );
+
+    let matches = cmd.try_get_matches_from(std::iter::once("trustee upgrade".to_string()).chain(args.iter().cloned()))?;
+
+    let opts = trustee_upgrade::UpgradeOptions {
+        check_only: matches.get_flag("check"),
+        force: matches.get_flag("force"),
+        dry_run: matches.get_flag("dry-run"),
+        prerelease: matches.get_flag("prerelease"),
+        target_version: matches.get_one::<String>("version").map(|s| s.to_string()),
+        repo: matches.get_one::<String>("repo").cloned(),
+        current_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+
+    match trustee_upgrade::run_upgrade(opts).await {
+        Ok(result) => {
+            println!("{}", result.summary());
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("❌ Upgrade failed: {e}");
+            std::process::exit(1);
+        }
     }
 }

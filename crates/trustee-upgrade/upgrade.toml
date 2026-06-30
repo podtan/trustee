@@ -1,0 +1,37 @@
+# Trustee Upgrade Configuration
+#
+# This file is compiled into the binary via include_str! so the defaults
+# are baked in.  At runtime the Updater looks for an external override at:
+#   ~/.trustee/upgrade.toml
+# and merges it over these defaults.
+
+[upgrade]
+# GitHub repository in owner/repo format
+repo = "podtan/trustee"
+
+# Name of the binary to look for inside the downloaded archive
+# and to replace on disk.
+binary_name = "trustee"
+
+# Subdirectory under ~/.trustee/ where the binary lives
+# (e.g. ~/.trustee/bin/trustee)
+bin_subdir = "bin"
+
+# Name of the symlink in ~/.local/bin/
+symlink_name = "trustee"
+
+# User-agent prefix sent to the GitHub API
+user_agent = "trustee-upgrade"
+
+# Preferred platform variants in priority order.
+#
+# When selecting a download asset, the updater checks these patterns
+# in order before falling back to the compile-time target triple.
+# This lets you prefer musl over gnu (or vice-versa) even though
+# the binary was compiled for gnu.
+#
+# Example: prefer musl on x86_64 Linux to avoid libc version mismatch.
+preferred_variants = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+]

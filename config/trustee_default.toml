@@ -163,7 +163,7 @@ context_threshold = 170000   # Total context tokens that triggers auto-handoff
 name = "trustee"
 about = "A general-purpose agent that can morph into different specialized agents"
 default_command = "run"
-enabled_commands = ["run", "init", "config", "cache", "resume", "checkpoints", "sessions", "misc", "version", "mcp"]
+enabled_commands = ["run", "init", "config", "cache", "resume", "checkpoints", "sessions", "misc", "version", "mcp", "upgrade"]
 show_progress = true
 interactive_mode = true
 require_confirmation = true
@@ -450,3 +450,47 @@ name = "name"
 help = "Name of the MCP server to debug"
 arg_type = "string"
 required = true
+
+# Upgrade command — Self-update trustee binary from GitHub releases
+[cli.commands.upgrade]
+description = "Download and install the latest trustee release"
+enabled = true
+
+[[cli.commands.upgrade.args]]
+name = "check"
+help = "Only check for updates without installing"
+arg_type = "bool"
+long = "check"
+
+[[cli.commands.upgrade.args]]
+name = "force"
+help = "Force upgrade even if already up-to-date"
+arg_type = "bool"
+long = "force"
+short = "f"
+
+[[cli.commands.upgrade.args]]
+name = "version"
+help = "Upgrade to a specific version (e.g. 0.1.84)"
+arg_type = "string"
+long = "version-target"
+short = "v"
+
+[[cli.commands.upgrade.args]]
+name = "repo"
+help = "GitHub repository (owner/repo) to download from"
+arg_type = "string"
+long = "repo"
+default = "podtan/trustee"
+
+[[cli.commands.upgrade.args]]
+name = "dry_run"
+help = "Show what would happen without making changes"
+arg_type = "bool"
+long = "dry-run"
+
+[[cli.commands.upgrade.args]]
+name = "prerelease"
+help = "Include pre-release versions"
+arg_type = "bool"
+long = "prerelease"

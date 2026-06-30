@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.85] - 2026-06-30
+
+### Added
+- **feat(upgrade): `trustee upgrade` subcommand** — new `trustee-upgrade` crate
+  that checks GitHub releases, downloads the correct platform binary, verifies
+  SHA-256, and performs an atomic binary replacement. Supports `--check`,
+  `--force`, `--dry-run`, `--version-target`, `--repo`, and `--prerelease` flags.
+  Configuration is driven by `upgrade.toml` (binary name, repo, symlink paths,
+  user-agent) with user overrides at `~/.trustee/upgrade.toml`.
+- **feat(config): add `upgrade` command to default config** with all CLI args.
+
+### Changed
+- **deps: add `trustee-upgrade` (path), `clap` 4.6** — upgrade tool is always
+  compiled in (no feature flag needed). `trustee upgrade` is intercepted in
+  `main.rs` before ABK CLI dispatch.
+- **deps: reqwest 0.13 with rustls** (no native-tls/openssl dependency).
+
 ## [0.1.84] - 2026-06-30
 
 ### Changed
