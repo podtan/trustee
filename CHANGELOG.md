@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.84] - 2026-06-30
+
+### Changed
+- **deps: bump abk to 0.7.3** — fixes MCP status panel showing `0/0 (none)` when all
+  MCP servers fail. The `McpToolLoader` is now kept even when `has_tools()` returns
+  false, preserving `server_statuses` so failed servers with error details are emitted
+  to the TUI. Also adds a no-op stub for `emit_mcp_server_statuses()` when
+  `registry-mcp` feature is disabled.
+
 ## [0.1.83] - 2026-06-28
 
 ### Added

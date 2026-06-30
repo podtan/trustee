@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.41] - 2026-06-30
+
+### Changed
+- **deps: bump abk to 0.7.3** — fixes MCP status panel showing `0/0 (none)` when all
+  MCP servers fail. The `McpToolLoader` is now kept even when `has_tools()` returns
+  false, preserving `server_statuses` so failed servers with error details are emitted
+  to the TUI.
+
 ## [0.1.40] - 2026-06-07
 
 ### Changed
