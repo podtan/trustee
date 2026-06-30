@@ -237,8 +237,9 @@ pub struct App {
     output_rect: Rect,
     todo_rect: Rect,
     input_rect: Rect,
-    /// Whether mouse events are passed through to terminal (for native text selection)
-    mouse_passthrough: bool,
+    /// When Some, the focused panel is zoomed fullscreen (no borders) for clean
+    /// text selection. Mouse capture is disabled while zoomed.
+    zoomed_panel: Option<FocusPanel>,
     /// Cancellation token for aborting the current workflow
     cancel_token: CancellationToken,
     /// Command buffered by user during cancellation wind-down.
@@ -275,7 +276,7 @@ impl App {
                 "  y - Copy visible text (Output/Todo)".to_string(),
                 "  Enter - Execute task".to_string(),
                 "  Ctrl+H - Session handoff (fresh context with briefing)".to_string(),
-                "  Ctrl+O - Toggle mouse passthrough (select text)".to_string(),
+                "  Ctrl+Z - Zoom panel for clean text selection (toggle)".to_string(),
                 "  Esc - Cancel workflow / Exit".to_string(),
                 "  Ctrl+C - Exit".to_string(),
             ],
@@ -301,7 +302,7 @@ impl App {
             output_rect: Rect::default(),
             todo_rect: Rect::default(),
             input_rect: Rect::default(),
-            mouse_passthrough: false,
+            zoomed_panel: None,
             cancel_token: CancellationToken::new(),
             pending_command: None,
             handoff_pending: false,
@@ -493,10 +494,6 @@ impl App {
 
         // Handle mouse events: click to focus, scroll wheel to scroll panel
         if let Event::Mouse(mouse) = event {
-            // In passthrough mode, ignore all mouse events (terminal handles them)
-            if self.mouse_passthrough {
-                return Ok(());
-            }
             let col = mouse.column;
             let row = mouse.row;
             match mouse.kind {
@@ -551,15 +548,27 @@ impl App {
                 return Ok(());
             }
 
-            // Exit passthrough mode on any keypress — re-enable mouse capture
-            if self.mouse_passthrough {
-                execute!(std::io::stdout(), EnableMouseCapture).ok();
-                self.mouse_passthrough = false;
-                return Ok(());
-            }
-
             // Global keys — work regardless of focus
             match key.code {
+                // Ctrl+Z: toggle zoom for clean text selection (like tmux).
+                // Zoom in: focused panel fills the screen, mouse capture off,
+                //   user selects text with terminal-native click-drag.
+                // Zoom out: restore normal TUI layout, mouse capture on.
+                // When zoomed, all other keys are ignored — user is in selection mode.
+                KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if self.zoomed_panel.is_some() {
+                        self.zoomed_panel = None;
+                        execute!(std::io::stdout(), EnableMouseCapture).ok();
+                    } else {
+                        self.zoomed_panel = Some(self.focus);
+                        execute!(std::io::stdout(), DisableMouseCapture).ok();
+                    }
+                    return Ok(());
+                }
+                // When zoomed, consume all other keys (selection mode)
+                _ if self.zoomed_panel.is_some() => {
+                    return Ok(());
+                }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.should_quit = true;
                     return Ok(());
@@ -595,12 +604,6 @@ impl App {
                         FocusPanel::Todo   => FocusPanel::Output,
                         FocusPanel::Output => FocusPanel::Input,
                     };
-                    return Ok(());
-                }
-                // Ctrl+O: toggle mouse passthrough for native text selection
-                KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    execute!(std::io::stdout(), DisableMouseCapture).ok();
-                    self.mouse_passthrough = true;
                     return Ok(());
                 }
                 // Ctrl+H: session handoff — generate LLM briefing, start fresh context
@@ -1221,6 +1224,13 @@ impl App {
 
     /// Render the TUI
     pub fn render(&mut self, frame: &mut Frame) {
+        // If a panel is zoomed, render only that panel fullscreen (no borders).
+        // This gives the user clean text for terminal-native click-drag selection.
+        if let Some(panel) = self.zoomed_panel {
+            self.render_zoomed(frame, panel);
+            return;
+        }
+
         // Create main layout: output takes remaining space, input gets fixed height
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -1427,20 +1437,89 @@ impl App {
             .wrap(Wrap { trim: false })
             .scroll((self.input_scroll, 0));
         frame.render_widget(input_paragraph, main_chunks[1]);
+    }
 
-        // Render mouse passthrough banner if active
-        if self.mouse_passthrough {
-            let banner = Paragraph::new(Span::styled(
-                "📋 Mouse passthrough — select text, press any key to return",
-                Style::default().fg(Color::Yellow).bg(Color::DarkGray),
-            ));
-            let banner_area = Rect {
-                x: frame.area().x,
-                y: frame.area().y + frame.area().height.saturating_sub(1),
-                width: frame.area().width,
-                height: 1,
-            };
-            frame.render_widget(banner, banner_area);
+    /// Render a single panel fullscreen with no borders or margins.
+    ///
+    /// Used when the user presses Ctrl+Z to zoom into a panel for clean
+    /// terminal-native text selection (click-drag → OS copy shortcut).
+    /// The entire terminal area is used — no borders, no margins, no other panels.
+    fn render_zoomed(&mut self, frame: &mut Frame, panel: FocusPanel) {
+        let area = frame.area();
+
+        match panel {
+            FocusPanel::Output => {
+                let grey_style = Style::default().fg(Color::DarkGray);
+                let normal_style = Style::default();
+                let styled_lines: Vec<Line> = self.output_lines.iter().flat_map(|raw| {
+                    let (style, text) = if let Some(stripped) = raw.strip_prefix('\x01') {
+                        (grey_style, stripped)
+                    } else {
+                        (normal_style, raw.as_str())
+                    };
+                    text.split('\n').map(move |segment| {
+                        Line::from(Span::styled(segment.to_string(), style))
+                    }).collect::<Vec<_>>()
+                }).collect();
+
+                let display_text = Text::from(styled_lines);
+                let content_height = estimate_visual_lines(&display_text, area.width);
+                let viewport_height = area.height as usize;
+                let max_scroll = content_height.saturating_sub(viewport_height) as u16;
+                self.max_scroll_cache = max_scroll;
+                let clamped_scroll = if self.scroll == u16::MAX {
+                    max_scroll
+                } else {
+                    self.scroll.min(max_scroll)
+                };
+
+                let paragraph = Paragraph::new(display_text)
+                    .wrap(Wrap { trim: false })
+                    .scroll((clamped_scroll, 0));
+                frame.render_widget(paragraph, area);
+            }
+            FocusPanel::Todo => {
+                let todo_text = if self.todo_lines.is_empty() {
+                    Text::from("No tasks")
+                } else {
+                    Text::from(self.todo_lines.iter().map(|l| Line::from(l.as_str())).collect::<Vec<_>>())
+                };
+                let todo_content_height = estimate_visual_lines(&todo_text, area.width);
+                let todo_viewport = area.height as usize;
+                let todo_max = todo_content_height.saturating_sub(todo_viewport) as u16;
+                self.todo_max_scroll_cache = todo_max;
+                let todo_clamped = self.todo_scroll.min(todo_max);
+
+                let paragraph = Paragraph::new(todo_text)
+                    .wrap(Wrap { trim: false })
+                    .scroll((todo_clamped, 0));
+                frame.render_widget(paragraph, area);
+            }
+            FocusPanel::Input => {
+                let char_count = self.input.chars().count();
+                let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
+                let input_spans = if self.cursor_position < char_count {
+                    let before: String = self.input.chars().take(self.cursor_position).collect();
+                    let at: String = self.input.chars().skip(self.cursor_position).take(1).collect();
+                    let after: String = self.input.chars().skip(self.cursor_position + 1).collect();
+                    vec![
+                        Span::raw(before),
+                        Span::styled(at, cursor_style),
+                        Span::raw(after),
+                    ]
+                } else {
+                    vec![
+                        Span::raw(self.input.clone()),
+                        Span::styled(" ", cursor_style),
+                    ]
+                };
+                let input_text = Text::from(Line::from(input_spans));
+                let paragraph = Paragraph::new(input_text)
+                    .style(Style::default().fg(Color::White))
+                    .wrap(Wrap { trim: false })
+                    .scroll((self.input_scroll, 0));
+                frame.render_widget(paragraph, area);
+            }
         }
     }
 
