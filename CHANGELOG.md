@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.86] - 2026-07-05
+
+### Fixed
+- **fix(resume): `resume -i` hang on Windows** — added defensive
+  `crossterm::terminal::disable_raw_mode()` on the CLI path to handle
+  terminals left in raw mode by improperly terminated TUI sessions
+  (issue #2dd0cbb2).
+- **deps: bump abk to 0.7.4** — `read_line` now performs blocking stdin
+  read in a dedicated OS thread to avoid tokio/IOCP conflict on Windows.
+  `tee_println` now flushes stdout explicitly for reliable console output
+  on Windows ConPTY.
+
 ## [0.1.85] - 2026-06-30
 
 ### Added

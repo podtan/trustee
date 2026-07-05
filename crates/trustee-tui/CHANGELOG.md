@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.42] - 2026-07-05
+
+### Changed
+- **deps: bump abk to 0.7.4** — `read_line` now performs blocking stdin
+  read in a dedicated OS thread (fixes `resume -i` hang on Windows);
+  `tee_println` now flushes stdout explicitly (fixes garbled output on
+  Windows ConPTY). Issue #2dd0cbb2.
+
 ## [0.1.41] - 2026-06-30
 
 ### Changed
