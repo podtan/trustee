@@ -337,6 +337,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // No arguments provided - launch TUI mode
         return run_tui_mode().await;
     }
+
+    // Defensive: ensure terminal is not in raw mode from a previous TUI session
+    // that was hard-killed (SIGKILL, crash, etc.) without restoring terminal state.
+    #[cfg(feature = "tui")]
+    let _ = crossterm::terminal::disable_raw_mode();
     
     // Determine agent name from the project config (for init) or use "trustee" as default
     let agent_name = "trustee";
