@@ -39,7 +39,7 @@ crossterm = { version = "0.28", optional = true }
 tokio-util = { version = "0.7", optional = true }
 trustee-tui = { version = "0.1.42", path = "crates/trustee-tui", optional = true }
 # Self-upgrade tool (always enabled — `trustee upgrade` subcommand)
-trustee-upgrade = { path = "crates/trustee-upgrade" }
+trustee-upgrade = { version = "0.1.1", path = "crates/trustee-upgrade" }
 
 [workspace]
 members = ["crates/trustee-tui", "crates/trustee-upgrade"]

@@ -1,12 +1,13 @@
 [package]
 name = "trustee-upgrade"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Self-upgrade tool for Trustee agent binary — downloads and installs the latest GitHub release"
 license = "MIT OR Apache-2.0"
 authors = ["Podtan Team"]
 keywords = ["trustee", "upgrade", "self-update", "github"]
 categories = ["command-line-utilities"]
+publish = true
 
 [[bin]]
 name = "trustee-upgrade"
