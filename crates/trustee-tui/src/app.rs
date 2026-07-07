@@ -135,10 +135,21 @@ impl Default for AutoHandoffConfig {
     }
 }
 
+/// Tagged chunk type so we can distinguish reasoning (thinking) content
+/// from regular text content after draining the capture channel.
+enum CapturedText {
+    Text(String),
+    Reasoning(String),
+}
+
 /// Sink used during handoff briefing — captures LLM response text and
 /// cancels the loop immediately if the LLM makes a tool call.
+///
+/// Also captures ReasoningChunk events as a fallback: some thinking-capable
+/// models deliver their entire output through reasoning tokens, so without
+/// this the briefing channel would remain empty (issue #63ad71c8).
 struct HandoffCaptureSink {
-    tx: mpsc::UnboundedSender<String>,
+    tx: mpsc::UnboundedSender<CapturedText>,
     cancel: CancellationToken,
 }
 
@@ -146,10 +157,15 @@ impl OutputSink for HandoffCaptureSink {
     fn emit(&self, event: OutputEvent) {
         match event {
             OutputEvent::StreamingChunk { delta } if !delta.is_empty() => {
-                let _ = self.tx.send(delta);
+                let _ = self.tx.send(CapturedText::Text(delta));
             }
             OutputEvent::LlmResponse { text, .. } if !text.is_empty() => {
-                let _ = self.tx.send(text);
+                let _ = self.tx.send(CapturedText::Text(text));
+            }
+            // Reasoning/thinking tokens — capture as fallback in case the model
+            // delivers its entire briefing through reasoning instead of text.
+            OutputEvent::ReasoningChunk { delta } if !delta.is_empty() => {
+                let _ = self.tx.send(CapturedText::Reasoning(delta));
             }
             // LLM disobeyed "Do NOT use any tools" — cancel immediately.
             // Whatever text was captured before this point becomes the briefing;
@@ -1047,7 +1063,7 @@ impl App {
         self.output_lines.push("🔀 Generating session handoff briefing...".to_string());
 
         tokio::spawn(async move {
-            let (cap_tx, mut cap_rx) = mpsc::unbounded_channel::<String>();
+            let (cap_tx, mut cap_rx) = mpsc::unbounded_channel::<CapturedText>();
             let cap_sink: abk::orchestration::output::SharedSink =
                 std::sync::Arc::new(HandoffCaptureSink { tx: cap_tx, cancel: child_token.clone() });
 
@@ -1083,15 +1099,26 @@ impl App {
 
             abk::observability::set_tui_mode(false);
 
-            let mut briefing = String::new();
-            while let Ok(frag) = cap_rx.try_recv() {
-                briefing.push_str(&frag);
+            // Drain the capture channel. Separate text chunks from reasoning chunks.
+            // Priority: if any text was captured, use only text (models that emit
+            // reasoning first then produce the real briefing as text). If no text
+            // but reasoning was captured, fall back to reasoning content (models
+            // that deliver their entire output as thinking tokens — issue #63ad71c8).
+            let mut text_parts = String::new();
+            let mut reasoning_parts = String::new();
+            while let Ok(captured) = cap_rx.try_recv() {
+                match captured {
+                    CapturedText::Text(s) => text_parts.push_str(&s),
+                    CapturedText::Reasoning(s) => reasoning_parts.push_str(&s),
+                }
             }
 
-            let briefing = if briefing.trim().is_empty() {
-                "Session handoff: briefing unavailable — continue from previous context.".to_string()
+            let briefing = if !text_parts.trim().is_empty() {
+                text_parts.trim().to_string()
+            } else if !reasoning_parts.trim().is_empty() {
+                reasoning_parts.trim().to_string()
             } else {
-                briefing.trim().to_string()
+                "Session handoff: briefing unavailable — continue from previous context.".to_string()
             };
 
             tx.send(TuiMessage::HandoffReady(briefing)).ok();
