@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.87] - 2026-07-05
+
+### Fixed
+- **deps: bump trustee-tui to 0.1.43** — `HandoffCaptureSink` now captures
+  `ReasoningChunk` events. Thinking-capable models that deliver their entire
+  briefing through reasoning/thinking tokens no longer produce "briefing
+  unavailable". Text chunks take priority; reasoning is used as fallback
+  (issue #63ad71c8).
+
 ## [0.1.86] - 2026-07-05
 
 ### Fixed
