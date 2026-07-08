@@ -226,12 +226,15 @@ pub fn current_target_triple() -> &'static str {
     { "x86_64-apple-darwin" }
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     { "x86_64-pc-windows-msvc" }
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    { "aarch64-pc-windows-msvc" }
     #[cfg(not(any(
         all(target_os = "linux", target_arch = "aarch64"),
         all(target_os = "linux", target_arch = "x86_64"),
         all(target_os = "macos", target_arch = "aarch64"),
         all(target_os = "macos", target_arch = "x86_64"),
         all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "aarch64"),
     )))]
     { compile_error!("trustee-upgrade: unsupported platform — add your target triple here") }
 }
