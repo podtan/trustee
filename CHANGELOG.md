@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.88] - 2026-07-05
+
+### Fixed
+- **deps: bump trustee-upgrade to 0.1.2** — adds `aarch64-pc-windows-msvc` target
+  triple to `current_target_triple()`, fixing `compile_error!` on Windows ARM64
+  builds (issue #46eeec6b).
+
 ## [0.1.87] - 2026-07-05
 
 ### Fixed
