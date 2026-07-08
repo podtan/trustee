@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.89] - 2026-07-08
+
+### Changed
+- **deps: bump abk to 0.7.5** — checkpoint storage optimization: eliminates
+  per-iteration `_agent.json` and `_metadata.json` duplicate files. Agent state
+  is now written once as `session_agent.json`; metadata lives in `checkpoints.json`
+  index. Reduces a 99-iteration session from 299 files to 101. Fully backward
+  compatible with old sessions and all storage modes (Local, DocumentDB, Mirror)
+  (task #a1465c3d).
+
 ## [0.1.88] - 2026-07-05
 
 ### Fixed
