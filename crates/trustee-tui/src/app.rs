@@ -202,6 +202,31 @@ fn estimate_visual_lines(text: &Text, viewport_width: u16) -> usize {
         .max(1)
 }
 
+/// Parse a color name string from config into a ratatui `Color`.
+/// Supports all named ratatui colors. Unknown values default to `Gray`.
+fn parse_color(name: &str) -> Color {
+    match name.to_lowercase().as_str() {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "gray" | "grey" => Color::Gray,
+        "darkgray" | "darkgrey" => Color::DarkGray,
+        "lightred" => Color::LightRed,
+        "lightgreen" => Color::LightGreen,
+        "lightyellow" => Color::LightYellow,
+        "lightblue" => Color::LightBlue,
+        "lightmagenta" => Color::LightMagenta,
+        "lightcyan" => Color::LightCyan,
+        "white" => Color::White,
+        "reset" => Color::Reset,
+        _ => Color::Gray, // safe default
+    }
+}
+
 /// Main application state for the TUI
 pub struct App {
     /// Input buffer for user commands
@@ -276,6 +301,9 @@ pub struct App {
     /// Set when a terminal resize event is received — triggers terminal.clear()
     /// before the next draw to flush stale content from the old buffer dimensions.
     needs_clear: bool,
+    /// Style for reasoning/thinking text (parsed from [tui.colors] config).
+    /// Defaults to gray + DIM (visible on all terminals including Linux VT).
+    reasoning_style: Style,
 }
 
 impl App {
@@ -331,15 +359,17 @@ impl App {
             auto_handoff: AutoHandoffConfig::default(),
             mcp_servers: Vec::new(),
             needs_clear: false,
+            reasoning_style: Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
         }
     }
 
-    /// Parse [tui.auto_handoff] from the merged config TOML.
+    /// Parse [tui.auto_handoff] and [tui.colors] from the merged config TOML.
     /// Called after `config_toml` is set (from `lib.rs` or whenever config arrives).
     pub fn parse_auto_handoff_config(&mut self) {
         if let Some(ref config_toml) = self.config_toml {
             if let Ok(table) = config_toml.parse::<toml::Value>() {
                 if let Some(tui) = table.get("tui").and_then(|v| v.as_table()) {
+                    // Parse [tui.auto_handoff]
                     if let Some(ah) = tui.get("auto_handoff").and_then(|v| v.as_table()) {
                         if let Some(enabled) = ah.get("enabled").and_then(|v| v.as_bool()) {
                             self.auto_handoff.enabled = enabled;
@@ -347,6 +377,21 @@ impl App {
                         if let Some(threshold) = ah.get("context_threshold").and_then(|v| v.as_integer()) {
                             self.auto_handoff.context_threshold = threshold as usize;
                         }
+                    }
+                    // Parse [tui.colors]
+                    if let Some(colors) = tui.get("colors").and_then(|v| v.as_table()) {
+                        let mut style = Style::default();
+                        if let Some(color_name) = colors.get("reasoning_color").and_then(|v| v.as_str()) {
+                            style = style.fg(parse_color(color_name));
+                        } else {
+                            style = style.fg(Color::Gray);
+                        }
+                        if let Some(dim) = colors.get("reasoning_dim").and_then(|v| v.as_bool()) {
+                            if dim {
+                                style = style.add_modifier(Modifier::DIM);
+                            }
+                        }
+                        self.reasoning_style = style;
                     }
                 }
             }
@@ -1306,8 +1351,9 @@ impl App {
         // Output area title shows scroll mode
 
         // Render output area with scrollable content.
-        // Lines prefixed with \x01 are reasoning lines and rendered in dark grey.
-        let grey_style = Style::default().fg(Color::DarkGray);
+        // Lines prefixed with \x01 are reasoning lines, styled via reasoning_style
+        // (configurable in [tui.colors]).
+        let grey_style = self.reasoning_style;
         let normal_style = Style::default();
         let styled_lines: Vec<Line> = self.output_lines.iter().flat_map(|raw| {
             let (style, text) = if let Some(stripped) = raw.strip_prefix('\x01') {
@@ -1495,7 +1541,7 @@ impl App {
 
         match panel {
             FocusPanel::Output => {
-                let grey_style = Style::default().fg(Color::DarkGray);
+                let grey_style = self.reasoning_style;
                 let normal_style = Style::default();
                 let styled_lines: Vec<Line> = self.output_lines.iter().flat_map(|raw| {
                     let (style, text) = if let Some(stripped) = raw.strip_prefix('\x01') {
