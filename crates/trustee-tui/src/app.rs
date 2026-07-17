@@ -50,6 +50,7 @@ pub struct McpServerInfo {
 pub enum FocusPanel {
     Output,
     Todo,
+    Mcp,
     Input,
 }
 
@@ -277,7 +278,12 @@ pub struct App {
     /// Cached panel rectangles for mouse hit-testing (set during render)
     output_rect: Rect,
     todo_rect: Rect,
+    mcp_rect: Rect,
     input_rect: Rect,
+    /// Scroll position in MCP status panel
+    pub mcp_scroll: u16,
+    /// Cached max scroll for MCP status panel
+    mcp_max_scroll_cache: u16,
     /// When Some, the focused panel is zoomed fullscreen (no borders) for clean
     /// text selection. Mouse capture is disabled while zoomed.
     zoomed_panel: Option<FocusPanel>,
@@ -348,7 +354,10 @@ impl App {
             input_inner_width_cache: 80,
             output_rect: Rect::default(),
             todo_rect: Rect::default(),
+            mcp_rect: Rect::default(),
             input_rect: Rect::default(),
+            mcp_scroll: 0,
+            mcp_max_scroll_cache: 0,
             zoomed_panel: None,
             cancel_token: CancellationToken::new(),
             pending_command: None,
@@ -583,6 +592,8 @@ impl App {
                         self.focus = FocusPanel::Output;
                     } else if self.todo_rect.contains((col, row).into()) {
                         self.focus = FocusPanel::Todo;
+                    } else if self.mcp_rect.contains((col, row).into()) {
+                        self.focus = FocusPanel::Mcp;
                     } else if self.input_rect.contains((col, row).into()) {
                         self.focus = FocusPanel::Input;
                     }
@@ -596,6 +607,8 @@ impl App {
                         self.scroll = self.scroll.saturating_sub(3);
                     } else if self.todo_rect.contains((col, row).into()) {
                         self.todo_scroll = self.todo_scroll.saturating_sub(3);
+                    } else if self.mcp_rect.contains((col, row).into()) {
+                        self.mcp_scroll = self.mcp_scroll.saturating_sub(3);
                     } else if self.input_rect.contains((col, row).into()) {
                         self.input_scroll = self.input_scroll.saturating_sub(1);
                     }
@@ -611,6 +624,9 @@ impl App {
                     } else if self.todo_rect.contains((col, row).into()) {
                         self.todo_scroll = self.todo_scroll.saturating_add(3)
                             .min(self.todo_max_scroll_cache);
+                    } else if self.mcp_rect.contains((col, row).into()) {
+                        self.mcp_scroll = self.mcp_scroll.saturating_add(3)
+                            .min(self.mcp_max_scroll_cache);
                     } else if self.input_rect.contains((col, row).into()) {
                         self.input_scroll = self.input_scroll.saturating_add(1)
                             .min(self.input_max_scroll_cache);
@@ -668,19 +684,21 @@ impl App {
                     // Cancelling + ESC: ignore (already cancelling, don't quit)
                     return Ok(());
                 }
-                // Tab cycles focus: Input → Output → Todo → Input
+                // Tab cycles focus: Input → Output → Todo → Mcp → Input
                 KeyCode::Tab => {
                     self.focus = match self.focus {
                         FocusPanel::Input  => FocusPanel::Output,
                         FocusPanel::Output => FocusPanel::Todo,
-                        FocusPanel::Todo   => FocusPanel::Input,
+                        FocusPanel::Todo   => FocusPanel::Mcp,
+                        FocusPanel::Mcp    => FocusPanel::Input,
                     };
                     return Ok(());
                 }
-                // Shift+Tab cycles backwards: Input → Todo → Output → Input
+                // Shift+Tab cycles backwards: Input → Mcp → Todo → Output → Input
                 KeyCode::BackTab => {
                     self.focus = match self.focus {
-                        FocusPanel::Input  => FocusPanel::Todo,
+                        FocusPanel::Input  => FocusPanel::Mcp,
+                        FocusPanel::Mcp    => FocusPanel::Todo,
                         FocusPanel::Todo   => FocusPanel::Output,
                         FocusPanel::Output => FocusPanel::Input,
                     };
@@ -709,6 +727,7 @@ impl App {
             match self.focus {
                 FocusPanel::Output => self.handle_output_keys(key.code)?,
                 FocusPanel::Todo   => self.handle_todo_keys(key.code)?,
+                FocusPanel::Mcp    => self.handle_mcp_keys(key.code)?,
                 FocusPanel::Input  => self.handle_input_keys(key.code)?,
             }
         }
@@ -804,6 +823,46 @@ impl App {
             KeyCode::Char('y') => self.copy_to_clipboard(self.todo_lines.join("\n")),
             // Typing while todo focused → switch to input (blocked during Running/Cancelling)
             KeyCode::Char(c) if c != 'y' => {
+                if self.workflow_state != WorkflowState::Idle {
+                    return Ok(());
+                }
+                self.focus = FocusPanel::Input;
+                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
+                self.input.insert(byte_pos, c);
+                self.cursor_position += 1;
+            }
+            KeyCode::Enter => {
+                if !self.input.is_empty() && self.workflow_state == WorkflowState::Idle {
+                    self.focus = FocusPanel::Input;
+                    self.execute_command();
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Keys when MCP panel is focused: scroll MCP server list
+    fn handle_mcp_keys(&mut self, code: KeyCode) -> Result<()> {
+        match code {
+            KeyCode::Up => {
+                self.mcp_scroll = self.mcp_scroll.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                self.mcp_scroll = self.mcp_scroll.saturating_add(1)
+                    .min(self.mcp_max_scroll_cache);
+            }
+            KeyCode::PageUp => {
+                self.mcp_scroll = self.mcp_scroll.saturating_sub(10);
+            }
+            KeyCode::PageDown => {
+                self.mcp_scroll = self.mcp_scroll.saturating_add(10)
+                    .min(self.mcp_max_scroll_cache);
+            }
+            KeyCode::Home => { self.mcp_scroll = 0; }
+            KeyCode::End => { self.mcp_scroll = self.mcp_max_scroll_cache; }
+            // Typing while MCP focused → switch to input (blocked during Running/Cancelling)
+            KeyCode::Char(c) => {
                 if self.workflow_state != WorkflowState::Idle {
                     return Ok(());
                 }
@@ -1461,6 +1520,7 @@ impl App {
         frame.render_widget(todo_paragraph, right_chunks[0]);
 
         // Render MCP status panel on the bottom portion of the right side
+        self.mcp_rect = right_chunks[1];
         self.render_mcp_status(frame, right_chunks[1]);
 
         // Render input text with a visible block cursor (reversed colors).
@@ -1597,6 +1657,56 @@ impl App {
                     .scroll((todo_clamped, 0));
                 frame.render_widget(paragraph, area);
             }
+            FocusPanel::Mcp => {
+                // Render MCP server list fullscreen (no borders)
+                let grey = Style::default().fg(Color::DarkGray);
+                if self.mcp_servers.is_empty() {
+                    let paragraph = Paragraph::new(Text::from(Line::from(
+                        Span::styled("(none)", grey)
+                    )));
+                    frame.render_widget(paragraph, area);
+                    return;
+                }
+
+                let mut lines: Vec<Line> = Vec::new();
+                for s in &self.mcp_servers {
+                    let (icon, color) = match s.status {
+                        McpServerStatus::Connected => ("✓", Color::Green),
+                        McpServerStatus::Failed => ("✗", Color::Red),
+                    };
+                    let count_str = if s.tool_count > 0 {
+                        format!("{} tools", s.tool_count)
+                    } else {
+                        "--".to_string()
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{} ", icon), Style::default().fg(color)),
+                        Span::raw(s.name.clone()),
+                        Span::raw("  "),
+                        Span::styled(count_str, grey),
+                    ]));
+
+                    // Show full error for failed servers (no truncation when zoomed)
+                    if s.status == McpServerStatus::Failed {
+                        if let Some(ref err) = s.error {
+                            lines.push(Line::from(
+                                Span::styled(format!("  {}", err), grey)
+                            ));
+                        }
+                    }
+                }
+
+                let content_lines = lines.len();
+                let viewport_lines = area.height as usize;
+                let max_scroll = content_lines.saturating_sub(viewport_lines) as u16;
+                self.mcp_max_scroll_cache = max_scroll;
+                let clamped_scroll = self.mcp_scroll.min(max_scroll);
+
+                let paragraph = Paragraph::new(Text::from(lines))
+                    .scroll((clamped_scroll, 0));
+                frame.render_widget(Clear, area);
+                frame.render_widget(paragraph, area);
+            }
             FocusPanel::Input => {
                 let char_count = self.input.chars().count();
                 let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
@@ -1630,17 +1740,22 @@ impl App {
     /// Shows ✓/✗ icons + server name + tool count for each MCP server.
     /// Panel height is dynamic: grows with server count, capped at 50% of right column.
     /// Failed servers show a truncated error message on the line below.
-    fn render_mcp_status(&self, frame: &mut Frame, area: Rect) {
+    fn render_mcp_status(&mut self, frame: &mut Frame, area: Rect) {
         let connected = self.mcp_servers.iter()
             .filter(|s| s.status == McpServerStatus::Connected).count();
         let mcp_title = format!("MCP ({}/{})", connected, self.mcp_servers.len());
 
         let grey = Style::default().fg(Color::DarkGray);
+        let border_style = if self.focus == FocusPanel::Mcp {
+            Style::default().fg(Color::Blue)
+        } else {
+            grey
+        };
         let block = Block::default()
             .title(mcp_title)
             .title_style(Style::default().add_modifier(Modifier::BOLD))
             .borders(Borders::ALL)
-            .border_style(grey);
+            .border_style(border_style);
 
         if self.mcp_servers.is_empty() {
             let paragraph = Paragraph::new(Text::from(Line::from(
@@ -1685,10 +1800,17 @@ impl App {
             }
         }
 
-        // Scroll to show latest entries if content overflows
+        // Use manual scroll position (controlled by keyboard when focused).
+        // Falls back to auto-scroll-to-bottom when not focused.
         let content_lines = lines.len();
         let viewport_lines = area.height.saturating_sub(2) as usize;
-        let scroll = content_lines.saturating_sub(viewport_lines) as u16;
+        let max_scroll = content_lines.saturating_sub(viewport_lines) as u16;
+        self.mcp_max_scroll_cache = max_scroll;
+        let scroll = if self.focus == FocusPanel::Mcp {
+            self.mcp_scroll.min(max_scroll)
+        } else {
+            max_scroll // auto-scroll to show latest entries
+        };
 
         let paragraph = Paragraph::new(Text::from(lines))
             .block(block)

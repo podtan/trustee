@@ -2,12 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.97] - 2026-07-17
+## [0.1.98] - 2026-07-17
+
+### Added
+- **feat(tui): MCP status panel now focusable, zoomable, and scrollable** — The MCP status panel can now be focused via Tab/Shift+Tab cycling, mouse click, and supports Ctrl+Z zoom for clean text selection. Border highlights Blue when focused (issue #d6dc3192).
 
 ### Fixed
 - **fix(tui): orphan characters during streaming scroll — ratatui 0.30 upgrade** — Upgraded ratatui from 0.29 to 0.30.2 where the `Paragraph` + `.scroll()` + `Wrap` orphan character bug is confirmed fixed upstream ([ratatui#2213](https://github.com/ratatui-org/ratatui/issues/2213), [ratatui#2186](https://github.com/ratatui-org/ratatui/issues/2186)). Also upgraded crossterm from 0.28 to 0.29.0. The `Clear` widget workaround remains as an extra safety net.
 - **deps: bump ratatui 0.29 → 0.30.2, crossterm 0.28 → 0.29.0.**
-- **deps: bump trustee-tui to 0.1.52.**
+- **deps: bump trustee-tui to 0.1.53.**
 
 ## [0.1.96] - 2026-07-17
 
