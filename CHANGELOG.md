@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.92] - 2026-07-17
+
+### Fixed
+- **deps: bump abk to 0.7.8** — fixes critical bug where all tool outputs (bash, read,
+  write) were sent to the LLM as empty strings. The native OpenAI provider now correctly
+  extracts content from `ContentBlock::ToolResult` blocks in tool-role messages.
+- **deps: bump trustee-tui to 0.1.47.**
+
 ## [0.1.91] - 2026-07-17
 
 ### Changed
