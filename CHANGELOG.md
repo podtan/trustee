@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.95] - 2026-07-17
+
+### Fixed
+- **fix(tui): orphan characters during streaming scroll** — Ratatui's diff-based renderer left orphan characters when shorter lines replaced longer ones during scroll. The TUI now forces `terminal.clear()` (full repaint) whenever streaming deltas or reasoning deltas arrive, ensuring every cell is repainted.
+- **deps: bump trustee-tui to 0.1.50.**
+
 ## [0.1.94] - 2026-07-17
 
 ### Added
