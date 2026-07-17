@@ -273,6 +273,9 @@ pub struct App {
     auto_handoff: AutoHandoffConfig,
     /// MCP server statuses received from agent init
     pub mcp_servers: Vec<McpServerInfo>,
+    /// Set when a terminal resize event is received — triggers terminal.clear()
+    /// before the next draw to flush stale content from the old buffer dimensions.
+    needs_clear: bool,
 }
 
 impl App {
@@ -327,6 +330,7 @@ impl App {
             current_context_tokens: 0,
             auto_handoff: AutoHandoffConfig::default(),
             mcp_servers: Vec::new(),
+            needs_clear: false,
         }
     }
 
@@ -434,6 +438,13 @@ impl App {
                 }
             }
 
+            // Clear the terminal buffer if a resize event was received.
+            // This flushes stale content from the old dimensions before redrawing.
+            if self.needs_clear {
+                terminal.clear()?;
+                self.needs_clear = false;
+            }
+
             // Draw the UI
             terminal.draw(|f| self.render(f))?;
 
@@ -496,6 +507,14 @@ impl App {
 
     /// Handle a terminal event
     fn handle_event(&mut self, event: Event) -> Result<()> {
+        // Handle terminal resize: set a flag so the main loop calls
+        // terminal.clear() before the next draw, flushing stale content
+        // from the old buffer dimensions.
+        if let Event::Resize(_, _) = event {
+            self.needs_clear = true;
+            return Ok(());
+        }
+
         // Handle bracketed paste: pasted text arrives as a single event,
         // newlines are replaced with spaces to prevent auto-submit.
         if let Event::Paste(text) = event {
