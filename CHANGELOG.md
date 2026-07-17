@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.96] - 2026-07-17
+
+### Fixed
+- **fix(tui): orphan characters during streaming scroll (no blinking)** — Replaced `terminal.clear()` on every `StreamDelta`/`ReasoningDelta` with a targeted `Clear` widget rendered to the output panel area before the `Paragraph` widget in both `render()` and `render_zoomed()`. This forces every cell in the output region to be marked dirty within the same frame, ensuring the diff-based renderer writes spaces for cells that previously held content from longer/wrapped lines — without causing the full-screen blinking that `terminal.clear()` introduced (trustee-tui 0.1.51).
+- This is a known ratatui 0.29 bug ([ratatui#2213](https://github.com/ratatui-org/ratatui/issues/2213), [ratatui#2186](https://github.com/ratatui-org/ratatui/issues/2186)) where `Paragraph` + `.scroll()` + `Wrap { trim: false }` leaves orphan/stale characters during dynamic content changes. Confirmed fixed in ratatui 0.30-beta.
+- **deps: bump trustee-tui to 0.1.51.**
+
 ## [0.1.95] - 2026-07-17
 
 ### Fixed

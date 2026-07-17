@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
 };
 use tokio::sync::mpsc;
@@ -936,10 +936,6 @@ impl App {
                 } else {
                     self.output_lines.push(delta);
                 }
-                // Force full repaint: streaming changes line wrapping and scroll,
-                // and the diff-based renderer can leave orphan characters when
-                // shorter lines replace longer ones during scroll.
-                self.needs_clear = true;
             }
             TuiMessage::ReasoningDelta(delta) => {
                 // Same as StreamDelta but prefix with \x01 marker for grey rendering.
@@ -953,8 +949,6 @@ impl App {
                 } else {
                     self.output_lines.push(format!("\x01{}", delta));
                 }
-                // Force full repaint for the same reason as StreamDelta.
-                self.needs_clear = true;
             }
             TuiMessage::WorkflowCompleted => {
                 self.output_lines.push("✓ Workflow completed".to_string());
@@ -1406,6 +1400,13 @@ impl App {
             )
             .wrap(Wrap { trim: false })
             .scroll((clamped_scroll, 0));
+        // Clear the output panel area before rendering the Paragraph.
+        // This forces every cell in the region to be marked dirty, ensuring
+        // the diff-based renderer writes spaces for cells that previously
+        // held content from longer/wrapped lines that are now shorter.
+        // This fixes orphan characters during streaming scroll without
+        // causing the full-screen blinking that terminal.clear() introduced.
+        frame.render_widget(Clear, content_chunks[0]);
         frame.render_widget(output_paragraph, content_chunks[0]);
 
         // Split the right panel vertically: Todos on top, MCP status on bottom.
@@ -1574,6 +1575,9 @@ impl App {
                 let paragraph = Paragraph::new(display_text)
                     .wrap(Wrap { trim: false })
                     .scroll((clamped_scroll, 0));
+                // Clear the full-screen area before rendering to prevent
+                // orphan characters from the same Paragraph+scroll+Wrap bug.
+                frame.render_widget(Clear, area);
                 frame.render_widget(paragraph, area);
             }
             FocusPanel::Todo => {
