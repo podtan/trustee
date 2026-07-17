@@ -936,6 +936,10 @@ impl App {
                 } else {
                     self.output_lines.push(delta);
                 }
+                // Force full repaint: streaming changes line wrapping and scroll,
+                // and the diff-based renderer can leave orphan characters when
+                // shorter lines replace longer ones during scroll.
+                self.needs_clear = true;
             }
             TuiMessage::ReasoningDelta(delta) => {
                 // Same as StreamDelta but prefix with \x01 marker for grey rendering.
@@ -949,6 +953,8 @@ impl App {
                 } else {
                     self.output_lines.push(format!("\x01{}", delta));
                 }
+                // Force full repaint for the same reason as StreamDelta.
+                self.needs_clear = true;
             }
             TuiMessage::WorkflowCompleted => {
                 self.output_lines.push("✓ Workflow completed".to_string());
