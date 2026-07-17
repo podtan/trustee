@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.90] - 2026-07-17
+
+### Changed
+- **deps: bump abk to 0.7.6** — adds native Rust OpenAI provider (`OpenAIProvider`)
+  that works without wasmtime. `LLM_PROVIDER=openai-unofficial` (or unset) now uses
+  the native provider; `LLM_PROVIDER=openai-unofficial-wasm` uses the WASM extension.
+  The `provider` feature no longer requires wasmtime; a new `provider-wasm` feature
+  gates it. Also bumps trustee-tui to 0.1.45.
+- **refactor(extensions): rename `openai-unofficial` to `openai-unofficial-wasm`** —
+  directory and extension ID updated to reflect WASM-based nature.
+
 ## [0.1.89] - 2026-07-08
 
 ### Changed
