@@ -150,6 +150,18 @@ max_file_size_mb = 10
 # TUI-specific configuration (only applies to trustee-tui)
 [tui]
 
+# TUI color configuration.
+# Valid color names: black, red, green, yellow, blue, magenta, cyan, gray,
+# darkgray, lightred, lightgreen, lightyellow, lightblue, lightmagenta,
+# lightcyan, white, reset.
+[tui.colors]
+# Reasoning/thinking text color (LLM internal reasoning displayed deemphasized).
+# Default: "gray" (ANSI SGR 37) — visible on all terminals including Linux VT.
+# Set to "darkgray" (ANSI SGR 90) on GUI terminals for a darker shade.
+reasoning_color = "gray"
+# Apply dim modifier (SGR 2) to reasoning text for visual deemphasis.
+reasoning_dim = true
+
 # Automatic session handoff when context grows too large.
 # When enabled, the TUI will automatically trigger a handoff (fresh context
 # with LLM-generated briefing) once the total context token count reaches

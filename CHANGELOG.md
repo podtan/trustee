@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.94] - 2026-07-17
+
+### Added
+- **feat(tui): configurable reasoning colors** — Reasoning/thinking text color is now configurable via `[tui.colors]` in trustee.toml. Defaults to `gray` + `dim` (visible on all terminals including Linux VT where `darkgray`/SGR 90 was invisible).
+
+### Fixed
+- **fix(tui): reasoning invisible on Linux virtual console** — `Color::DarkGray` (ANSI SGR 90) is unreliable on the Linux kernel VT (`fbcon`/`vgacon`) in raw mode. Default changed to `Color::Gray` (SGR 37) + `Modifier::DIM`.
+- **deps: bump trustee-tui to 0.1.49.**
+
 ## [0.1.93] - 2026-07-17
 
 ### Fixed
