@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.93] - 2026-07-17
+
+### Fixed
+- **fix(tui): orphan characters and jagged border boxes during streaming** — Raw `println!`/`eprintln!` calls in abk's `AgentRuntime` and `CleanupManager` bypassed the TUI mode flag and wrote directly to stdout while ratatui held the terminal in raw/alternate-screen mode. All occurrences now route through `tee_println()` or check `is_tui_mode()`.
+- **fix(tui): handle terminal resize events** — `Event::Resize` was silently dropped, leaving stale buffer dimensions. The TUI now calls `terminal.clear()` before the next draw when a resize is detected.
+- **deps: bump abk to 0.7.9.**
+- **deps: bump trustee-tui to 0.1.48.**
+
 ## [0.1.92] - 2026-07-17
 
 ### Fixed
