@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.91] - 2026-07-17
+
+### Changed
+- **feat: make WASM fully optional** — `cargo build --features tui` now produces a
+  native-only build with no wasmtime dependency. Use `cargo build --features tui,wasm`
+  to enable WASM extensions (provider + lifecycle). Removed `extension` from default
+  abk features in trustee and trustee-tui; added `wasm` feature to forward to `abk/wasm`.
+- **deps: bump abk to 0.7.7** — WASM is now opt-in via abk's `wasm` feature.
+- **deps: bump trustee-tui to 0.1.46** — removes `extension` from abk features.
+
 ## [0.1.90] - 2026-07-17
 
 ### Changed
