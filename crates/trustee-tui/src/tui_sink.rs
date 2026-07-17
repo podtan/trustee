@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use abk::orchestration::output::{OutputEvent, OutputSink, SharedSink};
 
-use crate::app::TuiMessage;
+use crate::types::TuiMessage;
 
 /// Stream state machine constants (3-state lock-free state machine).
 const STREAM_IDLE: u8 = 0;

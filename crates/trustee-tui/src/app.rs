@@ -1,232 +1,37 @@
-//! TUI Application structure and main loop
+//! TUI Application structure and main loop.
 //!
-//! Task 52: Async TUI Loop
-//! Converted from synchronous to async to allow concurrent workflow execution
-//! with the TUI event loop using tokio::select!
+//! This module contains the `App` struct definition, its constructor, the
+//! async main event loop, and configuration parsing. All event handling,
+//! rendering, and workflow execution logic is split into dedicated modules:
+//!
+//! - [`event`]    — keyboard, mouse, paste, and resize event handling
+//! - [`render`]   — TUI rendering with manual line wrapping (orphan fix)
+//! - [`workflow`] — workflow message processing and command execution
+//! - [`helpers`]  — text wrapping, visual line computation, color parsing
+//! - [`types`]    — all type definitions (enums, structs, sinks)
 
 use std::io;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind, EnableBracketedPaste, DisableBracketedPaste, EnableMouseCapture, DisableMouseCapture},
+    event::{self, Event, EnableBracketedPaste, DisableBracketedPaste, EnableMouseCapture, DisableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Frame, Terminal,
+    Terminal,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use anyhow::Result;
 
-use crate::tui_sink::TuiSink;
+use crate::helpers::parse_color;
+use crate::types::{
+    AutoHandoffConfig, BuildInfo, FocusPanel, McpServerInfo, TuiMessage, WorkflowState,
+};
 use abk::cli::ResumeInfo;
-use abk::orchestration::output::{OutputEvent, OutputSink};
-
-/// Status of an MCP server connection (for the MCP status panel).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum McpServerStatus {
-    /// Server connected and tools loaded successfully
-    Connected,
-    /// Server failed to connect (timeout, DNS error, auth failure, etc.)
-    Failed,
-}
-
-/// Information about a single MCP server shown in the status panel.
-#[derive(Debug, Clone)]
-pub struct McpServerInfo {
-    pub name: String,
-    pub status: McpServerStatus,
-    pub tool_count: usize,
-    pub error: Option<String>,
-}
-
-/// Which panel currently has keyboard focus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FocusPanel {
-    Output,
-    Todo,
-    Mcp,
-    Input,
-}
-
-/// Workflow lifecycle state machine.
-///
-/// Replaces the previous two-flag approach (`workflow_running` + `workflow_busy`)
-/// with a proper 3-state enum that prevents the ESC-cancel race condition where
-/// the input box accepted commands during the cancellation wind-down window.
-///
-/// | State      | Input Title                          | Typing | Enter |
-/// |------------|--------------------------------------|--------|-------|
-/// | `Idle`     | "Input (Ready)"                     | ✅     | ✅    |
-/// | `Running`  | "Input (Running... Esc to cancel)"  | ✅     | ❌    |
-/// | `Cancelling`| "Input (Cancelling...)"            | ❌     | ❌    |
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkflowState {
-    /// No workflow is active — input accepts commands.
-    Idle,
-    /// A workflow is running — input is read-only, ESC will cancel.
-    Running,
-    /// ESC was pressed, cancel token fired, waiting for old task to finish.
-    /// Input is fully locked (no typing, no Enter) until ResumeInfo arrives.
-    Cancelling,
-}
-
-/// Messages that can be sent to the TUI from async workflows
-#[derive(Debug, Clone)]
-pub enum TuiMessage {
-    /// A line of output to display
-    OutputLine(String),
-    /// A streaming delta to append to the last line (print-style, not println)
-    StreamDelta(String),
-    /// A reasoning delta to append to the last line (displayed in grey)
-    ReasoningDelta(String),
-    /// Workflow completed
-    WorkflowCompleted,
-    /// Workflow error
-    WorkflowError(String),
-    /// Resume info from the completed workflow for session continuity
-    ResumeInfo(Option<ResumeInfo>),
-    /// Todo list update from LLM todowrite tool
-    TodoUpdate(String),
-    /// Workflow was cancelled by user (ESC pressed during execution)
-    WorkflowCancelled,
-    /// LLM-generated handoff briefing ready — start a fresh session with it
-    HandoffReady(String),
-    /// A native tool call has started (shows spinner)
-    ToolPending { tool_name: String, hint: Option<String> },
-    /// A native tool call has finished (replaces spinner with ✓/✗)
-    ToolDone { tool_name: String, success: bool, hint: Option<String> },
-    /// Context token count updated (for auto-handoff threshold checking)
-    ContextTokensUpdated(usize),
-    /// MCP server status update from agent initialization
-    McpServerStatus {
-        name: String,
-        connected: bool,
-        tool_count: usize,
-        error: Option<String>,
-    },
-}
-
-/// Build information for ABK (forward declaration)
-pub type BuildInfo = abk::cli::BuildInfo;
-
-/// Auto-handoff configuration parsed from `[tui.auto_handoff]` in trustee.toml.
-///
-/// When enabled, the TUI monitors context token counts reported by ABK and
-/// automatically triggers a session handoff once the threshold is exceeded.
-#[derive(Debug, Clone)]
-pub struct AutoHandoffConfig {
-    /// Whether automatic handoff is enabled.
-    pub enabled: bool,
-    /// Context token count threshold that triggers auto-handoff.
-    pub context_threshold: usize,
-}
-
-impl Default for AutoHandoffConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            context_threshold: 170_000,
-        }
-    }
-}
-
-/// Tagged chunk type so we can distinguish reasoning (thinking) content
-/// from regular text content after draining the capture channel.
-enum CapturedText {
-    Text(String),
-    Reasoning(String),
-}
-
-/// Sink used during handoff briefing — captures LLM response text and
-/// cancels the loop immediately if the LLM makes a tool call.
-///
-/// Also captures ReasoningChunk events as a fallback: some thinking-capable
-/// models deliver their entire output through reasoning tokens, so without
-/// this the briefing channel would remain empty (issue #63ad71c8).
-struct HandoffCaptureSink {
-    tx: mpsc::UnboundedSender<CapturedText>,
-    cancel: CancellationToken,
-}
-
-impl OutputSink for HandoffCaptureSink {
-    fn emit(&self, event: OutputEvent) {
-        match event {
-            OutputEvent::StreamingChunk { delta } if !delta.is_empty() => {
-                let _ = self.tx.send(CapturedText::Text(delta));
-            }
-            OutputEvent::LlmResponse { text, .. } if !text.is_empty() => {
-                let _ = self.tx.send(CapturedText::Text(text));
-            }
-            // Reasoning/thinking tokens — capture as fallback in case the model
-            // delivers its entire briefing through reasoning instead of text.
-            OutputEvent::ReasoningChunk { delta } if !delta.is_empty() => {
-                let _ = self.tx.send(CapturedText::Reasoning(delta));
-            }
-            // LLM disobeyed "Do NOT use any tools" — cancel immediately.
-            // Whatever text was captured before this point becomes the briefing;
-            // the empty-briefing fallback handles the case where nothing was captured.
-            OutputEvent::ToolsExecuting { .. } => {
-                self.cancel.cancel();
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Convert a char index to a byte offset in a string.
-/// Panics if `char_idx` > number of chars in `s`.
-fn char_to_byte_offset(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map(|(byte_pos, _)| byte_pos)
-        .unwrap_or(s.len())
-}
-
-/// Count the number of visual (word-wrapped) lines a Text will occupy.
-/// Uses ratatui's own Paragraph.line_count() which runs the exact same
-/// WordWrapper algorithm that the Paragraph widget uses for rendering,
-/// so the count is guaranteed to match.
-fn estimate_visual_lines(text: &Text, viewport_width: u16) -> usize {
-    let w = viewport_width.saturating_sub(2).max(1);
-    if text.lines.is_empty() {
-        return 1;
-    }
-    Paragraph::new(text.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(w)
-        .max(1)
-}
-
-/// Parse a color name string from config into a ratatui `Color`.
-/// Supports all named ratatui colors. Unknown values default to `Gray`.
-fn parse_color(name: &str) -> Color {
-    match name.to_lowercase().as_str() {
-        "black" => Color::Black,
-        "red" => Color::Red,
-        "green" => Color::Green,
-        "yellow" => Color::Yellow,
-        "blue" => Color::Blue,
-        "magenta" => Color::Magenta,
-        "cyan" => Color::Cyan,
-        "gray" | "grey" => Color::Gray,
-        "darkgray" | "darkgrey" => Color::DarkGray,
-        "lightred" => Color::LightRed,
-        "lightgreen" => Color::LightGreen,
-        "lightyellow" => Color::LightYellow,
-        "lightblue" => Color::LightBlue,
-        "lightmagenta" => Color::LightMagenta,
-        "lightcyan" => Color::LightCyan,
-        "white" => Color::White,
-        "reset" => Color::Reset,
-        _ => Color::Gray, // safe default
-    }
-}
 
 /// Main application state for the TUI
 pub struct App {
@@ -241,17 +46,17 @@ pub struct App {
     /// Whether auto-scroll is enabled (follows new output)
     pub auto_scroll: bool,
     /// Cached max scroll value from last render (for keyboard navigation)
-    max_scroll_cache: u16,
+    pub(crate) max_scroll_cache: u16,
     /// Which panel has keyboard focus (Tab cycles)
     pub focus: FocusPanel,
     /// Scroll position in todo panel
     pub todo_scroll: u16,
     /// Cached max scroll for todo panel
-    todo_max_scroll_cache: u16,
+    pub(crate) todo_max_scroll_cache: u16,
     /// Manual scroll offset for input box (user-driven)
     pub input_scroll: u16,
     /// Cached max scroll for input box
-    input_max_scroll_cache: u16,
+    pub(crate) input_max_scroll_cache: u16,
     /// Whether the app should quit
     pub should_quit: bool,
     /// Receiver for messages from async workflows
@@ -270,46 +75,46 @@ pub struct App {
     pub resume_info: Option<ResumeInfo>,
     /// Saved resume_info before execute_command consumes it; restored if task
     /// is cancelled before producing a real checkpoint (mistake-ENTER recovery).
-    backup_resume_info: Option<ResumeInfo>,
+    pub(crate) backup_resume_info: Option<ResumeInfo>,
     /// Latest todo list from LLM todowrite tool
     pub todo_lines: Vec<String>,
     /// Cached inner width of input box (characters per visual line)
-    input_inner_width_cache: usize,
+    pub(crate) input_inner_width_cache: usize,
     /// Cached panel rectangles for mouse hit-testing (set during render)
-    output_rect: Rect,
-    todo_rect: Rect,
-    mcp_rect: Rect,
-    input_rect: Rect,
+    pub(crate) output_rect: Rect,
+    pub(crate) todo_rect: Rect,
+    pub(crate) mcp_rect: Rect,
+    pub(crate) input_rect: Rect,
     /// Scroll position in MCP status panel
     pub mcp_scroll: u16,
     /// Cached max scroll for MCP status panel
-    mcp_max_scroll_cache: u16,
+    pub(crate) mcp_max_scroll_cache: u16,
     /// When Some, the focused panel is zoomed fullscreen (no borders) for clean
     /// text selection. Mouse capture is disabled while zoomed.
-    zoomed_panel: Option<FocusPanel>,
+    pub(crate) zoomed_panel: Option<FocusPanel>,
     /// Cancellation token for aborting the current workflow
-    cancel_token: CancellationToken,
+    pub(crate) cancel_token: CancellationToken,
     /// Command buffered by user during cancellation wind-down.
-    pending_command: Option<String>,
+    pub(crate) pending_command: Option<String>,
     /// Whether a session handoff (Ctrl+H) should fire once the current workflow cancels.
-    handoff_pending: bool,
+    pub(crate) handoff_pending: bool,
     /// In-flight spinner entries: (tool_name, output_lines_index, hint).
     /// Vec (not HashMap) so duplicate tool names (parallel calls) each get their own line.
-    pending_tool_lines: Vec<(String, usize, Option<String>)>,
+    pub(crate) pending_tool_lines: Vec<(String, usize, Option<String>)>,
     /// Spinner frame counter — advances on each render tick.
-    spinner_tick: u8,
+    pub(crate) spinner_tick: u8,
     /// Current context token count (updated from ApiCallStarted events).
-    current_context_tokens: usize,
+    pub(crate) current_context_tokens: usize,
     /// Auto-handoff configuration parsed from [tui.auto_handoff].
-    auto_handoff: AutoHandoffConfig,
+    pub(crate) auto_handoff: AutoHandoffConfig,
     /// MCP server statuses received from agent init
     pub mcp_servers: Vec<McpServerInfo>,
     /// Set when a terminal resize event is received — triggers terminal.clear()
     /// before the next draw to flush stale content from the old buffer dimensions.
-    needs_clear: bool,
+    pub(crate) needs_clear: bool,
     /// Style for reasoning/thinking text (parsed from [tui.colors] config).
     /// Defaults to gray + DIM (visible on all terminals including Linux VT).
-    reasoning_style: Style,
+    pub(crate) reasoning_style: Style,
 }
 
 impl App {
@@ -365,7 +170,7 @@ impl App {
             pending_tool_lines: Vec::new(),
             spinner_tick: 0,
             current_context_tokens: 0,
-            auto_handoff: AutoHandoffConfig::default(),
+                       auto_handoff: AutoHandoffConfig::default(),
             mcp_servers: Vec::new(),
             needs_clear: false,
             reasoning_style: Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
@@ -408,7 +213,7 @@ impl App {
     }
 
     /// Run the main event loop (async version)
-    /// 
+    ///
     /// Task 52: Converted from synchronous to async to enable:
     /// - Running async ABK workflows concurrently with TUI
     /// - Using tokio::select! for responsive event handling
@@ -427,12 +232,6 @@ impl App {
         // input (especially ESC to cancel) is processed every single iteration,
         // even when the workflow channel is flooded with streaming tokens.
         //
-        // Previously this used `tokio::select! { biased; ... }` which always
-        // prioritized workflow_rx.recv() over terminal events.  During LLM
-        // streaming, TuiSink sends one message per token, so the biased select
-        // consumed every delta before ever polling for keypresses — making ESC
-        // unresponsive until the stream paused.
-        //
         // The new loop order:
         //   1. Drain ALL pending terminal events (non-blocking, Duration::ZERO)
         //   2. Early-exit check (should_quit)
@@ -441,11 +240,6 @@ impl App {
         //   5. If nothing was available, block briefly on select! (idle wait)
         loop {
             // --- Phase 1: Non-blocking terminal event drain ---
-            //
-            // Read every event that is already buffered in the terminal input
-            // queue without blocking.  Duration::ZERO means "return immediately"
-            // so ESC and other keypresses are handled before we even look at
-            // the workflow channel.
             loop {
                 if event::poll(std::time::Duration::from_millis(0))? {
                     let ev = event::read()?;
@@ -461,12 +255,6 @@ impl App {
             }
 
             // --- Phase 3: Batch-drain workflow messages ---
-            //
-            // Process ALL pending messages with try_recv() so the UI catches
-            // up quickly.  The 256-message cap prevents unbounded processing in
-            // pathological cases while still draining bursts efficiently.
-            // After draining, we immediately loop back to re-check terminal
-            // events (Phase 1), so keypresses are never starved.
             let mut processed_any = false;
             for _ in 0..256 {
                 match self.workflow_rx.try_recv() {
@@ -479,21 +267,17 @@ impl App {
             }
 
             // --- Phase 4: Spinner animation + draw ---
-            // Advance spinner tick and refresh any in-flight spinner lines.
-            // The 8-frame braille spinner cycles at ~50ms per frame.
             const FRAMES: [char; 8] = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧'];
             self.spinner_tick = self.spinner_tick.wrapping_add(1);
             let frame = FRAMES[(self.spinner_tick as usize) % FRAMES.len()];
             for (_, idx, _) in &self.pending_tool_lines {
                 if *idx < self.output_lines.len() {
-                    // Replace only the spinner char (first char), keep the rest.
                     let rest: String = self.output_lines[*idx].chars().skip(1).collect();
                     self.output_lines[*idx] = format!("{}{}", frame, rest);
                 }
             }
 
             // Clear the terminal buffer if a resize event was received.
-            // This flushes stale content from the old dimensions before redrawing.
             if self.needs_clear {
                 terminal.clear()?;
                 self.needs_clear = false;
@@ -508,23 +292,16 @@ impl App {
             }
 
             // --- Phase 5: Idle wait ---
-            //
-            // If no workflow messages were available in Phase 3, do a short
-            // blocking wait to avoid busy-looping.  If messages WERE available,
-            // skip the wait and immediately loop back to re-check terminal
-            // events (Phase 1) — this is the key fix for ESC responsiveness.
             if !processed_any {
                 tokio::select! {
                     biased;
 
-                    // Wait for the next workflow message
                     msg = self.workflow_rx.recv() => {
                         if let Some(msg) = msg {
                             self.handle_workflow_message(msg);
                         }
                     }
 
-                    // Wait for the next terminal event (50ms poll keeps spinner alive)
                     result = Self::poll_event() => {
                         if let Some(event) = result? {
                             self.handle_event(event)?;
@@ -543,13 +320,8 @@ impl App {
     }
 
     /// Poll for terminal events asynchronously
-    /// Uses tokio::task::spawn_blocking to avoid blocking the async runtime
-    /// with synchronous crossterm event polling
     async fn poll_event() -> Result<Option<Event>> {
-        // Spawn a blocking task to poll for events
-        // This prevents the synchronous event::poll from blocking the Tokio runtime
         tokio::task::spawn_blocking(|| {
-            // Poll with a short timeout to remain responsive
             if event::poll(std::time::Duration::from_millis(50))? {
                 Ok(Some(event::read()?))
             } else {
@@ -557,1265 +329,6 @@ impl App {
             }
         })
         .await?
-    }
-
-    /// Handle a terminal event
-    fn handle_event(&mut self, event: Event) -> Result<()> {
-        // Handle terminal resize: set a flag so the main loop calls
-        // terminal.clear() before the next draw, flushing stale content
-        // from the old buffer dimensions.
-        if let Event::Resize(_, _) = event {
-            self.needs_clear = true;
-            return Ok(());
-        }
-
-        // Handle bracketed paste: pasted text arrives as a single event,
-        // newlines are replaced with spaces to prevent auto-submit.
-        if let Event::Paste(text) = event {
-            let sanitized = text.replace('\n', " ").replace('\r', "");
-            for c in sanitized.chars() {
-                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                self.input.insert(byte_pos, c);
-                self.cursor_position += 1;
-            }
-            return Ok(());
-        }
-
-        // Handle mouse events: click to focus, scroll wheel to scroll panel
-        if let Event::Mouse(mouse) = event {
-            let col = mouse.column;
-            let row = mouse.row;
-            match mouse.kind {
-                MouseEventKind::Down(_) => {
-                    // Click sets focus to the panel under the cursor
-                    if self.output_rect.contains((col, row).into()) {
-                        self.focus = FocusPanel::Output;
-                    } else if self.todo_rect.contains((col, row).into()) {
-                        self.focus = FocusPanel::Todo;
-                    } else if self.mcp_rect.contains((col, row).into()) {
-                        self.focus = FocusPanel::Mcp;
-                    } else if self.input_rect.contains((col, row).into()) {
-                        self.focus = FocusPanel::Input;
-                    }
-                }
-                MouseEventKind::ScrollUp => {
-                    if self.output_rect.contains((col, row).into()) {
-                        self.auto_scroll = false;
-                        if self.scroll == u16::MAX {
-                            self.scroll = self.max_scroll_cache;
-                        }
-                        self.scroll = self.scroll.saturating_sub(3);
-                    } else if self.todo_rect.contains((col, row).into()) {
-                        self.todo_scroll = self.todo_scroll.saturating_sub(3);
-                    } else if self.mcp_rect.contains((col, row).into()) {
-                        self.mcp_scroll = self.mcp_scroll.saturating_sub(3);
-                    } else if self.input_rect.contains((col, row).into()) {
-                        self.input_scroll = self.input_scroll.saturating_sub(1);
-                    }
-                }
-                MouseEventKind::ScrollDown => {
-                    if self.output_rect.contains((col, row).into()) {
-                        if self.scroll == u16::MAX { return Ok(()); }
-                        self.scroll = self.scroll.saturating_add(3);
-                        if self.scroll >= self.max_scroll_cache {
-                            self.auto_scroll = true;
-                            self.scroll = u16::MAX;
-                        }
-                    } else if self.todo_rect.contains((col, row).into()) {
-                        self.todo_scroll = self.todo_scroll.saturating_add(3)
-                            .min(self.todo_max_scroll_cache);
-                    } else if self.mcp_rect.contains((col, row).into()) {
-                        self.mcp_scroll = self.mcp_scroll.saturating_add(3)
-                            .min(self.mcp_max_scroll_cache);
-                    } else if self.input_rect.contains((col, row).into()) {
-                        self.input_scroll = self.input_scroll.saturating_add(1)
-                            .min(self.input_max_scroll_cache);
-                    }
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        if let Event::Key(key) = event {
-            // On Windows, crossterm reports both Press and Release events for every
-            // keystroke. Without this filter every character would be inserted twice.
-            if key.kind != KeyEventKind::Press {
-                return Ok(());
-            }
-
-            // Global keys — work regardless of focus
-            match key.code {
-                // Ctrl+Z: toggle zoom for clean text selection (like tmux).
-                // Zoom in: focused panel fills the screen, mouse capture off,
-                //   user selects text with terminal-native click-drag.
-                // Zoom out: restore normal TUI layout, mouse capture on.
-                // When zoomed, all other keys are ignored — user is in selection mode.
-                KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if self.zoomed_panel.is_some() {
-                        self.zoomed_panel = None;
-                        execute!(std::io::stdout(), EnableMouseCapture).ok();
-                    } else {
-                        self.zoomed_panel = Some(self.focus);
-                        execute!(std::io::stdout(), DisableMouseCapture).ok();
-                    }
-                    return Ok(());
-                }
-                // When zoomed, consume all other keys (selection mode)
-                _ if self.zoomed_panel.is_some() => {
-                    return Ok(());
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.should_quit = true;
-                    return Ok(());
-                }
-                KeyCode::Esc => {
-                    if self.workflow_state == WorkflowState::Running {
-                        // Transition Running → Cancelling.
-                        // The cancel token signals the spawned workflow task to stop,
-                        // but it may still be inside an API call or tool execution.
-                        // Input is now fully locked until ResumeInfo arrives.
-                        self.cancel_token.cancel();
-                        self.workflow_state = WorkflowState::Cancelling;
-                        self.output_lines.push("⏹ Cancelling...".to_string());
-                    } else if self.workflow_state == WorkflowState::Idle {
-                        self.should_quit = true;
-                    }
-                    // Cancelling + ESC: ignore (already cancelling, don't quit)
-                    return Ok(());
-                }
-                // Tab cycles focus: Input → Output → Todo → Mcp → Input
-                KeyCode::Tab => {
-                    self.focus = match self.focus {
-                        FocusPanel::Input  => FocusPanel::Output,
-                        FocusPanel::Output => FocusPanel::Todo,
-                        FocusPanel::Todo   => FocusPanel::Mcp,
-                        FocusPanel::Mcp    => FocusPanel::Input,
-                    };
-                    return Ok(());
-                }
-                // Shift+Tab cycles backwards: Input → Mcp → Todo → Output → Input
-                KeyCode::BackTab => {
-                    self.focus = match self.focus {
-                        FocusPanel::Input  => FocusPanel::Mcp,
-                        FocusPanel::Mcp    => FocusPanel::Todo,
-                        FocusPanel::Todo   => FocusPanel::Output,
-                        FocusPanel::Output => FocusPanel::Input,
-                    };
-                    return Ok(());
-                }
-                // Ctrl+H: session handoff — generate LLM briefing, start fresh context
-                KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    match self.workflow_state {
-                        WorkflowState::Idle => self.trigger_handoff(self.input.trim().to_string()),
-                        WorkflowState::Running => {
-                            self.cancel_token.cancel();
-                            self.workflow_state = WorkflowState::Cancelling;
-                            self.handoff_pending = true;
-                            self.output_lines.push("⏹ Cancelling before handoff...".to_string());
-                        }
-                        WorkflowState::Cancelling => {
-                            self.handoff_pending = true;
-                        }
-                    }
-                    return Ok(());
-                }
-                _ => {}
-            }
-
-            // Focus-specific key handling
-            match self.focus {
-                FocusPanel::Output => self.handle_output_keys(key.code)?,
-                FocusPanel::Todo   => self.handle_todo_keys(key.code)?,
-                FocusPanel::Mcp    => self.handle_mcp_keys(key.code)?,
-                FocusPanel::Input  => self.handle_input_keys(key.code)?,
-            }
-        }
-        Ok(())
-    }
-
-    /// Keys when Output panel is focused: scroll output
-    fn handle_output_keys(&mut self, code: KeyCode) -> Result<()> {
-        match code {
-            KeyCode::Up => {
-                self.auto_scroll = false;
-                if self.scroll == u16::MAX {
-                    self.scroll = self.max_scroll_cache;
-                }
-                self.scroll = self.scroll.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                if self.scroll == u16::MAX { return Ok(()); }
-                self.scroll = self.scroll.saturating_add(1);
-                if self.scroll >= self.max_scroll_cache {
-                    self.auto_scroll = true;
-                    self.scroll = u16::MAX;
-                }
-            }
-            KeyCode::PageUp => {
-                self.auto_scroll = false;
-                if self.scroll == u16::MAX {
-                    self.scroll = self.max_scroll_cache;
-                }
-                self.scroll = self.scroll.saturating_sub(10);
-            }
-            KeyCode::PageDown => {
-                if self.scroll == u16::MAX { return Ok(()); }
-                self.scroll = self.scroll.saturating_add(10);
-                if self.scroll >= self.max_scroll_cache {
-                    self.auto_scroll = true;
-                    self.scroll = u16::MAX;
-                }
-            }
-            KeyCode::Home => {
-                self.auto_scroll = false;
-                self.scroll = 0;
-            }
-            KeyCode::End => {
-                self.auto_scroll = true;
-                self.scroll = u16::MAX;
-            }
-            KeyCode::Char('y') => {
-                self.copy_output_to_clipboard();
-            }
-            // Enter while output focused → switch to input and execute
-            KeyCode::Enter => {
-                if !self.input.is_empty() && self.workflow_state == WorkflowState::Idle {
-                    self.focus = FocusPanel::Input;
-                    self.execute_command();
-                }
-            }
-            // Typing while output focused → switch to input (blocked during Running/Cancelling)
-            KeyCode::Char(c) if c != 'y' => {
-                if self.workflow_state != WorkflowState::Idle {
-                    return Ok(());
-                }
-                self.focus = FocusPanel::Input;
-                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                self.input.insert(byte_pos, c);
-                self.cursor_position += 1;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Keys when Todo panel is focused: scroll todo list
-    fn handle_todo_keys(&mut self, code: KeyCode) -> Result<()> {
-        match code {
-            KeyCode::Up => {
-                self.todo_scroll = self.todo_scroll.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                self.todo_scroll = self.todo_scroll.saturating_add(1)
-                    .min(self.todo_max_scroll_cache);
-            }
-            KeyCode::PageUp => {
-                self.todo_scroll = self.todo_scroll.saturating_sub(10);
-            }
-            KeyCode::PageDown => {
-                self.todo_scroll = self.todo_scroll.saturating_add(10)
-                    .min(self.todo_max_scroll_cache);
-            }
-            KeyCode::Home => { self.todo_scroll = 0; }
-            KeyCode::End => { self.todo_scroll = self.todo_max_scroll_cache; }
-            // y = copy todo text to clipboard (must be before the generic Char catch-all)
-            KeyCode::Char('y') => self.copy_to_clipboard(self.todo_lines.join("\n")),
-            // Typing while todo focused → switch to input (blocked during Running/Cancelling)
-            KeyCode::Char(c) if c != 'y' => {
-                if self.workflow_state != WorkflowState::Idle {
-                    return Ok(());
-                }
-                self.focus = FocusPanel::Input;
-                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                self.input.insert(byte_pos, c);
-                self.cursor_position += 1;
-            }
-            KeyCode::Enter => {
-                if !self.input.is_empty() && self.workflow_state == WorkflowState::Idle {
-                    self.focus = FocusPanel::Input;
-                    self.execute_command();
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Keys when MCP panel is focused: scroll MCP server list
-    fn handle_mcp_keys(&mut self, code: KeyCode) -> Result<()> {
-        match code {
-            KeyCode::Up => {
-                self.mcp_scroll = self.mcp_scroll.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                self.mcp_scroll = self.mcp_scroll.saturating_add(1)
-                    .min(self.mcp_max_scroll_cache);
-            }
-            KeyCode::PageUp => {
-                self.mcp_scroll = self.mcp_scroll.saturating_sub(10);
-            }
-            KeyCode::PageDown => {
-                self.mcp_scroll = self.mcp_scroll.saturating_add(10)
-                    .min(self.mcp_max_scroll_cache);
-            }
-            KeyCode::Home => { self.mcp_scroll = 0; }
-            KeyCode::End => { self.mcp_scroll = self.mcp_max_scroll_cache; }
-            // Typing while MCP focused → switch to input (blocked during Running/Cancelling)
-            KeyCode::Char(c) => {
-                if self.workflow_state != WorkflowState::Idle {
-                    return Ok(());
-                }
-                self.focus = FocusPanel::Input;
-                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                self.input.insert(byte_pos, c);
-                self.cursor_position += 1;
-            }
-            KeyCode::Enter => {
-                if !self.input.is_empty() && self.workflow_state == WorkflowState::Idle {
-                    self.focus = FocusPanel::Input;
-                    self.execute_command();
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Keys when Input panel is focused: edit text + scroll input
-    fn handle_input_keys(&mut self, code: KeyCode) -> Result<()> {
-        match code {
-            KeyCode::Enter => {
-                if !self.input.is_empty() && self.workflow_state == WorkflowState::Idle {
-                    self.execute_command();
-                }
-            }
-            KeyCode::Backspace => {
-                if self.cursor_position > 0 {
-                    let byte_pos = char_to_byte_offset(&self.input, self.cursor_position - 1);
-                    self.input.remove(byte_pos);
-                    self.cursor_position -= 1;
-                }
-            }
-            KeyCode::Delete => {
-                let char_count = self.input.chars().count();
-                if self.cursor_position < char_count {
-                    let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                    self.input.remove(byte_pos);
-                }
-            }
-            KeyCode::Up => {
-                // Move cursor up by one visual line width
-                let w = self.input_inner_width_cache.max(1);
-                if self.cursor_position >= w {
-                    self.cursor_position -= w;
-                } else {
-                    self.cursor_position = 0;
-                }
-            }
-            KeyCode::Down => {
-                let w = self.input_inner_width_cache.max(1);
-                let char_count = self.input.chars().count();
-                self.cursor_position = (self.cursor_position + w).min(char_count);
-            }
-            KeyCode::PageUp => {
-                self.input_scroll = self.input_scroll.saturating_sub(3);
-            }
-            KeyCode::PageDown => {
-                self.input_scroll = self.input_scroll.saturating_add(3)
-                    .min(self.input_max_scroll_cache);
-            }
-            KeyCode::Home => { self.cursor_position = 0; }
-            KeyCode::End => { self.cursor_position = self.input.chars().count(); }
-            KeyCode::Left => {
-                if self.cursor_position > 0 { self.cursor_position -= 1; }
-            }
-            KeyCode::Right => {
-                let char_count = self.input.chars().count();
-                if self.cursor_position < char_count { self.cursor_position += 1; }
-            }
-            KeyCode::Char(c) => {
-                // Block typing during Running and Cancelling states.
-                if self.workflow_state != WorkflowState::Idle {
-                    return Ok(());
-                }
-                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                self.input.insert(byte_pos, c);
-                self.cursor_position += 1;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Copy output panel text to the system clipboard.
-    fn copy_output_to_clipboard(&mut self) {
-        // Strip the \x01 reasoning marker from each line before copying
-        let clean: String = self.output_lines.iter()
-            .map(|l| l.strip_prefix('\x01').unwrap_or(l).to_owned())
-            .collect::<Vec<String>>()
-            .join("\n");
-        self.copy_to_clipboard(clean);
-    }
-
-    /// Copy a string to the system clipboard and show brief feedback.
-    fn copy_to_clipboard(&mut self, text: String) {
-        match arboard::Clipboard::new() {
-            Ok(mut clipboard) => match clipboard.set_text(&text) {
-                Ok(()) => {
-                    self.output_lines.push("📋 Copied to clipboard".to_string());
-                }
-                Err(e) => {
-                    self.output_lines.push(format!("✗ Clipboard error: {}", e));
-                }
-            },
-            Err(e) => {
-                self.output_lines.push(format!("✗ Clipboard unavailable: {}", e));
-            }
-        }
-    }
-
-    /// Handle messages from async workflows
-    fn handle_workflow_message(&mut self, msg: TuiMessage) {
-        match msg {
-            TuiMessage::WorkflowCancelled => {
-                self.output_lines.push("⏹ Workflow cancelled".to_string());
-                self.output_lines.push("".to_string());
-                self.workflow_state = WorkflowState::Cancelling;
-                // Stay in Cancelling — ResumeInfo will transition to Idle
-            }
-            TuiMessage::OutputLine(line) => {
-                self.output_lines.push(line);
-            }
-            TuiMessage::StreamDelta(delta) => {
-                // Append streaming delta to the last line (print-style)
-                // instead of creating a new line (println-style).
-                if let Some(last) = self.output_lines.last_mut() {
-                    last.push_str(&delta);
-                } else {
-                    self.output_lines.push(delta);
-                }
-            }
-            TuiMessage::ReasoningDelta(delta) => {
-                // Same as StreamDelta but prefix with \x01 marker for grey rendering.
-                // The marker is stripped during render and the line is styled grey.
-                if let Some(last) = self.output_lines.last_mut() {
-                    if !last.starts_with('\x01') {
-                        // First reasoning on this line — mark it
-                        last.insert(0, '\x01');
-                    }
-                    last.push_str(&delta);
-                } else {
-                    self.output_lines.push(format!("\x01{}", delta));
-                }
-            }
-            TuiMessage::WorkflowCompleted => {
-                self.output_lines.push("✓ Workflow completed".to_string());
-                self.output_lines.push("".to_string());
-                // Transition to Cancelling while waiting for ResumeInfo.
-                // This blocks input until the old task is fully wound down.
-                if self.workflow_state == WorkflowState::Running {
-                    self.workflow_state = WorkflowState::Cancelling;
-                }
-            }
-            TuiMessage::WorkflowError(err) => {
-                self.output_lines.push(format!("✗ Error: {}", err));
-                self.output_lines.push("".to_string());
-                // Same as WorkflowCompleted: transition to Cancelling
-                if self.workflow_state == WorkflowState::Running {
-                    self.workflow_state = WorkflowState::Cancelling;
-                }
-            }
-            TuiMessage::TodoUpdate(content) => {
-                self.todo_lines = content.lines().map(|l| l.to_string()).collect();
-            }
-            TuiMessage::ToolPending { tool_name, hint } => {
-                let label = match &hint {
-                    Some(h) => format!("⠋ {} {}", tool_name, h),
-                    None    => format!("⠋ {}", tool_name),
-                };
-                let idx = self.output_lines.len();
-                self.output_lines.push(label);
-                // Push new entry — same tool can appear multiple times in parallel.
-                self.pending_tool_lines.push((tool_name, idx, hint));
-            }
-            TuiMessage::ToolDone { tool_name, success, hint } => {
-                let status = if success { "✓" } else { "✗" };
-                // Find the first pending entry for this tool name.
-                if let Some(pos) = self.pending_tool_lines.iter().position(|(n, _, _)| *n == tool_name) {
-                    let (_, idx, pending_hint) = self.pending_tool_lines.remove(pos);
-                    // Prefer hint from ToolDone (bash description); fall back to the
-                    // hint we already captured at ToolPending time (file path).
-                    let h = hint.or(pending_hint);
-                    let label = match &h {
-                        Some(h) => format!("{} {} {}", status, tool_name, h),
-                        None    => format!("{} {}", status, tool_name),
-                    };
-                    if idx < self.output_lines.len() {
-                        self.output_lines[idx] = label;
-                        return; // skip the auto-scroll push below
-                    }
-                    // idx out of range — fall through to append
-                    self.output_lines.push(label);
-                } else {
-                    // No pending entry — append directly.
-                    let label = match &hint {
-                        Some(h) => format!("{} {} {}", status, tool_name, h),
-                        None    => format!("{} {}", status, tool_name),
-                    };
-                    self.output_lines.push(label);
-                }
-            }
-            TuiMessage::ResumeInfo(info) => {
-                // If the task was cancelled (Cancelling state) and returned no
-                // real checkpoint (None), restore the pre-command backup so the
-                // original session survives a mistake-ENTER+ESC sequence.
-                if self.workflow_state == WorkflowState::Cancelling && info.is_none() {
-                    self.resume_info = self.backup_resume_info.take();
-                } else {
-                    self.resume_info = info;
-                    self.backup_resume_info = None; // real checkpoint — discard backup
-                }
-                // Only transition Cancelling → Idle (old task fully wound down).
-                // During Running, ResumeInfo is just a checkpoint snapshot —
-                // don't touch the state. ABK sends ResumeInfo after session init
-                // and after each iteration checkpoint, which must not reset the UI.
-                if self.workflow_state == WorkflowState::Cancelling {
-                    self.workflow_state = WorkflowState::Idle;
-                }
-                if self.resume_info.is_some() {
-                    if std::env::var("RUST_LOG")
-                        .map(|v| v.to_lowercase().contains("debug"))
-                        .unwrap_or(false)
-                    {
-                        self.output_lines.push("🔄 Session preserved — next command will continue this session".to_string());
-                    }
-                }
-                // If a handoff was queued (Ctrl+H while running), fire it now
-                // instead of auto-executing any pending command.
-                if self.workflow_state == WorkflowState::Idle && self.handoff_pending {
-                    self.handoff_pending = false;
-                    self.trigger_handoff(String::new());
-                } else if let Some(cmd) = self.pending_command.take() {
-                    self.input = cmd;
-                    self.execute_command();
-                }
-            }
-            TuiMessage::ContextTokensUpdated(count) => {
-                self.current_context_tokens = count;
-                // Auto-handoff: when context exceeds threshold during a running
-                // workflow, cancel immediately (same as Ctrl+H while running).
-                // The in-flight API call completes, then ABK sees the cancel
-                // token, sends ResumeInfo, and the existing ResumeInfo handler
-                // fires trigger_handoff(). This prevents further API calls
-                // that would exceed the LLM context limit.
-                if self.auto_handoff.enabled
-                    && count >= self.auto_handoff.context_threshold
-                    && self.workflow_state == WorkflowState::Running
-                    && !self.handoff_pending
-                    && self.resume_info.is_some()
-                {
-                    self.handoff_pending = true;
-                    self.cancel_token.cancel();
-                    self.workflow_state = WorkflowState::Cancelling;
-                    self.output_lines.push(format!(
-                        "🔄 Auto-handoff: cancelling workflow, context tokens ({}) ≥ threshold ({})",
-                        count, self.auto_handoff.context_threshold
-                    ));
-                }
-            }
-            TuiMessage::McpServerStatus { name, connected, tool_count, error } => {
-                let status = if connected { McpServerStatus::Connected } else { McpServerStatus::Failed };
-                if let Some(existing) = self.mcp_servers.iter_mut().find(|s| s.name == name) {
-                    existing.status = status;
-                    existing.tool_count = tool_count;
-                    existing.error = error;
-                } else {
-                    self.mcp_servers.push(McpServerInfo { name, status, tool_count, error });
-                }
-            }
-            TuiMessage::HandoffReady(briefing) => {
-                // Briefing generation complete — transition out of Running state,
-                // clear resume_info (fresh session), then fire the briefing as a
-                // new task. ABK will create a new session checkpoint automatically
-                // with the briefing as the first user message.
-                self.workflow_state = WorkflowState::Idle;
-                self.resume_info = None;
-                self.input = briefing;
-                self.cursor_position = self.input.chars().count();
-                self.execute_command();
-            }
-        }
-        // Auto-scroll to bottom when enabled
-        if self.auto_scroll {
-            self.scroll = u16::MAX;
-        }
-    }
-
-    /// Trigger a session handoff (Ctrl+H):
-    /// 1. Guard — requires a prior session (`resume_info` must be set)
-    /// 2. Run a single LLM call via `run_task_from_raw_config` using the current
-    ///    session's `resume_info`; a `HandoffCaptureSink` captures only the text
-    ///    response (invisible in the main output panel)
-    /// 3. On completion, sends `TuiMessage::HandoffReady(briefing)` which starts
-    ///    a brand-new session with the briefing as the first user message
-    fn trigger_handoff(&mut self, hint: String) {
-        if self.resume_info.is_none() {
-            self.output_lines.push("ℹ Nothing to hand off — run a task first".to_string());
-            return;
-        }
-
-        let config_toml = match &self.config_toml {
-            Some(c) => c.clone(),
-            None => {
-                self.output_lines.push("✗ Error: Configuration not loaded".to_string());
-                return;
-            }
-        };
-
-        let secrets = self.secrets.clone().unwrap_or_default();
-        let build_info = self.build_info.clone();
-        let tx = self.workflow_tx.clone();
-        let resume_info = self.resume_info.take();
-
-        self.workflow_state = WorkflowState::Running;
-        self.auto_scroll = true;
-        self.cancel_token = CancellationToken::new();
-        let child_token = self.cancel_token.clone();
-
-        self.output_lines.push("🔀 Generating session handoff briefing...".to_string());
-
-        tokio::spawn(async move {
-            let (cap_tx, mut cap_rx) = mpsc::unbounded_channel::<CapturedText>();
-            let cap_sink: abk::orchestration::output::SharedSink =
-                std::sync::Arc::new(HandoffCaptureSink { tx: cap_tx, cancel: child_token.clone() });
-
-            abk::observability::set_tui_mode(true);
-
-            // Instruction comes first so the LLM sees the constraint before any user text.
-            // User hint (if non-empty) is appended as additional briefing focus — never prepended.
-            let base = "Output a session handoff briefing in at most 300 lines. \
-                 Do NOT use any tools. Include: the FULL ABSOLUTE PATH of every \
-                 project/repository being worked on (e.g. /Projects/Foo/bar — never \
-                 omit the leading path), all project/task/workstream UUIDs referenced, \
-                 every file created or modified with its full absolute path, all \
-                 commands run and their outcomes, the current state of the work, any \
-                 blockers, and the exact next action to take. \
-                 Output ONLY the briefing text — no preamble, headers, or closing remarks.";
-            let prompt = if hint.is_empty() {
-                base.to_string()
-            } else {
-                format!("{base}\n\nIn the briefing also consider: {hint}")
-            };
-
-            let (dummy_tx, _dummy_rx) = mpsc::unbounded_channel();
-            let _res = abk::cli::run_task_from_raw_config(
-                &config_toml,
-                secrets,
-                build_info,
-                &prompt,
-                Some(cap_sink),
-                resume_info,
-                Some(dummy_tx),
-                Some(child_token),
-            ).await;
-
-            abk::observability::set_tui_mode(false);
-
-            // Drain the capture channel. Separate text chunks from reasoning chunks.
-            // Priority: if any text was captured, use only text (models that emit
-            // reasoning first then produce the real briefing as text). If no text
-            // but reasoning was captured, fall back to reasoning content (models
-            // that deliver their entire output as thinking tokens — issue #63ad71c8).
-            let mut text_parts = String::new();
-            let mut reasoning_parts = String::new();
-            while let Ok(captured) = cap_rx.try_recv() {
-                match captured {
-                    CapturedText::Text(s) => text_parts.push_str(&s),
-                    CapturedText::Reasoning(s) => reasoning_parts.push_str(&s),
-                }
-            }
-
-            let briefing = if !text_parts.trim().is_empty() {
-                text_parts.trim().to_string()
-            } else if !reasoning_parts.trim().is_empty() {
-                reasoning_parts.trim().to_string()
-            } else {
-                "Session handoff: briefing unavailable — continue from previous context.".to_string()
-            };
-
-            tx.send(TuiMessage::HandoffReady(briefing)).ok();
-        });
-    }
-
-    /// Execute the current command in the input buffer
-    /// 
-    /// Task 50: Wired to ABK's run_task_from_raw_config
-    /// Task 55: Creates TuiSink to bridge OutputEvent → TuiMessage channel
-    fn execute_command(&mut self) {
-        let command = self.input.trim().to_string();
-        
-        // If previous workflow still winding down, buffer the command
-        if self.workflow_state != WorkflowState::Idle {
-            self.pending_command = Some(command);
-            self.output_lines.push("⏳ Previous workflow finishing — command queued".to_string());
-            self.input.clear();
-            self.cursor_position = 0;
-            return;
-        }
-
-        let is_continuation = self.resume_info.is_some();
-        
-        // Only clear output for truly new sessions (Bug #3 fix)
-        if !is_continuation {
-            self.output_lines.clear();
-            self.scroll = 0;
-        }
-        
-        // Add command to output
-        self.output_lines.push(format!("> {}", command));
-
-        
-        // Check if config is available
-        let config_toml = match &self.config_toml {
-            Some(c) => c.clone(),
-            None => {
-                self.output_lines.push("✗ Error: Configuration not loaded".to_string());
-                self.output_lines.push("".to_string());
-                return;
-            }
-        };
-        
-        let secrets = self.secrets.clone().unwrap_or_default();
-        let build_info = self.build_info.clone();
-        let tx = self.workflow_tx.clone();
-        
-        // Snapshot resume_info before consuming it, so we can restore it if
-        // the task is cancelled before producing a real checkpoint (e.g. user
-        // pressed ENTER by mistake then ESC before the first iteration saved).
-        self.backup_resume_info = self.resume_info.clone();
-
-        // Take resume_info (one-time use — consumed on next command)
-        let resume_info = self.resume_info.take();
-        
-        // Mark workflow as running, re-enable auto-scroll
-        self.workflow_state = WorkflowState::Running;
-        self.auto_scroll = true;
-
-        // Create a fresh cancellation token for this workflow run.
-        // Each command gets its own token so ESC cancelling one workflow
-        // doesn't affect the next one (CancellationToken never un-cancel).
-        self.cancel_token = CancellationToken::new();
-        let child_token = self.cancel_token.clone();
-
-        // Create channel for incremental resume_info from ABK checkpoints.
-        // ABK sends resume_info after every iteration checkpoint so the TUI
-        // always has up-to-date session state — even if ESC cancels mid-workflow.
-        let (resume_tx, mut resume_rx) = mpsc::unbounded_channel();
-
-        // Spawn a forwarder task that relays incremental resume_info
-        // from ABK's checkpoint channel into the TUI message channel.
-        let resume_forward_tx = tx.clone();
-        tokio::spawn(async move {
-            while let Some(info) = resume_rx.recv().await {
-                resume_forward_tx.send(TuiMessage::ResumeInfo(info)).ok();
-            }
-        });
-
-        // Spawn the workflow with TuiSink-based output
-        tokio::spawn(async move {
-            // Create TuiSink that bridges OutputEvent → TuiMessage channel.
-            let tui_sink: abk::orchestration::output::SharedSink =
-                std::sync::Arc::new(TuiSink::new(tx.clone()));
-
-            // Run ABK workflow with the task — bypasses CLI arg parsing.
-            // TUI mode is enabled to suppress ABK's console output (stdout/stderr).
-            // Output events flow through TuiSink directly to the TUI display.
-            abk::observability::set_tui_mode(true);
-
-            let result = abk::cli::run_task_from_raw_config(
-                &config_toml,
-                secrets,
-                build_info,
-                &command,
-                Some(tui_sink),
-                resume_info,
-                Some(resume_tx),
-                Some(child_token),
-            ).await;
-
-            abk::observability::set_tui_mode(false);
-
-            let task_result = result.unwrap_or_else(|e| abk::cli::TaskResult {
-                success: false,
-                error: Some(e.to_string()),
-                resume_info: None,
-            });
-
-            // Send completion message
-            let msg = if task_result.success {
-                TuiMessage::WorkflowCompleted
-            } else {
-                TuiMessage::WorkflowError(task_result.error.unwrap_or_default())
-            };
-            tx.send(msg).ok();
-
-            // Send final resume info back for storage in App
-            tx.send(TuiMessage::ResumeInfo(task_result.resume_info)).ok();
-        });
-        
-        // Clear input buffer and reset cursor
-        self.input.clear();
-        self.cursor_position = 0;
-        
-        // Auto-scroll to bottom
-        self.scroll = u16::MAX;
-    }
-
-    /// Render the TUI
-    pub fn render(&mut self, frame: &mut Frame) {
-        // If a panel is zoomed, render only that panel fullscreen (no borders).
-        // This gives the user clean text for terminal-native click-drag selection.
-        if let Some(panel) = self.zoomed_panel {
-            self.render_zoomed(frame, panel);
-            return;
-        }
-
-        // Create main layout: output takes remaining space, input gets fixed height
-        let main_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .margin(2)
-            .constraints([
-                Constraint::Min(0),    // Output + Todo area - all remaining space
-                Constraint::Length(7), // Input area - fixed 7 rows (5 content + 2 borders)
-            ])
-            .split(frame.area());
-
-        // Cache rects for mouse hit-testing
-        self.input_rect = main_chunks[1];
-
-        // Split output area horizontally: 70% output, 30% todo panel
-        let content_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(70), // Main output
-                Constraint::Percentage(30), // Todo panel
-            ])
-            .split(main_chunks[0]);
-
-        // Cache rects for mouse hit-testing
-        self.output_rect = content_chunks[0];
-        self.todo_rect = content_chunks[1];
-
-        // Output area title shows scroll mode
-
-        // Render output area with scrollable content.
-        // Lines prefixed with \x01 are reasoning lines, styled via reasoning_style
-        // (configurable in [tui.colors]).
-        let grey_style = self.reasoning_style;
-        let normal_style = Style::default();
-        let styled_lines: Vec<Line> = self.output_lines.iter().flat_map(|raw| {
-            let (style, text) = if let Some(stripped) = raw.strip_prefix('\x01') {
-                (grey_style, stripped)
-            } else {
-                (normal_style, raw.as_str())
-            };
-            // A single output_line may contain embedded newlines (e.g. tool output).
-            // Split them so ratatui wraps correctly.
-            text.split('\n').map(move |segment| {
-                Line::from(Span::styled(segment.to_string(), style))
-            }).collect::<Vec<_>>()
-        }).collect();
-
-        let display_text = Text::from(styled_lines);
-        // Use wrapped visual line count for scroll clamping (not raw line count).
-        let content_height = estimate_visual_lines(&display_text, content_chunks[0].width);
-        let viewport_height = content_chunks[0].height.saturating_sub(2) as usize;
-        let max_scroll = content_height.saturating_sub(viewport_height) as u16;
-        self.max_scroll_cache = max_scroll;
-        let clamped_scroll = if self.scroll == u16::MAX {
-            max_scroll
-        } else {
-            self.scroll.min(max_scroll)
-        };
-        let output_title = if self.auto_scroll {
-            "Output (↑/↓ to scroll)".to_string()
-        } else {
-            format!("Output (line {}/{} — ↓ to follow)", clamped_scroll, max_scroll)
-        };
-
-        let output_border = if self.focus == FocusPanel::Output {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        let output_paragraph = Paragraph::new(display_text)
-            .block(
-                Block::default()
-                    .title(output_title)
-                    .title_style(Style::default().add_modifier(Modifier::BOLD))
-                    .borders(Borders::ALL)
-                    .border_style(output_border),
-            )
-            .wrap(Wrap { trim: false })
-            .scroll((clamped_scroll, 0));
-        // Clear the output panel area before rendering the Paragraph.
-        // This forces every cell in the region to be marked dirty, ensuring
-        // the diff-based renderer writes spaces for cells that previously
-        // held content from longer/wrapped lines that are now shorter.
-        // This fixes orphan characters during streaming scroll without
-        // causing the full-screen blinking that terminal.clear() introduced.
-        frame.render_widget(Clear, content_chunks[0]);
-        frame.render_widget(output_paragraph, content_chunks[0]);
-
-        // Split the right panel vertically: Todos on top, MCP status on bottom.
-        // MCP panel height is dynamic based on server count.
-        let mcp_line_count = self.mcp_servers.len();
-        let failed_count = self.mcp_servers.iter()
-            .filter(|s| s.status == McpServerStatus::Failed && s.error.is_some())
-            .count();
-        // Min: 4 rows (border + "(none)" message). Max: half the right column height.
-        let mcp_height = (2 + mcp_line_count + failed_count)
-            .max(4)
-            .min((content_chunks[1].height / 2) as usize) as u16;
-
-        let right_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),              // Todos — takes remaining space
-                Constraint::Length(mcp_height),   // MCP Status — dynamic!
-            ])
-            .split(content_chunks[1]);
-
-        // Update todo_rect to only the todo portion for mouse hit-testing
-        self.todo_rect = right_chunks[0];
-
-        // Render todo panel on the top portion of the right side
-        let todo_title = format!("Todos ({})", self.todo_lines.len());
-        let todo_text = if self.todo_lines.is_empty() {
-            Text::from("No tasks")
-        } else {
-            Text::from(self.todo_lines.iter().map(|l| Line::from(l.as_str())).collect::<Vec<_>>())
-        };
-        let todo_content_height = estimate_visual_lines(&todo_text, right_chunks[0].width);
-        let todo_viewport = right_chunks[0].height.saturating_sub(2) as usize;
-        let todo_max = todo_content_height.saturating_sub(todo_viewport) as u16;
-        self.todo_max_scroll_cache = todo_max;
-        let todo_clamped = self.todo_scroll.min(todo_max);
-        let todo_border = if self.focus == FocusPanel::Todo {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        let todo_paragraph = Paragraph::new(todo_text)
-            .block(
-                Block::default()
-                    .title(todo_title)
-                    .title_style(Style::default().add_modifier(Modifier::BOLD))
-                    .borders(Borders::ALL)
-                    .border_style(todo_border),
-            )
-            .wrap(Wrap { trim: false })
-            .scroll((todo_clamped, 0));
-        frame.render_widget(todo_paragraph, right_chunks[0]);
-
-        // Render MCP status panel on the bottom portion of the right side
-        self.mcp_rect = right_chunks[1];
-        self.render_mcp_status(frame, right_chunks[1]);
-
-        // Render input text with a visible block cursor (reversed colors).
-        let char_count = self.input.chars().count();
-        let cursor_style = if self.focus == FocusPanel::Input {
-            Style::default().fg(Color::Black).bg(Color::White)
-        } else {
-            Style::default().fg(Color::Black).bg(Color::DarkGray)
-        };
-        let input_spans = if self.cursor_position < char_count {
-            let before: String = self.input.chars().take(self.cursor_position).collect();
-            let at: String = self.input.chars().skip(self.cursor_position).take(1).collect();
-            let after: String = self.input.chars().skip(self.cursor_position + 1).collect();
-            vec![
-                Span::raw(before),
-                Span::styled(at, cursor_style),
-                Span::raw(after),
-            ]
-        } else {
-            // Cursor at end — show a block space as the cursor
-            vec![
-                Span::raw(self.input.clone()),
-                Span::styled(" ", cursor_style),
-            ]
-        };
-        let input_text = Text::from(Line::from(input_spans));
-
-        // Show status in input title based on workflow state
-        let input_title = match self.workflow_state {
-            WorkflowState::Running => "Input (Running... Esc to cancel)".to_string(),
-            WorkflowState::Cancelling => "Input (Cancelling...)".to_string(),
-            WorkflowState::Idle => "Input (Ready)".to_string(),
-        };
-
-        // Compute input scroll: use word-wrap aware line count (same as
-        // estimate_visual_lines) so scroll matches what Paragraph actually renders.
-        let input_inner_width = main_chunks[1].width.saturating_sub(2).max(1);
-        self.input_inner_width_cache = input_inner_width as usize;
-        let input_inner_height = main_chunks[1].height.saturating_sub(2) as usize;
-        let input_total_visual = estimate_visual_lines(&input_text, main_chunks[1].width);
-        let input_max = input_total_visual.saturating_sub(input_inner_height) as u16;
-        self.input_max_scroll_cache = input_max;
-        // Auto-scroll to keep cursor visible.
-        // Build text up to cursor position to find which visual line it lands on.
-        let cursor_text = if self.cursor_position < char_count {
-            let before: String = self.input.chars().take(self.cursor_position + 1).collect();
-            Text::from(Line::from(before))
-        } else {
-            input_text.clone()
-        };
-        let cursor_visual_line = estimate_visual_lines(&cursor_text, main_chunks[1].width)
-            .saturating_sub(1) as u16;
-        if cursor_visual_line < self.input_scroll {
-            self.input_scroll = cursor_visual_line;
-        } else if cursor_visual_line >= self.input_scroll + input_inner_height as u16 {
-            self.input_scroll = cursor_visual_line - input_inner_height as u16 + 1;
-        }
-        self.input_scroll = self.input_scroll.min(input_max);
-        let input_border = if self.focus == FocusPanel::Input {
-            Style::default().fg(Color::Green)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        let input_paragraph = Paragraph::new(input_text)
-            .block(
-                Block::default()
-                    .title(input_title)
-                    .title_style(Style::default().add_modifier(Modifier::BOLD))
-                    .borders(Borders::ALL)
-                    .border_style(input_border),
-            )
-            .style(Style::default().fg(Color::White))
-            .wrap(Wrap { trim: false })
-            .scroll((self.input_scroll, 0));
-        frame.render_widget(input_paragraph, main_chunks[1]);
-    }
-
-    /// Render a single panel fullscreen with no borders or margins.
-    ///
-    /// Used when the user presses Ctrl+Z to zoom into a panel for clean
-    /// terminal-native text selection (click-drag → OS copy shortcut).
-    /// The entire terminal area is used — no borders, no margins, no other panels.
-    fn render_zoomed(&mut self, frame: &mut Frame, panel: FocusPanel) {
-        let area = frame.area();
-
-        match panel {
-            FocusPanel::Output => {
-                let grey_style = self.reasoning_style;
-                let normal_style = Style::default();
-                let styled_lines: Vec<Line> = self.output_lines.iter().flat_map(|raw| {
-                    let (style, text) = if let Some(stripped) = raw.strip_prefix('\x01') {
-                        (grey_style, stripped)
-                    } else {
-                        (normal_style, raw.as_str())
-                    };
-                    text.split('\n').map(move |segment| {
-                        Line::from(Span::styled(segment.to_string(), style))
-                    }).collect::<Vec<_>>()
-                }).collect();
-
-                let display_text = Text::from(styled_lines);
-                let content_height = estimate_visual_lines(&display_text, area.width);
-                let viewport_height = area.height as usize;
-                let max_scroll = content_height.saturating_sub(viewport_height) as u16;
-                self.max_scroll_cache = max_scroll;
-                let clamped_scroll = if self.scroll == u16::MAX {
-                    max_scroll
-                } else {
-                    self.scroll.min(max_scroll)
-                };
-
-                let paragraph = Paragraph::new(display_text)
-                    .wrap(Wrap { trim: false })
-                    .scroll((clamped_scroll, 0));
-                // Clear the full-screen area before rendering to prevent
-                // orphan characters from the same Paragraph+scroll+Wrap bug.
-                frame.render_widget(Clear, area);
-                frame.render_widget(paragraph, area);
-            }
-            FocusPanel::Todo => {
-                let todo_text = if self.todo_lines.is_empty() {
-                    Text::from("No tasks")
-                } else {
-                    Text::from(self.todo_lines.iter().map(|l| Line::from(l.as_str())).collect::<Vec<_>>())
-                };
-                let todo_content_height = estimate_visual_lines(&todo_text, area.width);
-                let todo_viewport = area.height as usize;
-                let todo_max = todo_content_height.saturating_sub(todo_viewport) as u16;
-                self.todo_max_scroll_cache = todo_max;
-                let todo_clamped = self.todo_scroll.min(todo_max);
-
-                let paragraph = Paragraph::new(todo_text)
-                    .wrap(Wrap { trim: false })
-                    .scroll((todo_clamped, 0));
-                frame.render_widget(paragraph, area);
-            }
-            FocusPanel::Mcp => {
-                // Render MCP server list fullscreen (no borders)
-                let grey = Style::default().fg(Color::DarkGray);
-                if self.mcp_servers.is_empty() {
-                    let paragraph = Paragraph::new(Text::from(Line::from(
-                        Span::styled("(none)", grey)
-                    )));
-                    frame.render_widget(paragraph, area);
-                    return;
-                }
-
-                let mut lines: Vec<Line> = Vec::new();
-                for s in &self.mcp_servers {
-                    let (icon, color) = match s.status {
-                        McpServerStatus::Connected => ("✓", Color::Green),
-                        McpServerStatus::Failed => ("✗", Color::Red),
-                    };
-                    let count_str = if s.tool_count > 0 {
-                        format!("{} tools", s.tool_count)
-                    } else {
-                        "--".to_string()
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("{} ", icon), Style::default().fg(color)),
-                        Span::raw(s.name.clone()),
-                        Span::raw("  "),
-                        Span::styled(count_str, grey),
-                    ]));
-
-                    // Show full error for failed servers (no truncation when zoomed)
-                    if s.status == McpServerStatus::Failed {
-                        if let Some(ref err) = s.error {
-                            lines.push(Line::from(
-                                Span::styled(format!("  {}", err), grey)
-                            ));
-                        }
-                    }
-                }
-
-                let content_lines = lines.len();
-                let viewport_lines = area.height as usize;
-                let max_scroll = content_lines.saturating_sub(viewport_lines) as u16;
-                self.mcp_max_scroll_cache = max_scroll;
-                let clamped_scroll = self.mcp_scroll.min(max_scroll);
-
-                let paragraph = Paragraph::new(Text::from(lines))
-                    .scroll((clamped_scroll, 0));
-                frame.render_widget(Clear, area);
-                frame.render_widget(paragraph, area);
-            }
-            FocusPanel::Input => {
-                let char_count = self.input.chars().count();
-                let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
-                let input_spans = if self.cursor_position < char_count {
-                    let before: String = self.input.chars().take(self.cursor_position).collect();
-                    let at: String = self.input.chars().skip(self.cursor_position).take(1).collect();
-                    let after: String = self.input.chars().skip(self.cursor_position + 1).collect();
-                    vec![
-                        Span::raw(before),
-                        Span::styled(at, cursor_style),
-                        Span::raw(after),
-                    ]
-                } else {
-                    vec![
-                        Span::raw(self.input.clone()),
-                        Span::styled(" ", cursor_style),
-                    ]
-                };
-                let input_text = Text::from(Line::from(input_spans));
-                let paragraph = Paragraph::new(input_text)
-                    .style(Style::default().fg(Color::White))
-                    .wrap(Wrap { trim: false })
-                    .scroll((self.input_scroll, 0));
-                frame.render_widget(paragraph, area);
-            }
-        }
-    }
-
-    /// Render the MCP server status panel (bottom of right column).
-    ///
-    /// Shows ✓/✗ icons + server name + tool count for each MCP server.
-    /// Panel height is dynamic: grows with server count, capped at 50% of right column.
-    /// Failed servers show a truncated error message on the line below.
-    fn render_mcp_status(&mut self, frame: &mut Frame, area: Rect) {
-        let connected = self.mcp_servers.iter()
-            .filter(|s| s.status == McpServerStatus::Connected).count();
-        let mcp_title = format!("MCP ({}/{})", connected, self.mcp_servers.len());
-
-        let grey = Style::default().fg(Color::DarkGray);
-        let border_style = if self.focus == FocusPanel::Mcp {
-            Style::default().fg(Color::Blue)
-        } else {
-            grey
-        };
-        let block = Block::default()
-            .title(mcp_title)
-            .title_style(Style::default().add_modifier(Modifier::BOLD))
-            .borders(Borders::ALL)
-            .border_style(border_style);
-
-        if self.mcp_servers.is_empty() {
-            let paragraph = Paragraph::new(Text::from(Line::from(
-                Span::styled("(none)", grey)
-            )))
-            .block(block);
-            frame.render_widget(paragraph, area);
-            return;
-        }
-
-        let mut lines: Vec<Line> = Vec::new();
-        for s in &self.mcp_servers {
-            let (icon, color) = match s.status {
-                McpServerStatus::Connected => ("✓", Color::Green),
-                McpServerStatus::Failed => ("✗", Color::Red),
-            };
-            let count_str = if s.tool_count > 0 {
-                format!("{} tools", s.tool_count)
-            } else {
-                "--".to_string()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("{} ", icon), Style::default().fg(color)),
-                Span::raw(s.name.clone()),
-                Span::raw("  "),
-                Span::styled(count_str, grey),
-            ]));
-
-            // Show truncated error for failed servers
-            if s.status == McpServerStatus::Failed {
-                if let Some(ref err) = s.error {
-                    let max_len = (area.width as usize).saturating_sub(6);
-                    let truncated = if err.len() > max_len {
-                        format!("  {}", &err[..max_len.saturating_sub(1)])
-                    } else {
-                        format!("  {}", err)
-                    };
-                    lines.push(Line::from(
-                        Span::styled(truncated, grey)
-                    ));
-                }
-            }
-        }
-
-        // Use manual scroll position (controlled by keyboard when focused).
-        // Falls back to auto-scroll-to-bottom when not focused.
-        let content_lines = lines.len();
-        let viewport_lines = area.height.saturating_sub(2) as usize;
-        let max_scroll = content_lines.saturating_sub(viewport_lines) as u16;
-        self.mcp_max_scroll_cache = max_scroll;
-        let scroll = if self.focus == FocusPanel::Mcp {
-            self.mcp_scroll.min(max_scroll)
-        } else {
-            max_scroll // auto-scroll to show latest entries
-        };
-
-        let paragraph = Paragraph::new(Text::from(lines))
-            .block(block)
-            .scroll((scroll, 0));
-        frame.render_widget(paragraph, area);
     }
 }
 

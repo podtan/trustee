@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.99] - 2026-07-17
+
+### Fixed
+- **fix(tui): orphan characters during streaming scroll — manual line slicing** — Replaced `Paragraph` + `.wrap(Wrap { trim: false })` + `.scroll()` in the output and todo panel rendering with manual pre-wrapping and line slicing. The `wrap_line()` helper word-wr each line to viewport width using `unicode-width`, `build_visual_lines()` flattens all output into a single `Vec<Line<'static>>`, and `slice_visible()` returns only the visible window. The `Paragraph` widget now renders with neither `.wrap()` nor `.scroll()`, eliminating the scroll-offset desynchronization that caused orphan/stale characters during LLM streaming (issue #74a21aa5, [ratatui#2342](https://github.com/ratatui-org/ratatui/issues/2342)). Applied to output panel, todo panel, and zoomed modes.
+
+### Changed
+- **refactor(tui): split app.rs into 6 modules** — The 1826-line `app.rs` has been split into `types.rs` (type definitions), `helpers.rs` (text wrapping, color parsing, utilities), `render.rs` (rendering logic), `event.rs` (keyboard/mouse/paste handling), `workflow.rs` (workflow message processing, command execution, clipboard), and a slimmed `app.rs` (struct, constructor, main loop, config parsing). No functional changes.
+- **deps: bump trustee-tui to 0.1.54.**
+
 ## [0.1.98] - 2026-07-17
 
 ### Added
