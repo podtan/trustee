@@ -246,7 +246,10 @@ function handleMessage(msg) {
       refreshSession();
       break;
     case 'ResumeInfo':
-      updateState('Idle');
+      // ResumeInfo is a mid-execution checkpoint, NOT a completion signal.
+      // ABK sends these after each iteration while the workflow is still running.
+      // Do NOT change the UI state — only the final WorkflowCompleted/Error
+      // messages signal the actual end.
       break;
     case 'HandoffReady':
       updateState('Idle');

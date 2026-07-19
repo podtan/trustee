@@ -38,6 +38,20 @@ impl ServerState {
                 {
                     let mut session = self.session.lock().await;
                     session.handle_workflow_message(msg.clone());
+
+                    // If handle_workflow_message changed the workflow_state
+                    // (e.g. HandoffReady triggers execute_command internally),
+                    // broadcast a StateChanged so all clients stay in sync.
+                    let state_str = match session.workflow_state {
+                        trustee_core::types::WorkflowState::Idle => "Idle",
+                        trustee_core::types::WorkflowState::Running => "Running",
+                        trustee_core::types::WorkflowState::Cancelling => "Cancelling",
+                    };
+                    let state_msg = serde_json::json!({
+                        "type": "StateChanged",
+                        "state": state_str
+                    });
+                    let _ = self.ws_tx.send(state_msg.to_string());
                 }
 
                 // Broadcast the raw message to WebSocket clients
