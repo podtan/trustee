@@ -46,6 +46,26 @@
     @media (max-width: 600px) {
       .msg-user .bubble { max-width: 90%; font-size: 15px; }
     }
+    /* Agent (assistant) response bubble — left-aligned */
+    .msg-agent {
+      display: flex;
+      justify-content: flex-start;
+      margin: 8px 0;
+    }
+    .msg-agent .bubble {
+      background: #1e1e2e;
+      color: #e0e0e0;
+      padding: 10px 14px;
+      border: 1px solid #333;
+      border-radius: 4px 12px 12px 12px;
+      max-width: 85%;
+      font-size: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    @media (max-width: 600px) {
+      .msg-agent .bubble { max-width: 90%; font-size: 15px; }
+    }
     .error { color: #f87171; }
     .success { color: #4ade80; }
     .info { color: #60a5fa; }
@@ -328,6 +348,11 @@ let autoScroll = true;
 // --- Output rendering ---
 const outputEl = document.getElementById('output');
 
+// Lines to hide in web UI (no value, clutter the output)
+function shouldHideLine(text) {
+  return text.startsWith('🔥 API Call');
+}
+
 function classifyLine(text) {
   if (text.startsWith('\x01')) return { text: text.slice(1), cls: 'reasoning' };
   if (text.startsWith('✗') || text.startsWith('❌')) return { text, cls: 'error' };
@@ -339,9 +364,11 @@ function classifyLine(text) {
 
 function renderLines(lines) {
   outputEl.innerHTML = '';
+  closeAgentBubble();
   for (const line of lines) {
     // User messages stored as "> text" → render as chat bubble
     if (line.startsWith('> ')) {
+      closeAgentBubble();
       const wrap = document.createElement('div');
       wrap.className = 'msg-user';
       const bubble = document.createElement('div');
@@ -351,6 +378,8 @@ function renderLines(lines) {
       outputEl.appendChild(wrap);
       continue;
     }
+    // Hide noisy API call lines in web UI
+    if (shouldHideLine(line)) continue;
     const { text, cls } = classifyLine(line);
     const div = document.createElement('div');
     div.className = 'line' + (cls ? ' ' + cls : '');
@@ -429,6 +458,9 @@ function handleMessage(msg) {
 }
 
 function appendOutput(line) {
+  // Hide noisy API call lines in web UI
+  if (shouldHideLine(line)) return;
+  closeAgentBubble();
   const { text, cls } = classifyLine(line);
   const div = document.createElement('div');
   div.className = 'line' + (cls ? ' ' + cls : '');
@@ -442,6 +474,7 @@ function appendOutput(line) {
 const pendingToolElements = [];
 
 function appendToolPending(toolName, hint) {
+  closeAgentBubble();
   const label = hint ? `${toolName} ${hint}` : toolName;
   const div = document.createElement('div');
   div.className = 'line tool-line';
@@ -452,6 +485,7 @@ function appendToolPending(toolName, hint) {
 }
 
 function updateToolDone(toolName, success, hint) {
+  closeAgentBubble();
   // Find the first pending entry for this tool name
   const idx = pendingToolElements.findIndex(e => e.toolName === toolName);
   if (idx >= 0) {
@@ -472,22 +506,43 @@ function updateToolDone(toolName, success, hint) {
   if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
 }
 
+// --- Agent bubble management ---
+// Streaming content (StreamDelta) is wrapped in a left-aligned agent bubble.
+// Other message types (OutputLine, ToolPending, etc.) close the bubble first.
+let agentBubble = null;
+
+function ensureAgentBubble() {
+  if (agentBubble && agentBubble.isConnected) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-agent';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  wrap.appendChild(bubble);
+  outputEl.appendChild(wrap);
+  agentBubble = bubble;
+}
+
+function closeAgentBubble() {
+  agentBubble = null;
+}
+
 function appendDelta(delta, isReasoning) {
-  const last = outputEl.lastElementChild;
-  if (last) {
-    if (isReasoning && !last.classList.contains('reasoning')) {
+  if (isReasoning) {
+    // Reasoning deltas go as plain italic lines, not inside the bubble
+    closeAgentBubble();
+    const last = outputEl.lastElementChild;
+    if (last && last.classList.contains('reasoning')) {
+      last.textContent += delta;
+    } else {
       const div = document.createElement('div');
       div.className = 'line reasoning';
       div.textContent = delta;
       outputEl.appendChild(div);
-    } else {
-      last.textContent += delta;
     }
   } else {
-    const div = document.createElement('div');
-    div.className = 'line' + (isReasoning ? ' reasoning' : '');
-    div.textContent = delta;
-    outputEl.appendChild(div);
+    // Content streaming goes into the agent bubble
+    ensureAgentBubble();
+    agentBubble.textContent += delta;
   }
   if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
 }
