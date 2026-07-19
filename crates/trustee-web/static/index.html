@@ -112,59 +112,118 @@
     .panel-toggle { font-size: 10px; }
     .panel-content.collapsed { display: none; }
 
-    /* Mobile: collapsible right panel moved above output */
+    /* Mobile: full-screen output, panel becomes slide-up bottom sheet */
     @media (max-width: 600px) {
-      #main-area { flex-direction: column; }
-      #right-panel {
-        width: 100%;
-        border-left: none;
-        border-top: 1px solid #333;
-        max-height: 50vh;
-        flex-shrink: 0;
-        order: -1; /* move above output so it's at the top */
-      }
-      #right-panel.collapsed { max-height: 32px; overflow: hidden; }
-      #right-panel.collapsed #todo-panel,
-      #right-panel.collapsed #mcp-panel { display: none; }
-      #right-panel.collapsed #panel-tabs { display: flex; }
-      #todo-panel, #mcp-panel { padding: 6px 12px; }
       #output { font-size: 12px; padding: 8px 10px; }
       #input { font-size: 12px; padding: 8px 10px; }
       #input-bar { padding: 6px 10px; }
       button { padding: 8px 14px; font-size: 12px; }
-    }
 
-    /* Mobile: tab-based right panel */
-    #panel-tabs { display: none; }
-    @media (max-width: 600px) {
+      /* Panel becomes bottom sheet overlay */
+      #right-panel {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        width: 100%;
+        max-height: 60vh;
+        border-left: none;
+        border-top: 1px solid #333;
+        background: #1a1a1a;
+        z-index: 1000;
+        transform: translateY(100%);
+        transition: transform 0.25s ease-out;
+        box-shadow: 0 -4px 20px rgba(0,0,0,0.5);
+        border-radius: 12px 12px 0 0;
+        flex-direction: column;
+      }
+      #right-panel.open { transform: translateY(0); }
+
+      /* Slide-up handle bar */
+      #sheet-handle {
+        display: block;
+        width: 36px;
+        height: 4px;
+        background: #555;
+        border-radius: 2px;
+        margin: 8px auto 4px;
+        flex-shrink: 0;
+      }
+
+      /* Tab bar inside the sheet */
       #panel-tabs {
         display: flex;
         gap: 0;
         background: #111;
+        border-radius: 8px;
+        margin: 0 8px 4px;
+        flex-shrink: 0;
       }
       .tab-btn {
-        flex: 1; padding: 6px; text-align: center;
+        flex: 1; padding: 8px; text-align: center;
         font-size: 11px; cursor: pointer; border: none;
         background: #111; color: #888; font-family: inherit;
         border-bottom: 2px solid transparent;
+        border-radius: 8px;
       }
       .tab-btn.active { color: #60a5fa; border-bottom-color: #60a5fa; }
-      #right-panel.collapsed #panel-tabs { display: none; }
-      /* On mobile, show only the active tab content */
+      #tab-collapse { flex: 0 0 auto; padding: 8px 14px; }
+
+      /* Panel content scrollers */
+      #todo-panel, #mcp-panel { padding: 8px 12px; overflow-y: auto; }
+      #todo-panel { flex: 1; }
+      #mcp-panel { flex: 1; }
+
+      /* Show only active tab */
       #right-panel.mobile-mode #todo-panel { display: none; }
       #right-panel.mobile-mode.tab-todo #todo-panel { display: block; }
       #right-panel.mobile-mode.tab-mcp #mcp-panel { display: block; }
       #right-panel.mobile-mode #mcp-panel { display: none; }
+
+      /* Backdrop to dismiss the sheet */
+      #sheet-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.5);
+        z-index: 999;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.25s;
+      }
+      #sheet-backdrop.visible {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      /* Floating action button to open the sheet */
+      #fab-panel {
+        position: fixed;
+        right: 12px;
+        bottom: 60px;
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        background: #2563eb;
+        color: white;
+        border: none;
+        cursor: pointer;
+        z-index: 100;
+        font-size: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+        transition: background 0.2s, transform 0.2s;
+      }
+      #fab-panel:hover { background: #3b82f6; transform: scale(1.05); }
+      #fab-panel:active { transform: scale(0.95); }
     }
 
-    /* Mobile: keep input bar visible above keyboard */
-    @media (max-width: 600px) {
-      #input-bar {
-        position: sticky;
-        bottom: 0;
-        z-index: 100;
-      }
-    }
+    /* Desktop: hide mobile-only elements */
+    #panel-tabs { display: none; }
+    #sheet-handle { display: none; }
+    #sheet-backdrop { display: none; }
+    #fab-panel { display: none; }
     .todo-item { padding: 2px 0; }
     .mcp-item { padding: 2px 0; }
     .mcp-ok { color: #4ade80; }
@@ -210,13 +269,16 @@
   <button id="btn-handoff" style="display:none; padding: 4px 12px; font-size: 12px;">Handoff</button>
 </div>
 
+<div id="sheet-backdrop"></div>
+
 <div id="main-area">
   <div id="output"></div>
   <div id="right-panel">
+    <div id="sheet-handle"></div>
     <div id="panel-tabs">
       <button class="tab-btn active" id="tab-todo">📋 Todos</button>
       <button class="tab-btn" id="tab-mcp">🔌 MCP</button>
-      <button class="tab-btn" id="tab-collapse" style="flex:0 0 auto; padding: 6px 10px;">▼</button>
+      <button class="tab-btn" id="tab-collapse">✕</button>
     </div>
     <div id="todo-panel">
       <div class="panel-title" id="todo-title">Todos</div>
@@ -228,6 +290,8 @@
     </div>
   </div>
 </div>
+
+<button id="fab-panel">📋</button>
 
 <div id="input-bar">
   <input id="input" type="text" placeholder="Type a task and press Enter..." autocomplete="off" />
@@ -525,8 +589,10 @@ async function checkAuth() {
   }
 }
 
-// --- Collapsible panels ---
+// --- Desktop: collapsible panels ---
 const rightPanel = document.getElementById('right-panel');
+const sheetBackdrop = document.getElementById('sheet-backdrop');
+const fabPanel = document.getElementById('fab-panel');
 
 // Desktop: click panel title to collapse/expand individual panels
 function setupPanelToggle(titleId, contentSelector) {
@@ -544,14 +610,25 @@ function setupPanelToggle(titleId, contentSelector) {
   // Init indicator
   const indicator = document.createElement('span');
   indicator.className = 'panel-toggle';
-    indicator.textContent = '▾';
+  indicator.textContent = '▾';
   title.appendChild(indicator);
 }
 setupPanelToggle('todo-title', '#todo-list');
 setupPanelToggle('mcp-title', '#mcp-list');
 
-// Mobile: tab switching and collapse
+// --- Mobile: bottom sheet panel ---
+
 function isMobile() { return window.innerWidth <= 600; }
+
+function openSheet() {
+  rightPanel.classList.add('open');
+  sheetBackdrop.classList.add('visible');
+}
+
+function closeSheet() {
+  rightPanel.classList.remove('open');
+  sheetBackdrop.classList.remove('visible');
+}
 
 function initMobile() {
   if (!isMobile()) return;
@@ -559,8 +636,14 @@ function initMobile() {
 }
 initMobile();
 
+// FAB opens the sheet
+fabPanel.addEventListener('click', openSheet);
+
+// Backdrop dismisses the sheet
+sheetBackdrop.addEventListener('click', closeSheet);
+
+// Tab switching
 document.getElementById('tab-todo')?.addEventListener('click', () => {
-  rightPanel.classList.remove('collapsed');
   rightPanel.classList.add('mobile-mode', 'tab-todo');
   rightPanel.classList.remove('tab-mcp');
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -568,23 +651,20 @@ document.getElementById('tab-todo')?.addEventListener('click', () => {
 });
 
 document.getElementById('tab-mcp')?.addEventListener('click', () => {
-  rightPanel.classList.remove('collapsed');
   rightPanel.classList.add('mobile-mode', 'tab-mcp');
   rightPanel.classList.remove('tab-todo');
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('tab-mcp')?.classList.add('active');
 });
 
-document.getElementById('tab-collapse')?.addEventListener('click', () => {
-  rightPanel.classList.toggle('collapsed');
-  document.getElementById('tab-collapse').textContent =
-    rightPanel.classList.contains('collapsed') ? '▲' : '▼';
-});
+// Close button inside the sheet
+document.getElementById('tab-collapse')?.addEventListener('click', closeSheet);
 
 // Re-evaluate on orientation/size change
 window.addEventListener('resize', () => {
   if (!isMobile()) {
-    rightPanel.classList.remove('mobile-mode', 'tab-todo', 'tab-mcp', 'collapsed');
+    rightPanel.classList.remove('mobile-mode', 'tab-todo', 'tab-mcp', 'open');
+    sheetBackdrop.classList.remove('visible');
   } else {
     initMobile();
   }
