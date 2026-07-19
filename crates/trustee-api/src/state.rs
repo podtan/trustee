@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use trustee_core::session::Session;
+use trustee_core::types::TuiMessage;
 
 /// Shared state accessible by all axum handlers.
 #[derive(Clone)]
@@ -24,54 +25,31 @@ impl ServerState {
         }
     }
 
-    /// Spawn a background task that drains the session's workflow_rx channel
-    /// and broadcasts each message to all WebSocket subscribers.
-    pub fn spawn_drain_task(self) {
+    /// Spawn a background task that owns the workflow receiver and broadcasts
+    /// each message to all WebSocket subscribers.
+    ///
+    /// The receiver is moved into the task — no locking needed to await it.
+    /// When a message arrives, the task briefly locks the session to call
+    /// `handle_workflow_message`, then broadcasts the JSON to WebSocket clients.
+    pub fn spawn_drain_task(self, mut workflow_rx: mpsc::UnboundedReceiver<TuiMessage>) {
         tokio::spawn(async move {
-            loop {
-                // Lock session, try_recv a message, drop the lock immediately.
-                let msg = {
+            while let Some(msg) = workflow_rx.recv().await {
+                // Process the message through Session's handler (updates state)
+                {
                     let mut session = self.session.lock().await;
-                    match session.workflow_rx.try_recv() {
-                        Ok(msg) => Some(msg),
-                        Err(_) => None,
-                    }
-                };
-
-                if let Some(msg) = msg {
-                    // Process the message through Session's handler (updates state)
-                    {
-                        let mut session = self.session.lock().await;
-                        session.handle_workflow_message(msg.clone());
-                    }
-                    // Broadcast the raw message to WebSocket clients
-                    let json = serde_json::to_string(&SerializableMessage(&msg)).unwrap_or_default();
-                    let _ = self.ws_tx.send(json);
-                } else {
-                    // No message available — try async recv with a short lock
-                    let msg = {
-                        let mut session = self.session.lock().await;
-                        session.workflow_rx.recv().await
-                    };
-                    if let Some(msg) = msg {
-                        {
-                            let mut session = self.session.lock().await;
-                            session.handle_workflow_message(msg.clone());
-                        }
-                        let json = serde_json::to_string(&SerializableMessage(&msg)).unwrap_or_default();
-                        let _ = self.ws_tx.send(json);
-                    } else {
-                        // Channel closed — session shutting down
-                        break;
-                    }
+                    session.handle_workflow_message(msg.clone());
                 }
+
+                // Broadcast the raw message to WebSocket clients
+                let json = serde_json::to_string(&SerializableMessage(&msg)).unwrap_or_default();
+                let _ = self.ws_tx.send(json);
             }
         });
     }
 }
 
 /// Wrapper to serialize `TuiMessage` as JSON with a `type` discriminator.
-struct SerializableMessage<'a>(&'a trustee_core::types::TuiMessage);
+struct SerializableMessage<'a>(&'a TuiMessage);
 
 impl<'a> serde::Serialize for SerializableMessage<'a> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -79,7 +57,6 @@ impl<'a> serde::Serialize for SerializableMessage<'a> {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        use trustee_core::types::TuiMessage;
 
         match self.0 {
             TuiMessage::OutputLine(line) => {

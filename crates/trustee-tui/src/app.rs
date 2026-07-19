@@ -30,7 +30,9 @@ use anyhow::Result;
 use crate::helpers::parse_color;
 use crate::types::FocusPanel;
 
+use tokio::sync::mpsc;
 use trustee_core::session::Session;
+use trustee_core::types::TuiMessage;
 
 /// Main application state for the TUI.
 ///
@@ -39,6 +41,9 @@ use trustee_core::session::Session;
 pub struct App {
     /// Core session state (shared logic, independent of UI).
     pub session: Session,
+    /// Receiver for messages from async workflows (owned by App, not Session,
+    /// so the event loop can await it without locking the session).
+    pub workflow_rx: mpsc::UnboundedReceiver<TuiMessage>,
 
     // ---- TUI-specific state ----
     /// Cursor position in input buffer (char index, not byte offset)
@@ -84,7 +89,7 @@ pub struct App {
 impl App {
     /// Create a new App instance
     pub fn new() -> Self {
-        let mut session = Session::new();
+        let (mut session, workflow_rx) = Session::new();
         session.output_lines = vec![
             "Welcome to Trustee TUI".to_string(),
             "Type a task and press Enter to execute".to_string(),
@@ -102,6 +107,7 @@ impl App {
 
         Self {
             session,
+            workflow_rx,
             cursor_position: 0,
             scroll: 0,
             max_scroll_cache: 0,
@@ -180,7 +186,7 @@ impl App {
             // --- Phase 3: Batch-drain workflow messages ---
             let mut processed_any = false;
             for _ in 0..256 {
-                match self.session.workflow_rx.try_recv() {
+                match self.workflow_rx.try_recv() {
                     Ok(msg) => {
                         self.handle_workflow_message(msg);
                         processed_any = true;
@@ -219,7 +225,7 @@ impl App {
                 tokio::select! {
                     biased;
 
-                    msg = self.session.workflow_rx.recv() => {
+                    msg = self.workflow_rx.recv() => {
                         if let Some(msg) = msg {
                             self.handle_workflow_message(msg);
                         }

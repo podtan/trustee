@@ -27,8 +27,6 @@ pub struct Session {
     pub input: String,
     /// Output log lines
     pub output_lines: Vec<String>,
-    /// Receiver for messages from async workflows
-    pub workflow_rx: mpsc::UnboundedReceiver<TuiMessage>,
     /// Sender for messages from async workflows (clone and pass to workflow runners)
     pub workflow_tx: mpsc::UnboundedSender<TuiMessage>,
     /// Current workflow lifecycle state
@@ -68,12 +66,14 @@ pub struct Session {
 
 impl Session {
     /// Create a new Session with default state and a fresh message channel.
-    pub fn new() -> Self {
+    ///
+    /// Returns `(Session, Receiver)` so the caller can own the receiver
+    /// without locking the session (prevents deadlock in async drain loops).
+    pub fn new() -> (Self, mpsc::UnboundedReceiver<TuiMessage>) {
         let (workflow_tx, workflow_rx) = mpsc::unbounded_channel();
-        Self {
+        let session = Self {
             input: String::new(),
             output_lines: Vec::new(),
-            workflow_rx,
             workflow_tx,
             workflow_state: WorkflowState::Idle,
             config_toml: None,
@@ -91,7 +91,8 @@ impl Session {
             mcp_servers: Vec::new(),
             should_quit: false,
             auto_scroll: true,
-        }
+        };
+        (session, workflow_rx)
     }
 
     /// Parse auto-handoff configuration from the stored config TOML.
@@ -427,7 +428,7 @@ impl Session {
 
 impl Default for Session {
     fn default() -> Self {
-        Self::new()
+        Self::new().0
     }
 }
 

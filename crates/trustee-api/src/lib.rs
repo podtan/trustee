@@ -26,7 +26,7 @@ pub async fn run(
     addr: SocketAddr,
 ) -> Result<()> {
     // Build the session
-    let mut session = trustee_core::session::Session::new();
+    let (mut session, workflow_rx) = trustee_core::session::Session::new();
     session.config_toml = Some(config_toml);
     session.secrets = Some(secrets);
     session.build_info = Some(build_info);
@@ -38,8 +38,8 @@ pub async fn run(
     // Wrap session in shared state
     let state = ServerState::new(session, ws_tx);
 
-    // Start background message drain task
-    state.clone().spawn_drain_task();
+    // Start background message drain task (owns workflow_rx directly — no deadlock)
+    state.clone().spawn_drain_task(workflow_rx);
 
     // Build router
     let app = axum::Router::new()

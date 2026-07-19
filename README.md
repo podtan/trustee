@@ -12,6 +12,7 @@ Trustee is a terminal-first agent framework implemented in Rust that can dynamic
 - **WASM Plugin System**: Secure, sandboxed plugin execution using WebAssembly
 - **Modular Design**: Built on composable crates (ABK, CATS, UMF)
 - **Terminal-First**: Optimized for command-line usage and automation
+- **Web UI**: Browser-based interface with live WebSocket streaming (optional)
 - **Session Management**: Checkpointing and resume capabilities
 - **Multiple LLM Providers**: Support for OpenAI, GitHub Copilot, Anthropic, and more
 
@@ -38,6 +39,33 @@ cargo install trustee
 ```
 
 ## Quick Start
+
+### Terminal UI (TUI)
+
+Build with TUI support and launch with no arguments:
+
+```bash
+cargo build --release --features tui
+./target/release/trustee
+```
+
+### Web UI
+
+Build with web support and launch the API + web server:
+
+```bash
+cargo build --release --features web
+./target/release/trustee web
+# Open http://localhost:3000 in your browser
+```
+
+Custom bind address:
+
+```bash
+./target/release/trustee web --addr 0.0.0.0:8080
+```
+
+### CLI Mode
 
 1. **Set up environment variables** for your LLM provider:
 
@@ -156,10 +184,51 @@ Lifecycle plugins are written in languages that compile to WebAssembly and imple
 
 ## Architecture
 
-Trustee is built on a modular architecture using several key crates:
+Trustee is built on a modular workspace architecture:
+
+```
+trustee/
+├── Cargo.toml            # Workspace root + binary
+├── src/main.rs           # Binary — dispatches: TUI / web / CLI / upgrade
+├── crates/
+│   ├── trustee-core/     # Shared types, Session state, workflow logic, config parsing
+│   ├── trustee-tui/      # Terminal UI (ratatui + crossterm), depends on trustee-core
+│   ├── trustee-api/      # REST + WebSocket server (axum), depends on trustee-core + trustee-web
+│   ├── trustee-web/      # Static web frontend (rust-embed)
+│   └── trustee-upgrade/  # Self-upgrade tool
+├── config/
+│   └── trustee_default.toml
+└── CHANGELOG.md
+```
+
+**Feature flags:**
+
+| Flag | Description |
+|------|-------------|
+| (none) | Bare CLI — no TUI, no web |
+| `tui` | Terminal UI mode (`trustee` with no args launches TUI) |
+| `web` | Web/API mode (`trustee web` starts HTTP + WebSocket server) |
+| `wasm` | WASM lifecycle plugin support |
+
+Build with multiple features: `cargo build --features tui,web`
+
+### API Endpoints (web mode)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/health` | Health check |
+| GET | `/api/v1/session` | Full session state snapshot |
+| POST | `/api/v1/session/command` | Submit a command for execution |
+| POST | `/api/v1/session/cancel` | Cancel running workflow |
+| POST | `/api/v1/session/handoff` | Trigger session handoff |
+| WS | `/api/v1/session/stream` | Live message streaming |
+| GET | `/` | Web UI (embedded HTML/JS) |
+
+All network dependencies use **rustls** (no openssl/native-tls) for static Pi/ARM builds.
+
+### External Dependencies
 
 - **ABK (Agent Builder Kit)**: Core agent building blocks with feature-gated modules
-- **CATS (Code Agent Tool System)**: LLM-facing tools and utilities
 - **UMF (Universal Message Format)**: ChatML message formatting and streaming
 - **Lifecycle Plugins**: WASM modules defining agent behavior
 
@@ -185,18 +254,7 @@ cargo test
 
 ### Project Structure
 
-```
-trustee/
-├── src/
-│   └── main.rs          # Entry point using ABK convenience function
-├── config/
-│   └── trustee.toml     # Configuration file
-├── providers/           # WASM provider binaries
-├── lifecycles/          # WASM lifecycle plugins
-├── AGENTS.md           # Development guidelines
-├── CHANGELOG.md        # Version history
-└── README.md           # This file
-```
+See the [Architecture](#architecture) section above for the full workspace layout.
 
 ## Usage Examples
 
