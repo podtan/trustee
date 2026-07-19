@@ -1,6 +1,6 @@
 [package]
 name = "trustee-api"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "REST + WebSocket API server for Trustee agent"
 license = "MIT OR Apache-2.0"
@@ -10,9 +10,9 @@ categories = ["command-line-utilities", "web-programming"]
 
 [dependencies]
 # Core shared types and workflow logic
-trustee-core = { version = "0.1.1", path = "../trustee-core" }
+trustee-core = { version = "0.1.2", path = "../trustee-core" }
 # Embedded web frontend
-trustee-web = { version = "0.1.1", path = "../trustee-web" }
+trustee-web = { version = "0.1.2", path = "../trustee-web" }
 # Web framework (rustls for static Pi/ARM builds)
 axum = { version = "0.8", features = ["ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
