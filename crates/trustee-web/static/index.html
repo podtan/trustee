@@ -333,6 +333,83 @@
     }
     #header h1 { font-size: 14px; color: #ccc; }
     .context-badge { font-size: 11px; color: #888; }
+
+    /* --- Markdown rendering inside agent bubbles --- */
+    .bubble.md {
+      white-space: normal;        /* markdown controls its own whitespace */
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.65;
+    }
+    .bubble.md > *:first-child { margin-top: 0; }
+    .bubble.md > *:last-child { margin-bottom: 0; }
+    .bubble.md p { margin: 0.5em 0; }
+    .bubble.md h1, .bubble.md h2, .bubble.md h3,
+    .bubble.md h4, .bubble.md h5, .bubble.md h6 {
+      margin: 0.8em 0 0.4em; font-weight: 600; line-height: 1.3;
+    }
+    .bubble.md h1 { font-size: 1.4em; }
+    .bubble.md h2 { font-size: 1.25em; }
+    .bubble.md h3 { font-size: 1.1em; }
+    .bubble.md ul, .bubble.md ol { margin: 0.4em 0; padding-left: 1.5em; }
+    .bubble.md li { margin: 0.2em 0; }
+    .bubble.md a { color: #60a5fa; text-decoration: none; }
+    .bubble.md a:hover { text-decoration: underline; }
+    .bubble.md blockquote {
+      border-left: 3px solid #444; margin: 0.5em 0; padding: 0.2em 0 0.2em 1em;
+      color: #aaa;
+    }
+    .bubble.md table {
+      border-collapse: collapse; margin: 0.5em 0; font-size: 13px;
+    }
+    .bubble.md th, .bubble.md td {
+      border: 1px solid #444; padding: 4px 8px;
+    }
+    .bubble.md th { background: #2a2a3a; }
+    .bubble.md hr {
+      border: none; border-top: 1px solid #333; margin: 0.8em 0;
+    }
+    /* Inline code */
+    .bubble.md code {
+      font-family: 'SF Mono', 'Monaco', 'Cascadia Code', monospace;
+      font-size: 0.88em;
+      background: #111;
+      padding: 2px 5px;
+      border-radius: 3px;
+    }
+    /* Code blocks */
+    .bubble.md pre {
+      margin: 0.5em 0;
+      padding: 0;
+      background: #111;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .bubble.md pre > code {
+      display: block;
+      padding: 10px 12px;
+      background: none;
+      border-radius: 0;
+      font-size: 13px;
+      line-height: 1.5;
+      overflow-x: auto;
+    }
+    /* highlight.js token colors (dark theme) */
+    .hljs-comment, .hljs-quote { color: #6a737d; font-style: italic; }
+    .hljs-keyword, .hljs-selector-tag, .hljs-literal { color: #ff7b72; }
+    .hljs-string, .hljs-meta-string { color: #a5d6ff; }
+    .hljs-number, .hljs-symbol { color: #79c0ff; }
+    .hljs-name, .hljs-selector-id, .hljs-selector-class { color: #7ee787; }
+    .hljs-title, .hljs-title.function_, .hljs-section { color: #d2a8ff; }
+    .hljs-attr, .hljs-attribute, .hljs-property, .hljs-meta { color: #79c0ff; }
+    .hljs-built_in, .hljs-builtin-name { color: #ffa657; }
+    .hljs-type, .hljs-class .hljs-title { color: #ffa657; }
+    .hljs-variable, .hljs-template-variable { color: #e0e0e0; }
+    .hljs-tag { color: #8b949e; }
+    .hljs-deletion { color: #ffa198; background: #490b0d; }
+    .hljs-addition { color: #aff5b4; background: #033a16; }
+    .hljs-emphasis { font-style: italic; }
+    .hljs-strong { font-weight: 700; }
   </style>
 </head>
 <body>
@@ -379,6 +456,38 @@
   <button id="btn-send">Send</button>
 </div>
 
+<script src="marked.min.js"></script>
+<script src="highlight.min.js"></script>
+<script>
+// Configure marked: GitHub-style line breaks, highlight code blocks
+if (typeof marked !== 'undefined') {
+  marked.setOptions({
+    breaks: true,
+    gfm: true,
+  });
+}
+
+// Render markdown text → HTML with syntax highlighting
+function renderMarkdown(text) {
+  if (typeof marked === 'undefined') return escapeHtml(text);
+  const html = marked.parse(text);
+  return html;
+}
+
+// Highlight all <pre><code> blocks within an element
+function highlightCodeIn(el) {
+  if (typeof hljs === 'undefined') return;
+  el.querySelectorAll('pre code').forEach(block => {
+    try { hljs.highlightElement(block); } catch(e) {}
+  });
+}
+
+function escapeHtml(text) {
+  const d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
+</script>
 <script>
 const API = window.location.origin;
 let ws = null;
@@ -405,10 +514,25 @@ function renderLines(lines) {
   outputEl.innerHTML = '';
   closeAgentBubble();
   closeReasoningSection();
+  let pendingAgentText = ''; // accumulate consecutive agent content lines
+
+  function flushAgentText() {
+    if (!pendingAgentText) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-agent';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble md';
+    bubble.innerHTML = renderMarkdown(pendingAgentText);
+    highlightCodeIn(bubble);
+    wrap.appendChild(bubble);
+    outputEl.appendChild(wrap);
+    pendingAgentText = '';
+  }
+
   for (const line of lines) {
     // User messages stored as "> text" → render as chat bubble
     if (line.startsWith('> ')) {
-      closeAgentBubble();
+      flushAgentText();
       closeReasoningSection();
       const wrap = document.createElement('div');
       wrap.className = 'msg-user';
@@ -424,6 +548,7 @@ function renderLines(lines) {
     const { text, cls } = classifyLine(line);
     // Group consecutive reasoning lines into a collapsible section
     if (cls === 'reasoning') {
+      flushAgentText();
       if (!reasoningSection || !reasoningSection.details.isConnected) {
         const details = document.createElement('details');
         details.className = 'reasoning-section';
@@ -441,15 +566,39 @@ function renderLines(lines) {
       c.textContent += (c.textContent ? '\n' : '') + text;
       continue;
     }
-    // Non-reasoning line — close any open reasoning section
-    closeReasoningSection();
-    closeAgentBubble();
-    const div = document.createElement('div');
-    div.className = 'line' + (cls ? ' ' + cls : '');
-    div.textContent = text;
-    outputEl.appendChild(div);
+    // Classified lines (info, error, success, warn) — system messages
+    if (cls) {
+      flushAgentText();
+      closeReasoningSection();
+      const div = document.createElement('div');
+      div.className = 'line ' + cls;
+      div.textContent = text;
+      outputEl.appendChild(div);
+      continue;
+    }
+    // Unclassified non-empty line — agent content, accumulate for markdown
+    if (text.trim()) {
+      closeReasoningSection();
+      pendingAgentText += (pendingAgentText ? '\n' : '') + text;
+    }
+    // Blank lines: flush if we have pending agent text, otherwise spacer
+    if (!text.trim()) {
+      if (pendingAgentText) {
+        flushAgentText();
+      } else {
+        // Don't add spacer between consecutive blank lines
+        const last = outputEl.lastElementChild;
+        if (last && last.tagName !== 'DIV' || (last && last.classList.contains('line') && last.textContent === '')) {
+          // skip
+        } else {
+          const div = document.createElement('div');
+          div.className = 'line';
+          outputEl.appendChild(div);
+        }
+      }
+    }
   }
-  // Close any trailing reasoning section
+  flushAgentText();
   closeReasoningSection();
   if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
 }
@@ -588,6 +737,7 @@ function updateToolDone(toolName, success, hint) {
 // Streaming content (StreamDelta) is wrapped in a left-aligned agent bubble.
 // Other message types (OutputLine, ToolPending, etc.) close the bubble first.
 let agentBubble = null;
+let agentBubbleText = '';  // raw markdown buffer for the active bubble
 let reasoningSection = null; // { details: <details>, content: <div> }
 
 function ensureAgentBubble() {
@@ -596,13 +746,22 @@ function ensureAgentBubble() {
   wrap.className = 'msg-agent';
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
+  // Buffer raw text; markdown is rendered on bubble close
   wrap.appendChild(bubble);
   outputEl.appendChild(wrap);
   agentBubble = bubble;
+  agentBubbleText = '';
 }
 
 function closeAgentBubble() {
+  // Render accumulated text as markdown before closing
+  if (agentBubble && agentBubble.isConnected && agentBubbleText) {
+    agentBubble.classList.add('md');
+    agentBubble.innerHTML = renderMarkdown(agentBubbleText);
+    highlightCodeIn(agentBubble);
+  }
   agentBubble = null;
+  agentBubbleText = '';
 }
 
 // --- Reasoning section management ---
@@ -637,10 +796,12 @@ function appendDelta(delta, isReasoning) {
     ensureReasoningSection();
     reasoningSection.content.textContent += delta;
   } else {
-    // Content streaming — close reasoning section, go into the agent bubble
+    // Content streaming — buffer raw text, render markdown on close
     closeReasoningSection();
     ensureAgentBubble();
-    agentBubble.textContent += delta;
+    agentBubbleText += delta;
+    // Live preview: show raw text while streaming
+    agentBubble.textContent = agentBubbleText;
   }
   if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
 }
