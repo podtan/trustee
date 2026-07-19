@@ -477,7 +477,13 @@ impl abk::orchestration::output::OutputSink for TuiForwardSink {
                 TuiMessage::OutputLine(format!("[{}] {}", model, text))
             }
 
-            OutputEvent::Info { message } => TuiMessage::OutputLine(message),
+            OutputEvent::Info { message } => {
+                // Suppress noisy/no-value messages from ABK
+                if message.contains("API call completed successfully") {
+                    return;
+                }
+                TuiMessage::OutputLine(message)
+            }
 
             OutputEvent::WorkflowStarted { task_description } => {
                 TuiMessage::OutputLine(format!("🚀 Workflow started: {}", task_description))
