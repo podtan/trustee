@@ -26,7 +26,24 @@
       word-break: break-word;
     }
     .line { padding: 0; }
-    .reasoning { color: #888; font-style: italic; }
+    .msg-user {
+      display: flex;
+      justify-content: flex-end;
+      margin: 8px 0;
+    }
+    .msg-user .bubble {
+      background: #2563eb;
+      color: #fff;
+      padding: 8px 14px;
+      border-radius: 12px 12px 4px 12px;
+      max-width: 85%;
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    @media (max-width: 600px) {
+      .msg-user .bubble { max-width: 90%; font-size: 12px; }
+    }
     .error { color: #f87171; }
     .success { color: #4ade80; }
     .info { color: #60a5fa; }
@@ -321,6 +338,17 @@ function classifyLine(text) {
 function renderLines(lines) {
   outputEl.innerHTML = '';
   for (const line of lines) {
+    // User messages stored as "> text" → render as chat bubble
+    if (line.startsWith('> ')) {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg-user';
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.textContent = line.slice(2);
+      wrap.appendChild(bubble);
+      outputEl.appendChild(wrap);
+      continue;
+    }
     const { text, cls } = classifyLine(line);
     const div = document.createElement('div');
     div.className = 'line' + (cls ? ' ' + cls : '');
@@ -543,7 +571,15 @@ async function sendCommand() {
     outputEl.innerHTML = '';
     window._hasSession = true;
   }
-  appendOutput('> ' + cmd);
+  // Render user message as a chat bubble (right-aligned, boxed)
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-user';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = cmd;
+  wrap.appendChild(bubble);
+  outputEl.appendChild(wrap);
+  if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
 }
 
 async function cancelWorkflow() {
