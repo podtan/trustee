@@ -101,27 +101,43 @@ pub async fn post_command(
     State(state): State<ServerState>,
     Json(req): Json<CommandRequest>,
 ) -> Result<Json<CommandResponse>, (StatusCode, String)> {
-    let mut session = state.session.lock().await;
+    {
+        let mut session = state.session.lock().await;
 
-    if session.workflow_state != trustee_core::types::WorkflowState::Idle {
-        return Err((
-            StatusCode::CONFLICT,
-            "Workflow is running or cancelling".to_string(),
-        ));
+        if session.workflow_state != trustee_core::types::WorkflowState::Idle {
+            return Err((
+                StatusCode::CONFLICT,
+                "Workflow is running or cancelling".to_string(),
+            ));
+        }
+
+        session.input = req.command;
+        session.execute_command();
     }
 
-    session.input = req.command;
-    session.execute_command();
+    // Broadcast state change so all WebSocket clients know the workflow started.
+    let state_msg = serde_json::json!({"type": "StateChanged", "state": "Running"});
+    let _ = state.ws_tx.send(state_msg.to_string());
 
     Ok(Json(CommandResponse { accepted: true }))
 }
 
 /// POST /api/v1/session/cancel — cancel the running workflow.
 pub async fn post_cancel(State(state): State<ServerState>) -> Json<CommandResponse> {
-    let session = state.session.lock().await;
+    let cancelled;
+    {
+        let session = state.session.lock().await;
 
-    if session.workflow_state == trustee_core::types::WorkflowState::Running {
-        session.cancel_token.cancel();
+        cancelled = session.workflow_state == trustee_core::types::WorkflowState::Running;
+        if cancelled {
+            session.cancel_token.cancel();
+        }
+    }
+
+    // Broadcast state change so all WebSocket clients know the workflow is cancelling.
+    if cancelled {
+        let state_msg = serde_json::json!({"type": "StateChanged", "state": "Cancelling"});
+        let _ = state.ws_tx.send(state_msg.to_string());
     }
 
     Json(CommandResponse { accepted: true })

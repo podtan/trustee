@@ -386,12 +386,18 @@ async function sendCommand() {
   const cmd = input.value.trim();
   if (!cmd) return;
   input.value = '';
+  // Disable input immediately while server confirms and broadcasts state change
+  document.getElementById('btn-send').disabled = true;
+  document.getElementById('input').disabled = true;
+
   await fetch(API + '/api/v1/session/command', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ command: cmd }),
   });
-  updateState('Running');
+  // State change is now broadcast via WebSocket (StateChanged message)
+  // so we don't call updateState('Running') here — avoids race conditions
+  // where a WorkflowCompleted arrives before this point.
   // Clear output for new session
   if (!window._hasSession) {
     outputEl.innerHTML = '';
