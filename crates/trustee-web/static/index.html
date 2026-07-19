@@ -525,6 +525,16 @@ function handleMessage(msg) {
 function appendOutput(line) {
   // Hide noisy API call lines in web UI
   if (shouldHideLine(line)) return;
+  // Blank separator lines from the stream state machine are visual spacers,
+  // not content. Don't let them close the reasoning section or agent bubble —
+  // the next real content delta (StreamDelta/ReasoningDelta) handles that.
+  if (line === '') {
+    const div = document.createElement('div');
+    div.className = 'line';
+    outputEl.appendChild(div);
+    if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
+    return;
+  }
   closeAgentBubble();
   closeReasoningSection();
   const { text, cls } = classifyLine(line);
@@ -604,9 +614,9 @@ function ensureReasoningSection() {
   closeAgentBubble();
   const details = document.createElement('details');
   details.className = 'reasoning-section';
-  details.open = true;
+  // Collapsed from the start — user clicks to expand if they want to see it
   const summary = document.createElement('summary');
-  summary.textContent = '💭 Thinking…';
+  summary.textContent = '💭 Reasoning';
   details.appendChild(summary);
   const content = document.createElement('div');
   content.className = 'reasoning-content';
@@ -616,10 +626,8 @@ function ensureReasoningSection() {
 }
 
 function closeReasoningSection() {
-  if (reasoningSection && reasoningSection.details.isConnected) {
-    reasoningSection.details.open = false;
-    reasoningSection.details.querySelector('summary').textContent = '💭 Reasoning';
-  }
+  // Just reset the reference — section stays collapsed as it was created.
+  // The next reasoning deltas will create a new section.
   reasoningSection = null;
 }
 
