@@ -87,6 +87,12 @@
       font-family: inherit;
       font-size: 14px;
       outline: none;
+      resize: none;
+      overflow-y: hidden;
+      min-height: 42px;
+      max-height: 200px;
+      line-height: 1.5;
+      field-sizing: content; /* modern browsers auto-expand */
     }
     #input:focus { border-color: #555; }
     #input::placeholder { color: #555; }
@@ -336,7 +342,7 @@
 <button id="fab-panel">📋</button>
 
 <div id="input-bar">
-  <input id="input" type="text" placeholder="Type a task and press Enter..." autocomplete="off" />
+  <textarea id="input" rows="1" placeholder="Type a task and press Enter..." autocomplete="off"></textarea>
   <button id="btn-send">Send</button>
 </div>
 
@@ -611,6 +617,7 @@ async function sendCommand() {
   const cmd = input.value.trim();
   if (!cmd) return;
   input.value = '';
+  input.style.height = 'auto';
   // Disable input immediately while server confirms and broadcasts state change
   document.getElementById('btn-send').disabled = true;
   document.getElementById('input').disabled = true;
@@ -652,7 +659,17 @@ document.getElementById('btn-send').addEventListener('click', sendCommand);
 document.getElementById('btn-cancel').addEventListener('click', cancelWorkflow);
 document.getElementById('btn-handoff').addEventListener('click', doHandoff);
 document.getElementById('input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') sendCommand();
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendCommand();
+  }
+});
+
+// Auto-resize textarea on input (fallback for browsers without field-sizing)
+const inputEl = document.getElementById('input');
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
 });
 
 outputEl.addEventListener('scroll', () => {
