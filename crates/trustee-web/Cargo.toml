@@ -1,0 +1,13 @@
+[package]
+name = "trustee-web"
+version = "0.1.0"
+edition = "2021"
+description = "Static web frontend for Trustee agent (embedded via rust-embed)"
+license = "MIT OR Apache-2.0"
+authors = ["Podtan Team"]
+keywords = ["web", "frontend", "agent"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+rust-embed = "8.12"
+mime_guess = "2"

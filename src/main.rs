@@ -324,6 +324,76 @@ async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Run Web/API mode: starts the trustee-api HTTP + WebSocket server.
+///
+/// Usage: `trustee web [--addr 0.0.0.0:3000]`
+#[cfg(feature = "web")]
+async fn run_web_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse optional --addr argument
+    let mut addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--addr" || args[i] == "-a" {
+            if i + 1 < args.len() {
+                addr = args[i + 1].parse().map_err(|e| format!("Invalid addr: {}", e))?;
+                i += 2;
+            } else {
+                eprintln!("Error: --addr requires a value (e.g. 0.0.0.0:3000)");
+                std::process::exit(1);
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    // Set ABK_AGENT_NAME for logging
+    std::env::set_var("ABK_AGENT_NAME", "trustee");
+
+    // Initialize logger
+    let logger = abk::observability::Logger::new(None, None)?;
+    abk::observability::init_global_logger(logger);
+
+    // Initialize tracing subscriber for axum
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_target(false)
+        .init();
+
+    // Load config and secrets (same logic as TUI mode)
+    let agent_name = "trustee";
+    let (config_path, secrets_path, _, _) = get_config_paths(agent_name);
+
+    let local_secrets = load_env_file(&secrets_path)
+        .map_err(|e| format!("Failed to read secrets from {}: {}", secrets_path.display(), e))?;
+
+    let (user_config_toml, secrets) = match load_remote_config(&local_secrets).await {
+        Some((remote_config, remote_secrets)) => {
+            let mut merged = local_secrets.clone();
+            merged.extend(remote_secrets);
+            (remote_config, merged)
+        }
+        None => {
+            if !config_path.exists() {
+                eprintln!("Error: Configuration not found at: {}", config_path.display());
+                eprintln!("Remote config also unavailable.");
+                eprintln!("\nRun 'trustee init --force' to set up your environment.");
+                std::process::exit(1);
+            }
+            let config_toml = std::fs::read_to_string(&config_path)
+                .map_err(|e| format!("Failed to read config from {}: {}", config_path.display(), e))?;
+            (config_toml, local_secrets)
+        }
+    };
+
+    let merged_config = merge_config(&user_config_toml)?;
+
+    eprintln!("🌐 Starting Trustee Web on http://{}", addr);
+
+    trustee_api::run(merged_config, secrets, build_info(), addr).await?;
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup panic hook for TUI mode (restores terminal on panic)
@@ -336,6 +406,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
         // No arguments provided - launch TUI mode
         return run_tui_mode().await;
+    }
+
+    // Intercept the "web" command — starts the API + Web UI server
+    #[cfg(feature = "web")]
+    if args.get(1).map(|s| s.as_str()) == Some("web") {
+        return run_web_mode(&args[2..]).await;
     }
 
     // Defensive: ensure terminal is not in raw mode from a previous TUI session

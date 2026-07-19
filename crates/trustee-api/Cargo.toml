@@ -1,0 +1,33 @@
+[package]
+name = "trustee-api"
+version = "0.1.0"
+edition = "2021"
+description = "REST + WebSocket API server for Trustee agent"
+license = "MIT OR Apache-2.0"
+authors = ["Podtan Team"]
+keywords = ["api", "server", "agent"]
+categories = ["command-line-utilities", "web-programming"]
+
+[dependencies]
+# Core shared types and workflow logic
+trustee-core = { version = "0.1.0", path = "../trustee-core" }
+# Embedded web frontend
+trustee-web = { version = "0.1.0", path = "../trustee-web" }
+# Web framework (rustls for static Pi/ARM builds)
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1.0", features = ["full"] }
+tower-http = { version = "0.7", features = ["cors"] }
+tower = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# TLS — rustls only, no openssl/native-tls
+rustls = "0.23"
+# Error handling
+anyhow = "1.0"
+# MIME type detection for static files
+mime_guess = "2"
+# Stream utilities for WebSocket split
+futures = "0.3"
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
