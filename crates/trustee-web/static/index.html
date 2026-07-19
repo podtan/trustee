@@ -6,11 +6,13 @@
   <title>Trustee Web</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { height: 100%; }
     body {
       font-family: 'SF Mono', 'Monaco', 'Cascadia Code', 'Courier New', monospace;
       background: #0e0e0e;
       color: #e0e0e0;
       height: 100vh;
+      height: 100dvh; /* dynamic viewport height — adjusts for keyboard on mobile */
       display: flex;
       flex-direction: column;
     }
@@ -110,7 +112,7 @@
     .panel-toggle { font-size: 10px; }
     .panel-content.collapsed { display: none; }
 
-    /* Mobile: collapsible right panel as bottom drawer */
+    /* Mobile: collapsible right panel moved above output */
     @media (max-width: 600px) {
       #main-area { flex-direction: column; }
       #right-panel {
@@ -119,6 +121,7 @@
         border-top: 1px solid #333;
         max-height: 50vh;
         flex-shrink: 0;
+        order: -1; /* move above output so it's at the top */
       }
       #right-panel.collapsed { max-height: 32px; overflow: hidden; }
       #right-panel.collapsed #todo-panel,
@@ -152,6 +155,15 @@
       #right-panel.mobile-mode.tab-todo #todo-panel { display: block; }
       #right-panel.mobile-mode.tab-mcp #mcp-panel { display: block; }
       #right-panel.mobile-mode #mcp-panel { display: none; }
+    }
+
+    /* Mobile: keep input bar visible above keyboard */
+    @media (max-width: 600px) {
+      #input-bar {
+        position: sticky;
+        bottom: 0;
+        z-index: 100;
+      }
     }
     .todo-item { padding: 2px 0; }
     .mcp-item { padding: 2px 0; }
@@ -575,6 +587,25 @@ window.addEventListener('resize', () => {
     rightPanel.classList.remove('mobile-mode', 'tab-todo', 'tab-mcp', 'collapsed');
   } else {
     initMobile();
+  }
+});
+
+// --- Mobile keyboard handling ---
+// 100dvh handles most modern browsers, but visualViewport is needed
+// for older Android browsers where the keyboard overlaps content.
+if (window.visualViewport) {
+  const handleViewport = () => {
+    document.body.style.height = window.visualViewport.height + 'px';
+  };
+  window.visualViewport.addEventListener('resize', handleViewport);
+  window.visualViewport.addEventListener('scroll', handleViewport);
+  handleViewport();
+}
+
+// Focus input on tap in empty output area (mobile UX)
+outputEl.addEventListener('click', () => {
+  if (!document.getElementById('input').disabled) {
+    document.getElementById('input').focus();
   }
 });
 
