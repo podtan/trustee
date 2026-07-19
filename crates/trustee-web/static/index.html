@@ -219,11 +219,14 @@
       #fab-panel:active { transform: scale(0.95); }
     }
 
-    /* Desktop: hide mobile-only elements */
-    #panel-tabs { display: none; }
-    #sheet-handle { display: none; }
-    #sheet-backdrop { display: none; }
-    #fab-panel { display: none; }
+    /* Desktop: hide mobile-only elements (must be in min-width query so the
+       mobile @media rules above aren't overridden by later source order) */
+    @media (min-width: 601px) {
+      #panel-tabs { display: none; }
+      #sheet-handle { display: none; }
+      #sheet-backdrop { display: none; }
+      #fab-panel { display: none; }
+    }
     .todo-item { padding: 2px 0; }
     .mcp-item { padding: 2px 0; }
     .mcp-ok { color: #4ade80; }
