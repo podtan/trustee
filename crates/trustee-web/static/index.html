@@ -105,6 +105,20 @@
     .mcp-item { padding: 2px 0; }
     .mcp-ok { color: #4ade80; }
     .mcp-fail { color: #f87171; }
+    .tool-line { color: #60a5fa; }
+    .tool-line.success { color: #4ade80; }
+    .tool-line.error { color: #f87171; }
+    .tool-spinner {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border: 2px solid #444;
+      border-top-color: #60a5fa;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      vertical-align: middle;
+      margin-right: 4px;
+    }
     #header {
       display: flex;
       align-items: center;
@@ -220,9 +234,10 @@ function handleMessage(msg) {
       renderTodos(msg.content);
       break;
     case 'ToolPending':
-      // Tool spinner managed via full state refresh
+      appendToolPending(msg.tool_name, msg.hint);
       break;
     case 'ToolDone':
+      updateToolDone(msg.tool_name, msg.success, msg.hint);
       break;
     case 'ContextTokensUpdated':
       document.getElementById('context-tokens').textContent = msg.count.toLocaleString() + ' tokens';
@@ -249,6 +264,41 @@ function appendOutput(line) {
   div.className = 'line' + (cls ? ' ' + cls : '');
   div.textContent = text;
   outputEl.appendChild(div);
+  if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
+}
+
+// --- Tool call rendering ---
+// Track pending tool lines by name for ToolDone replacement.
+const pendingToolElements = [];
+
+function appendToolPending(toolName, hint) {
+  const label = hint ? `${toolName} ${hint}` : toolName;
+  const div = document.createElement('div');
+  div.className = 'line tool-line';
+  div.innerHTML = `<span class="tool-spinner"></span>${label}`;
+  outputEl.appendChild(div);
+  pendingToolElements.push({ toolName, element: div });
+  if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
+}
+
+function updateToolDone(toolName, success, hint) {
+  // Find the first pending entry for this tool name
+  const idx = pendingToolElements.findIndex(e => e.toolName === toolName);
+  if (idx >= 0) {
+    const { element: div } = pendingToolElements.splice(idx, 1)[0];
+    const status = success ? '✓' : '✗';
+    const label = hint ? `${status} ${toolName} ${hint}` : `${status} ${toolName}`;
+    div.className = 'line tool-line ' + (success ? 'success' : 'error');
+    div.textContent = label;
+  } else {
+    // No pending entry — append directly
+    const status = success ? '✓' : '✗';
+    const label = hint ? `${status} ${toolName} ${hint}` : `${status} ${toolName}`;
+    const div = document.createElement('div');
+    div.className = 'line tool-line ' + (success ? 'success' : 'error');
+    div.textContent = label;
+    outputEl.appendChild(div);
+  }
   if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
 }
 
