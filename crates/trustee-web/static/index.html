@@ -100,7 +100,59 @@
     }
     #todo-panel { flex: 1; }
     #mcp-panel { border-top: 1px solid #333; max-height: 40%; }
-    .panel-title { font-weight: bold; color: #aaa; margin-bottom: 6px; font-size: 11px; text-transform: uppercase; }
+    .panel-title {
+      font-weight: bold; color: #aaa; margin-bottom: 6px;
+      font-size: 11px; text-transform: uppercase;
+      cursor: pointer; user-select: none;
+      display: flex; align-items: center; gap: 4px;
+    }
+    .panel-title:hover { color: #ccc; }
+    .panel-toggle { font-size: 10px; }
+    .panel-content.collapsed { display: none; }
+
+    /* Mobile: collapsible right panel as bottom drawer */
+    @media (max-width: 600px) {
+      #main-area { flex-direction: column; }
+      #right-panel {
+        width: 100%;
+        border-left: none;
+        border-top: 1px solid #333;
+        max-height: 50vh;
+        flex-shrink: 0;
+      }
+      #right-panel.collapsed { max-height: 32px; overflow: hidden; }
+      #right-panel.collapsed #todo-panel,
+      #right-panel.collapsed #mcp-panel { display: none; }
+      #right-panel.collapsed #panel-tabs { display: flex; }
+      #todo-panel, #mcp-panel { padding: 6px 12px; }
+      #output { font-size: 12px; padding: 8px 10px; }
+      #input { font-size: 12px; padding: 8px 10px; }
+      #input-bar { padding: 6px 10px; }
+      button { padding: 8px 14px; font-size: 12px; }
+    }
+
+    /* Mobile: tab-based right panel */
+    #panel-tabs { display: none; }
+    @media (max-width: 600px) {
+      #panel-tabs {
+        display: flex;
+        gap: 0;
+        background: #111;
+      }
+      .tab-btn {
+        flex: 1; padding: 6px; text-align: center;
+        font-size: 11px; cursor: pointer; border: none;
+        background: #111; color: #888; font-family: inherit;
+        border-bottom: 2px solid transparent;
+      }
+      .tab-btn.active { color: #60a5fa; border-bottom-color: #60a5fa; }
+      #right-panel.collapsed #panel-tabs { display: none; }
+      /* On mobile, show only the active tab content */
+      #right-panel.mobile-mode #todo-panel { display: none; }
+      #right-panel.mobile-mode.tab-todo #todo-panel { display: block; }
+      #right-panel.mobile-mode.tab-mcp #mcp-panel { display: block; }
+      #right-panel.mobile-mode #mcp-panel { display: none; }
+    }
     .todo-item { padding: 2px 0; }
     .mcp-item { padding: 2px 0; }
     .mcp-ok { color: #4ade80; }
@@ -149,12 +201,17 @@
 <div id="main-area">
   <div id="output"></div>
   <div id="right-panel">
+    <div id="panel-tabs">
+      <button class="tab-btn active" id="tab-todo">📋 Todos</button>
+      <button class="tab-btn" id="tab-mcp">🔌 MCP</button>
+      <button class="tab-btn" id="tab-collapse" style="flex:0 0 auto; padding: 6px 10px;">▼</button>
+    </div>
     <div id="todo-panel">
-      <div class="panel-title">Todos</div>
+      <div class="panel-title" id="todo-title">Todos</div>
       <div id="todo-list">No tasks</div>
     </div>
     <div id="mcp-panel">
-      <div class="panel-title">MCP Servers</div>
+      <div class="panel-title" id="mcp-title">MCP Servers</div>
       <div id="mcp-list">(none)</div>
     </div>
   </div>
@@ -455,6 +512,71 @@ async function checkAuth() {
     return true;
   }
 }
+
+// --- Collapsible panels ---
+const rightPanel = document.getElementById('right-panel');
+
+// Desktop: click panel title to collapse/expand individual panels
+function setupPanelToggle(titleId, contentSelector) {
+  const title = document.getElementById(titleId);
+  if (!title) return;
+  title.addEventListener('click', () => {
+    const content = title.nextElementSibling;
+    if (content) content.classList.toggle('collapsed');
+    title.querySelector('.panel-toggle')?.remove();
+    const indicator = document.createElement('span');
+    indicator.className = 'panel-toggle';
+    indicator.textContent = content?.classList.contains('collapsed') ? '▸' : '▾';
+    title.appendChild(indicator);
+  });
+  // Init indicator
+  const indicator = document.createElement('span');
+  indicator.className = 'panel-toggle';
+    indicator.textContent = '▾';
+  title.appendChild(indicator);
+}
+setupPanelToggle('todo-title', '#todo-list');
+setupPanelToggle('mcp-title', '#mcp-list');
+
+// Mobile: tab switching and collapse
+function isMobile() { return window.innerWidth <= 600; }
+
+function initMobile() {
+  if (!isMobile()) return;
+  rightPanel.classList.add('mobile-mode', 'tab-todo');
+}
+initMobile();
+
+document.getElementById('tab-todo')?.addEventListener('click', () => {
+  rightPanel.classList.remove('collapsed');
+  rightPanel.classList.add('mobile-mode', 'tab-todo');
+  rightPanel.classList.remove('tab-mcp');
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-todo')?.classList.add('active');
+});
+
+document.getElementById('tab-mcp')?.addEventListener('click', () => {
+  rightPanel.classList.remove('collapsed');
+  rightPanel.classList.add('mobile-mode', 'tab-mcp');
+  rightPanel.classList.remove('tab-todo');
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-mcp')?.classList.add('active');
+});
+
+document.getElementById('tab-collapse')?.addEventListener('click', () => {
+  rightPanel.classList.toggle('collapsed');
+  document.getElementById('tab-collapse').textContent =
+    rightPanel.classList.contains('collapsed') ? '▲' : '▼';
+});
+
+// Re-evaluate on orientation/size change
+window.addEventListener('resize', () => {
+  if (!isMobile()) {
+    rightPanel.classList.remove('mobile-mode', 'tab-todo', 'tab-mcp', 'collapsed');
+  } else {
+    initMobile();
+  }
+});
 
 // --- Init ---
 (async () => {
