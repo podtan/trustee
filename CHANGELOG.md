@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-07-19
+
+### Added
+- **feat(core): extract trustee-core crate (v0.1.0)** — New workspace crate containing shared types (`TuiMessage`, `FocusPanel`, `WorkflowState`, `McpServerStatus`, `McpServerInfo`, `BuildInfo`, `AutoHandoffConfig`, `CapturedText`, `HandoffCaptureSink`), session state (`Session` struct with `handle_workflow_message`, `execute_command`, `trigger_handoff`), config parsing (`parse_auto_handoff_config`), and `TuiForwardSink` (ABK output event → message channel with 3-state stream state machine). `Session::new()` returns `(Session, Receiver)` to prevent deadlock when the receiver is used in async loops.
+- **feat(api): add trustee-api crate (v0.1.0)** — New axum 0.8 REST + WebSocket server wrapping `trustee-core::Session`. Endpoints: `GET /api/v1/health`, `GET /api/v1/session`, `POST /api/v1/session/command`, `POST /api/v1/session/cancel`, `POST /api/v1/session/handoff`, `WS /api/v1/session/stream`. Background drain task owns the workflow receiver directly (no mutex deadlock). All deps use rustls (no openssl/native-tls) for static Pi/ARM builds.
+- **feat(web): add trustee-web crate (v0.1.0)** — Static web frontend embedded via rust-embed 8.12. Dark-themed UI with output panel, todo sidebar, MCP status, input bar, WebSocket live streaming, cancel/handoff buttons, and context token counter.
+- **feat(web): `trustee web` subcommand** — New `web` feature flag starts the API + web server. Usage: `trustee web [--addr 0.0.0.0:3000]`.
+
+### Changed
+- **refactor(tui): App wraps Session** — `trustee-tui::App` now contains a `trustee_core::session::Session` field. All workflow logic (`handle_workflow_message`, `execute_command`, `trigger_handoff`) moved to `Session`. TUI modules access session fields via `self.session.*`. Removed `tui_sink.rs` (replaced by `TuiForwardSink` in trustee-core). Removed direct `abk`, `tokio-util`, `unicode-segmentation` deps from trustee-tui.
+- **deps: bump trustee-tui to 0.1.55.**
+
 ## [0.1.99] - 2026-07-17
 
 ### Fixed
