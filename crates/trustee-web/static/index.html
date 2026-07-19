@@ -70,6 +70,39 @@
     .success { color: #4ade80; }
     .info { color: #60a5fa; }
     .warn { color: #fbbf24; }
+    /* Collapsible reasoning sections */
+    .reasoning-section {
+      margin: 8px 0;
+      border-left: 2px solid #3a3a4a;
+      padding-left: 10px;
+    }
+    .reasoning-section summary {
+      cursor: pointer;
+      color: #777;
+      font-size: 12px;
+      user-select: none;
+      list-style: none;
+    }
+    .reasoning-section summary::-webkit-details-marker { display: none; }
+    .reasoning-section summary::before {
+      content: '▸';
+      display: inline-block;
+      margin-right: 6px;
+      transition: transform 0.15s;
+    }
+    .reasoning-section[open] summary::before {
+      transform: rotate(90deg);
+    }
+    .reasoning-section summary:hover { color: #aaa; }
+    .reasoning-section .reasoning-content {
+      color: #888;
+      font-size: 13px;
+      font-style: italic;
+      white-space: pre-wrap;
+      word-break: break-word;
+      padding: 4px 0 4px 4px;
+      line-height: 1.5;
+    }
     #input-bar {
       display: flex;
       gap: 8px;
@@ -371,10 +404,12 @@ function classifyLine(text) {
 function renderLines(lines) {
   outputEl.innerHTML = '';
   closeAgentBubble();
+  closeReasoningSection();
   for (const line of lines) {
     // User messages stored as "> text" → render as chat bubble
     if (line.startsWith('> ')) {
       closeAgentBubble();
+      closeReasoningSection();
       const wrap = document.createElement('div');
       wrap.className = 'msg-user';
       const bubble = document.createElement('div');
@@ -387,11 +422,35 @@ function renderLines(lines) {
     // Hide noisy API call lines in web UI
     if (shouldHideLine(line)) continue;
     const { text, cls } = classifyLine(line);
+    // Group consecutive reasoning lines into a collapsible section
+    if (cls === 'reasoning') {
+      if (!reasoningSection || !reasoningSection.details.isConnected) {
+        const details = document.createElement('details');
+        details.className = 'reasoning-section';
+        // Stored reasoning: collapsed by default
+        const summary = document.createElement('summary');
+        summary.textContent = '💭 Reasoning';
+        details.appendChild(summary);
+        const content = document.createElement('div');
+        content.className = 'reasoning-content';
+        details.appendChild(content);
+        outputEl.appendChild(details);
+        reasoningSection = { details, content };
+      }
+      const c = reasoningSection.content;
+      c.textContent += (c.textContent ? '\n' : '') + text;
+      continue;
+    }
+    // Non-reasoning line — close any open reasoning section
+    closeReasoningSection();
+    closeAgentBubble();
     const div = document.createElement('div');
     div.className = 'line' + (cls ? ' ' + cls : '');
     div.textContent = text;
     outputEl.appendChild(div);
   }
+  // Close any trailing reasoning section
+  closeReasoningSection();
   if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
 }
 
@@ -467,6 +526,7 @@ function appendOutput(line) {
   // Hide noisy API call lines in web UI
   if (shouldHideLine(line)) return;
   closeAgentBubble();
+  closeReasoningSection();
   const { text, cls } = classifyLine(line);
   const div = document.createElement('div');
   div.className = 'line' + (cls ? ' ' + cls : '');
@@ -481,6 +541,7 @@ const pendingToolElements = [];
 
 function appendToolPending(toolName, hint) {
   closeAgentBubble();
+  closeReasoningSection();
   const label = hint ? `${toolName} ${hint}` : toolName;
   const div = document.createElement('div');
   div.className = 'line tool-line';
@@ -492,6 +553,7 @@ function appendToolPending(toolName, hint) {
 
 function updateToolDone(toolName, success, hint) {
   closeAgentBubble();
+  closeReasoningSection();
   // Find the first pending entry for this tool name
   const idx = pendingToolElements.findIndex(e => e.toolName === toolName);
   if (idx >= 0) {
@@ -516,6 +578,7 @@ function updateToolDone(toolName, success, hint) {
 // Streaming content (StreamDelta) is wrapped in a left-aligned agent bubble.
 // Other message types (OutputLine, ToolPending, etc.) close the bubble first.
 let agentBubble = null;
+let reasoningSection = null; // { details: <details>, content: <div> }
 
 function ensureAgentBubble() {
   if (agentBubble && agentBubble.isConnected) return;
@@ -532,21 +595,42 @@ function closeAgentBubble() {
   agentBubble = null;
 }
 
+// --- Reasoning section management ---
+// Reasoning deltas are wrapped in a collapsible <details> element.
+// While streaming, the section is open ("💭 Thinking…").
+// When non-reasoning content arrives, it auto-collapses to "💭 Reasoning".
+function ensureReasoningSection() {
+  if (reasoningSection && reasoningSection.details.isConnected) return;
+  closeAgentBubble();
+  const details = document.createElement('details');
+  details.className = 'reasoning-section';
+  details.open = true;
+  const summary = document.createElement('summary');
+  summary.textContent = '💭 Thinking…';
+  details.appendChild(summary);
+  const content = document.createElement('div');
+  content.className = 'reasoning-content';
+  details.appendChild(content);
+  outputEl.appendChild(details);
+  reasoningSection = { details, content };
+}
+
+function closeReasoningSection() {
+  if (reasoningSection && reasoningSection.details.isConnected) {
+    reasoningSection.details.open = false;
+    reasoningSection.details.querySelector('summary').textContent = '💭 Reasoning';
+  }
+  reasoningSection = null;
+}
+
 function appendDelta(delta, isReasoning) {
   if (isReasoning) {
-    // Reasoning deltas go as plain italic lines, not inside the bubble
-    closeAgentBubble();
-    const last = outputEl.lastElementChild;
-    if (last && last.classList.contains('reasoning')) {
-      last.textContent += delta;
-    } else {
-      const div = document.createElement('div');
-      div.className = 'line reasoning';
-      div.textContent = delta;
-      outputEl.appendChild(div);
-    }
+    // Reasoning deltas go into a collapsible section
+    ensureReasoningSection();
+    reasoningSection.content.textContent += delta;
   } else {
-    // Content streaming goes into the agent bubble
+    // Content streaming — close reasoning section, go into the agent bubble
+    closeReasoningSection();
     ensureAgentBubble();
     agentBubble.textContent += delta;
   }
