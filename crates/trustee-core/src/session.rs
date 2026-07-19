@@ -515,6 +515,8 @@ impl abk::orchestration::output::OutputSink for TuiForwardSink {
                 let mode = if streaming { "Streaming" } else { "Non-streaming" };
                 let total = context_tokens + tool_tokens;
                 let _ = self.tx.send(TuiMessage::ContextTokensUpdated(total));
+                // Blank line separator before each API call for readability
+                let _ = self.tx.send(TuiMessage::OutputLine(String::new()));
                 TuiMessage::OutputLine(format!(
                     "🔥 API Call {} | Ctx={}({}+{}) | {} | Model: {} | Tools: {}",
                     call_number, total, context_tokens, tool_tokens, mode, model, tool_count
