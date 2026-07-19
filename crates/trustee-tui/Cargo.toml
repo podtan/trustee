@@ -12,17 +12,15 @@ categories = ["command-line-utilities"]
 # TUI framework
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 crossterm = "0.29"
-# Async runtime support
+# Async runtime support (for select!/spawn in the event loop)
 tokio = { version = "1.0", features = ["full"] }
-tokio-util = "0.7"
 # Error handling
 anyhow = "1.0"
-# ABK for workflow execution
-abk = { version = "0.7.9", features = ["cli", "orchestration", "agent", "observability"] }
-# Config parsing for log file path
+# Config parsing for color settings
 toml = "0.8"
 # Clipboard support
 arboard = "3"
-# Unicode handling (for grapheme-level word-wrap counting)
+# Unicode handling (for word-wrap column counting)
 unicode-width = "0.2"
-unicode-segmentation = "1"
+# Core shared types and workflow logic (brings in abk transitively)
+trustee-core = { version = "0.1.0", path = "../trustee-core" }

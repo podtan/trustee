@@ -3,7 +3,7 @@
 //! All `render()`, `render_zoomed()`, and `render_mcp_status()` methods
 //! live here. The output panel uses manual line pre-wrapping and slicing
 //! instead of `Paragraph` + `.wrap()` + `.scroll()` to eliminate the
-//! orphan character bug (ratatui issue #2213/#2342).
+//! orphan character bug.
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -22,7 +22,7 @@ use crate::types::{FocusPanel, McpServerStatus};
 impl App {
     /// Render the TUI
     pub fn render(&mut self, frame: &mut Frame) {
-        // If a panel is zoomed, render only that panel fullscreen (no borders).
+        // If a panel is zoomed, render only that panel fullscreen.
         if let Some(panel) = self.zoomed_panel {
             self.render_zoomed(frame, panel);
             return;
@@ -33,24 +33,22 @@ impl App {
             .direction(Direction::Vertical)
             .margin(2)
             .constraints([
-                Constraint::Min(0),    // Output + Todo area - all remaining space
-                Constraint::Length(7), // Input area - fixed 7 rows (5 content + 2 borders)
+                Constraint::Min(0),    // Output + Todo area
+                Constraint::Length(7), // Input area - fixed 7 rows
             ])
             .split(frame.area());
 
-        // Cache rects for mouse hit-testing
         self.input_rect = main_chunks[1];
 
         // Split output area horizontally: 70% output, 30% todo panel
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(70), // Main output
-                Constraint::Percentage(30), // Todo panel
+                Constraint::Percentage(70),
+                Constraint::Percentage(30),
             ])
             .split(main_chunks[0]);
 
-        // Cache rects for mouse hit-testing
         self.output_rect = content_chunks[0];
         self.todo_rect = content_chunks[1];
 
@@ -58,12 +56,10 @@ impl App {
         let grey_style = self.reasoning_style;
         let normal_style = Style::default();
 
-        // Pre-wrap and flatten all output lines into visual lines.
-        // Content width = panel width minus 2 border columns.
         let content_width = content_chunks[0].width.saturating_sub(2) as usize;
         let viewport_height = content_chunks[0].height.saturating_sub(2) as usize;
         let visual_lines = build_visual_lines(
-            &self.output_lines,
+            &self.session.output_lines,
             content_width,
             grey_style,
             normal_style,
@@ -78,7 +74,7 @@ impl App {
             self.scroll.min(max_scroll)
         };
 
-        let output_title = if self.auto_scroll {
+        let output_title = if self.session.auto_scroll {
             "Output (↑/↓ to scroll)".to_string()
         } else {
             format!("Output (line {}/{} — ↓ to follow)", clamped_scroll, max_scroll)
@@ -90,7 +86,6 @@ impl App {
             Style::default().fg(Color::DarkGray)
         };
 
-        // Slice to only the visible window — no .wrap(), no .scroll().
         let visible_text = slice_visible(&visual_lines, viewport_height, clamped_scroll as usize);
         let output_paragraph = Paragraph::new(visible_text).block(
             Block::default()
@@ -101,9 +96,9 @@ impl App {
         );
         frame.render_widget(output_paragraph, content_chunks[0]);
 
-        // Split the right panel vertically: Todos on top, MCP status on bottom.
-        let mcp_line_count = self.mcp_servers.len();
-        let failed_count = self.mcp_servers
+        // Split the right panel: Todos on top, MCP status on bottom.
+        let mcp_line_count = self.session.mcp_servers.len();
+        let failed_count = self.session.mcp_servers
             .iter()
             .filter(|s| s.status == McpServerStatus::Failed && s.error.is_some())
             .count();
@@ -114,23 +109,22 @@ impl App {
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(0),             // Todos — takes remaining space
-                Constraint::Length(mcp_height),  // MCP Status — dynamic!
+                Constraint::Min(0),
+                Constraint::Length(mcp_height),
             ])
             .split(content_chunks[1]);
 
-        // Update todo_rect to only the todo portion for mouse hit-testing
         self.todo_rect = right_chunks[0];
 
         // ---- Todo panel ----
-        let todo_title = format!("Todos ({})", self.todo_lines.len());
+        let todo_title = format!("Todos ({})", self.session.todo_lines.len());
         let todo_width = right_chunks[0].width.saturating_sub(2) as usize;
         let todo_viewport = right_chunks[0].height.saturating_sub(2) as usize;
 
-        let todo_visual_lines: Vec<Line> = if self.todo_lines.is_empty() {
+        let todo_visual_lines: Vec<Line> = if self.session.todo_lines.is_empty() {
             vec![Line::from("No tasks")]
         } else {
-            self.todo_lines
+            self.session.todo_lines
                 .iter()
                 .flat_map(|l| {
                     let wrapped = crate::helpers::wrap_line(l, todo_width.max(1));
@@ -165,27 +159,27 @@ impl App {
         self.render_mcp_status(frame, right_chunks[1]);
 
         // ---- Input panel ----
-        let char_count = self.input.chars().count();
+        let char_count = self.session.input.chars().count();
         let cursor_style = if self.focus == FocusPanel::Input {
             Style::default().fg(Color::Black).bg(Color::White)
         } else {
             Style::default().fg(Color::Black).bg(Color::DarkGray)
         };
         let input_spans = if self.cursor_position < char_count {
-            let before: String = self.input.chars().take(self.cursor_position).collect();
-            let at: String = self.input.chars().skip(self.cursor_position).take(1).collect();
-            let after: String = self.input.chars().skip(self.cursor_position + 1).collect();
+            let before: String = self.session.input.chars().take(self.cursor_position).collect();
+            let at: String = self.session.input.chars().skip(self.cursor_position).take(1).collect();
+            let after: String = self.session.input.chars().skip(self.cursor_position + 1).collect();
             vec![
                 Span::raw(before),
                 Span::styled(at, cursor_style),
                 Span::raw(after),
             ]
         } else {
-            vec![Span::raw(self.input.clone()), Span::styled(" ", cursor_style)]
+            vec![Span::raw(self.session.input.clone()), Span::styled(" ", cursor_style)]
         };
         let input_text = Text::from(Line::from(input_spans));
 
-        let input_title = match self.workflow_state {
+        let input_title = match self.session.workflow_state {
             crate::types::WorkflowState::Running => "Input (Running... Esc to cancel)".to_string(),
             crate::types::WorkflowState::Cancelling => "Input (Cancelling...)".to_string(),
             crate::types::WorkflowState::Idle => "Input (Ready)".to_string(),
@@ -199,7 +193,7 @@ impl App {
         self.input_max_scroll_cache = input_max;
 
         let cursor_text = if self.cursor_position < char_count {
-            let before: String = self.input.chars().take(self.cursor_position + 1).collect();
+            let before: String = self.session.input.chars().take(self.cursor_position + 1).collect();
             Text::from(Line::from(before))
         } else {
             input_text.clone()
@@ -232,10 +226,7 @@ impl App {
         frame.render_widget(input_paragraph, main_chunks[1]);
     }
 
-    /// Render a single panel fullscreen with no borders or margins.
-    ///
-    /// Used when the user presses Ctrl+Z to zoom into a panel for clean
-    /// terminal-native text selection (click-drag → OS copy shortcut).
+    /// Render a single panel fullscreen (Ctrl+Z zoom mode).
     fn render_zoomed(&mut self, frame: &mut Frame, panel: FocusPanel) {
         let area = frame.area();
 
@@ -247,7 +238,7 @@ impl App {
                 let content_width = area.width as usize;
                 let viewport_height = area.height as usize;
                 let visual_lines = build_visual_lines(
-                    &self.output_lines,
+                    &self.session.output_lines,
                     content_width,
                     grey_style,
                     normal_style,
@@ -271,10 +262,10 @@ impl App {
                 let content_width = area.width as usize;
                 let viewport_height = area.height as usize;
 
-                let visual_lines: Vec<Line> = if self.todo_lines.is_empty() {
+                let visual_lines: Vec<Line> = if self.session.todo_lines.is_empty() {
                     vec![Line::from("No tasks")]
                 } else {
-                    self.todo_lines
+                    self.session.todo_lines
                         .iter()
                         .flat_map(|l| {
                             let wrapped = crate::helpers::wrap_line(l, content_width.max(1));
@@ -294,7 +285,7 @@ impl App {
             }
             FocusPanel::Mcp => {
                 let grey = Style::default().fg(Color::DarkGray);
-                if self.mcp_servers.is_empty() {
+                if self.session.mcp_servers.is_empty() {
                     let paragraph = Paragraph::new(Text::from(Line::from(
                         Span::styled("(none)", grey),
                     )));
@@ -303,7 +294,7 @@ impl App {
                 }
 
                 let mut lines: Vec<Line> = Vec::new();
-                for s in &self.mcp_servers {
+                for s in &self.session.mcp_servers {
                     let (icon, color) = match s.status {
                         McpServerStatus::Connected => ("✓", Color::Green),
                         McpServerStatus::Failed => ("✗", Color::Red),
@@ -338,19 +329,19 @@ impl App {
                 frame.render_widget(paragraph, area);
             }
             FocusPanel::Input => {
-                let char_count = self.input.chars().count();
+                let char_count = self.session.input.chars().count();
                 let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
                 let input_spans = if self.cursor_position < char_count {
-                    let before: String = self.input.chars().take(self.cursor_position).collect();
-                    let at: String = self.input.chars().skip(self.cursor_position).take(1).collect();
-                    let after: String = self.input.chars().skip(self.cursor_position + 1).collect();
+                    let before: String = self.session.input.chars().take(self.cursor_position).collect();
+                    let at: String = self.session.input.chars().skip(self.cursor_position).take(1).collect();
+                    let after: String = self.session.input.chars().skip(self.cursor_position + 1).collect();
                     vec![
                         Span::raw(before),
                         Span::styled(at, cursor_style),
                         Span::raw(after),
                     ]
                 } else {
-                    vec![Span::raw(self.input.clone()), Span::styled(" ", cursor_style)]
+                    vec![Span::raw(self.session.input.clone()), Span::styled(" ", cursor_style)]
                 };
                 let input_text = Text::from(Line::from(input_spans));
                 let paragraph = Paragraph::new(input_text)
@@ -362,17 +353,13 @@ impl App {
         }
     }
 
-    /// Render the MCP server status panel (bottom of right column).
-    ///
-    /// Shows ✓/✗ icons + server name + tool count for each MCP server.
-    /// Panel height is dynamic: grows with server count, capped at 50% of right column.
-    /// Failed servers show a truncated error message on the line below.
+    /// Render the MCP server status panel.
     fn render_mcp_status(&mut self, frame: &mut Frame, area: Rect) {
-        let connected = self.mcp_servers
+        let connected = self.session.mcp_servers
             .iter()
             .filter(|s| s.status == McpServerStatus::Connected)
             .count();
-        let mcp_title = format!("MCP ({}/{})", connected, self.mcp_servers.len());
+        let mcp_title = format!("MCP ({}/{})", connected, self.session.mcp_servers.len());
 
         let grey = Style::default().fg(Color::DarkGray);
         let border_style = if self.focus == FocusPanel::Mcp {
@@ -386,7 +373,7 @@ impl App {
             .borders(Borders::ALL)
             .border_style(border_style);
 
-        if self.mcp_servers.is_empty() {
+        if self.session.mcp_servers.is_empty() {
             let paragraph = Paragraph::new(Text::from(Line::from(Span::styled("(none)", grey))))
                 .block(block);
             frame.render_widget(paragraph, area);
@@ -394,7 +381,7 @@ impl App {
         }
 
         let mut lines: Vec<Line> = Vec::new();
-        for s in &self.mcp_servers {
+        for s in &self.session.mcp_servers {
             let (icon, color) = match s.status {
                 McpServerStatus::Connected => ("✓", Color::Green),
                 McpServerStatus::Failed => ("✗", Color::Red),
@@ -431,7 +418,7 @@ impl App {
         let scroll = if self.focus == FocusPanel::Mcp {
             self.mcp_scroll.min(max_scroll)
         } else {
-            max_scroll // auto-scroll to show latest entries
+            max_scroll
         };
 
         let paragraph = Paragraph::new(Text::from(lines))

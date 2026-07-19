@@ -19,27 +19,24 @@ use crate::types::{FocusPanel, WorkflowState};
 impl App {
     /// Handle a terminal event
     pub(crate) fn handle_event(&mut self, event: Event) -> Result<()> {
-        // Handle terminal resize: set a flag so the main loop calls
-        // terminal.clear() before the next draw, flushing stale content
-        // from the old buffer dimensions.
+        // Handle terminal resize
         if let Event::Resize(_, _) = event {
             self.needs_clear = true;
             return Ok(());
         }
 
-        // Handle bracketed paste: pasted text arrives as a single event,
-        // newlines are replaced with spaces to prevent auto-submit.
+        // Handle bracketed paste
         if let Event::Paste(text) = event {
             let sanitized = text.replace('\n', " ").replace('\r', "");
             for c in sanitized.chars() {
-                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                self.input.insert(byte_pos, c);
+                let byte_pos = char_to_byte_offset(&self.session.input, self.cursor_position);
+                self.session.input.insert(byte_pos, c);
                 self.cursor_position += 1;
             }
             return Ok(());
         }
 
-        // Handle mouse events: click to focus, scroll wheel to scroll panel
+        // Handle mouse events
         if let Event::Mouse(mouse) = event {
             let col = mouse.column;
             let row = mouse.row;
@@ -57,7 +54,7 @@ impl App {
                 }
                 MouseEventKind::ScrollUp => {
                     if self.output_rect.contains((col, row).into()) {
-                        self.auto_scroll = false;
+                        self.session.auto_scroll = false;
                         if self.scroll == u16::MAX {
                             self.scroll = self.max_scroll_cache;
                         }
@@ -77,7 +74,7 @@ impl App {
                         }
                         self.scroll = self.scroll.saturating_add(3);
                         if self.scroll >= self.max_scroll_cache {
-                            self.auto_scroll = true;
+                            self.session.auto_scroll = true;
                             self.scroll = u16::MAX;
                         }
                     } else if self.todo_rect.contains((col, row).into()) {
@@ -106,7 +103,7 @@ impl App {
 
             // Global keys — work regardless of focus
             match key.code {
-                // Ctrl+Z: toggle zoom for clean text selection (like tmux).
+                // Ctrl+Z: toggle zoom
                 KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if self.zoomed_panel.is_some() {
                         self.zoomed_panel = None;
@@ -117,23 +114,23 @@ impl App {
                     }
                     return Ok(());
                 }
-                // When zoomed, consume all other keys (selection mode)
+                // When zoomed, consume all other keys
                 _ if self.zoomed_panel.is_some() => return Ok(()),
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.should_quit = true;
+                    self.session.should_quit = true;
                     return Ok(());
                 }
                 KeyCode::Esc => {
-                    if self.workflow_state == WorkflowState::Running {
-                        self.cancel_token.cancel();
-                        self.workflow_state = WorkflowState::Cancelling;
-                        self.output_lines.push("⏹ Cancelling...".to_string());
-                    } else if self.workflow_state == WorkflowState::Idle {
-                        self.should_quit = true;
+                    if self.session.workflow_state == WorkflowState::Running {
+                        self.session.cancel_token.cancel();
+                        self.session.workflow_state = WorkflowState::Cancelling;
+                        self.session.output_lines.push("⏹ Cancelling...".to_string());
+                    } else if self.session.workflow_state == WorkflowState::Idle {
+                        self.session.should_quit = true;
                     }
                     return Ok(());
                 }
-                // Tab cycles focus: Input → Output → Todo → Mcp → Input
+                // Tab cycles focus
                 KeyCode::Tab => {
                     self.focus = match self.focus {
                         FocusPanel::Input  => FocusPanel::Output,
@@ -143,7 +140,7 @@ impl App {
                     };
                     return Ok(());
                 }
-                // Shift+Tab cycles backwards: Input → Mcp → Todo → Output → Input
+                // Shift+Tab cycles backwards
                 KeyCode::BackTab => {
                     self.focus = match self.focus {
                         FocusPanel::Input  => FocusPanel::Mcp,
@@ -153,18 +150,18 @@ impl App {
                     };
                     return Ok(());
                 }
-                // Ctrl+H: session handoff — generate LLM briefing, start fresh context
+                // Ctrl+H: session handoff
                 KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    match self.workflow_state {
-                        WorkflowState::Idle => self.trigger_handoff(self.input.trim().to_string()),
+                    match self.session.workflow_state {
+                        WorkflowState::Idle => self.trigger_handoff(self.session.input.trim().to_string()),
                         WorkflowState::Running => {
-                            self.cancel_token.cancel();
-                            self.workflow_state = WorkflowState::Cancelling;
-                            self.handoff_pending = true;
-                            self.output_lines.push("⏹ Cancelling before handoff...".to_string());
+                            self.session.cancel_token.cancel();
+                            self.session.workflow_state = WorkflowState::Cancelling;
+                            self.session.handoff_pending = true;
+                            self.session.output_lines.push("⏹ Cancelling before handoff...".to_string());
                         }
                         WorkflowState::Cancelling => {
-                            self.handoff_pending = true;
+                            self.session.handoff_pending = true;
                         }
                     }
                     return Ok(());
@@ -187,7 +184,7 @@ impl App {
     fn handle_output_keys(&mut self, code: KeyCode) -> Result<()> {
         match code {
             KeyCode::Up => {
-                self.auto_scroll = false;
+                self.session.auto_scroll = false;
                 if self.scroll == u16::MAX {
                     self.scroll = self.max_scroll_cache;
                 }
@@ -199,12 +196,12 @@ impl App {
                 }
                 self.scroll = self.scroll.saturating_add(1);
                 if self.scroll >= self.max_scroll_cache {
-                    self.auto_scroll = true;
+                    self.session.auto_scroll = true;
                     self.scroll = u16::MAX;
                 }
             }
             KeyCode::PageUp => {
-                self.auto_scroll = false;
+                self.session.auto_scroll = false;
                 if self.scroll == u16::MAX {
                     self.scroll = self.max_scroll_cache;
                 }
@@ -216,16 +213,16 @@ impl App {
                 }
                 self.scroll = self.scroll.saturating_add(10);
                 if self.scroll >= self.max_scroll_cache {
-                    self.auto_scroll = true;
+                    self.session.auto_scroll = true;
                     self.scroll = u16::MAX;
                 }
             }
             KeyCode::Home => {
-                self.auto_scroll = false;
+                self.session.auto_scroll = false;
                 self.scroll = 0;
             }
             KeyCode::End => {
-                self.auto_scroll = true;
+                self.session.auto_scroll = true;
                 self.scroll = u16::MAX;
             }
             KeyCode::Char('y') => {
@@ -233,19 +230,19 @@ impl App {
             }
             // Enter while output focused → switch to input and execute
             KeyCode::Enter => {
-                if !self.input.is_empty() && self.workflow_state == WorkflowState::Idle {
+                if !self.session.input.is_empty() && self.session.workflow_state == WorkflowState::Idle {
                     self.focus = FocusPanel::Input;
                     self.execute_command();
                 }
             }
-            // Typing while output focused → switch to input (blocked during Running/Cancelling)
+            // Typing while output focused → switch to input
             KeyCode::Char(c) if c != 'y' => {
-                if self.workflow_state != WorkflowState::Idle {
+                if self.session.workflow_state != WorkflowState::Idle {
                     return Ok(());
                 }
                 self.focus = FocusPanel::Input;
-                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                self.input.insert(byte_pos, c);
+                let byte_pos = char_to_byte_offset(&self.session.input, self.cursor_position);
+                self.session.input.insert(byte_pos, c);
                 self.cursor_position += 1;
             }
             _ => {}
@@ -274,20 +271,19 @@ impl App {
             }
             KeyCode::Home => { self.todo_scroll = 0; }
             KeyCode::End => { self.todo_scroll = self.todo_max_scroll_cache; }
-            // y = copy todo text to clipboard (must be before the generic Char catch-all)
-            KeyCode::Char('y') => self.copy_to_clipboard(self.todo_lines.join("\n")),
-            // Typing while todo focused → switch to input (blocked during Running/Cancelling)
+            KeyCode::Char('y') => self.copy_to_clipboard(self.session.todo_lines.join("\n")),
+            // Typing while todo focused → switch to input
             KeyCode::Char(c) if c != 'y' => {
-                if self.workflow_state != WorkflowState::Idle {
+                if self.session.workflow_state != WorkflowState::Idle {
                     return Ok(());
                 }
                 self.focus = FocusPanel::Input;
-                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                self.input.insert(byte_pos, c);
+                let byte_pos = char_to_byte_offset(&self.session.input, self.cursor_position);
+                self.session.input.insert(byte_pos, c);
                 self.cursor_position += 1;
             }
             KeyCode::Enter => {
-                if !self.input.is_empty() && self.workflow_state == WorkflowState::Idle {
+                if !self.session.input.is_empty() && self.session.workflow_state == WorkflowState::Idle {
                     self.focus = FocusPanel::Input;
                     self.execute_command();
                 }
@@ -318,18 +314,18 @@ impl App {
             }
             KeyCode::Home => { self.mcp_scroll = 0; }
             KeyCode::End => { self.mcp_scroll = self.mcp_max_scroll_cache; }
-            // Typing while MCP focused → switch to input (blocked during Running/Cancelling)
+            // Typing while MCP focused → switch to input
             KeyCode::Char(c) => {
-                if self.workflow_state != WorkflowState::Idle {
+                if self.session.workflow_state != WorkflowState::Idle {
                     return Ok(());
                 }
                 self.focus = FocusPanel::Input;
-                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                self.input.insert(byte_pos, c);
+                let byte_pos = char_to_byte_offset(&self.session.input, self.cursor_position);
+                self.session.input.insert(byte_pos, c);
                 self.cursor_position += 1;
             }
             KeyCode::Enter => {
-                if !self.input.is_empty() && self.workflow_state == WorkflowState::Idle {
+                if !self.session.input.is_empty() && self.session.workflow_state == WorkflowState::Idle {
                     self.focus = FocusPanel::Input;
                     self.execute_command();
                 }
@@ -343,26 +339,25 @@ impl App {
     fn handle_input_keys(&mut self, code: KeyCode) -> Result<()> {
         match code {
             KeyCode::Enter => {
-                if !self.input.is_empty() && self.workflow_state == WorkflowState::Idle {
+                if !self.session.input.is_empty() && self.session.workflow_state == WorkflowState::Idle {
                     self.execute_command();
                 }
             }
             KeyCode::Backspace => {
                 if self.cursor_position > 0 {
-                    let byte_pos = char_to_byte_offset(&self.input, self.cursor_position - 1);
-                    self.input.remove(byte_pos);
+                    let byte_pos = char_to_byte_offset(&self.session.input, self.cursor_position - 1);
+                    self.session.input.remove(byte_pos);
                     self.cursor_position -= 1;
                 }
             }
             KeyCode::Delete => {
-                let char_count = self.input.chars().count();
+                let char_count = self.session.input.chars().count();
                 if self.cursor_position < char_count {
-                    let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                    self.input.remove(byte_pos);
+                    let byte_pos = char_to_byte_offset(&self.session.input, self.cursor_position);
+                    self.session.input.remove(byte_pos);
                 }
             }
             KeyCode::Up => {
-                // Move cursor up by one visual line width
                 let w = self.input_inner_width_cache.max(1);
                 if self.cursor_position >= w {
                     self.cursor_position -= w;
@@ -372,7 +367,7 @@ impl App {
             }
             KeyCode::Down => {
                 let w = self.input_inner_width_cache.max(1);
-                let char_count = self.input.chars().count();
+                let char_count = self.session.input.chars().count();
                 self.cursor_position = (self.cursor_position + w).min(char_count);
             }
             KeyCode::PageUp => {
@@ -384,21 +379,20 @@ impl App {
                     .min(self.input_max_scroll_cache);
             }
             KeyCode::Home => { self.cursor_position = 0; }
-            KeyCode::End => { self.cursor_position = self.input.chars().count(); }
+            KeyCode::End => { self.cursor_position = self.session.input.chars().count(); }
             KeyCode::Left => {
                 if self.cursor_position > 0 { self.cursor_position -= 1; }
             }
             KeyCode::Right => {
-                let char_count = self.input.chars().count();
+                let char_count = self.session.input.chars().count();
                 if self.cursor_position < char_count { self.cursor_position += 1; }
             }
             KeyCode::Char(c) => {
-                // Block typing during Running and Cancelling states.
-                if self.workflow_state != WorkflowState::Idle {
+                if self.session.workflow_state != WorkflowState::Idle {
                     return Ok(());
                 }
-                let byte_pos = char_to_byte_offset(&self.input, self.cursor_position);
-                self.input.insert(byte_pos, c);
+                let byte_pos = char_to_byte_offset(&self.session.input, self.cursor_position);
+                self.session.input.insert(byte_pos, c);
                 self.cursor_position += 1;
             }
             _ => {}

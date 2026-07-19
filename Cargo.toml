@@ -43,6 +43,6 @@ trustee-tui = { version = "0.1.54", path = "crates/trustee-tui", optional = true
 trustee-upgrade = { version = "0.1.2", path = "crates/trustee-upgrade" }
 
 [workspace]
-members = ["crates/trustee-tui", "crates/trustee-upgrade"]
+members = ["crates/trustee-core", "crates/trustee-tui", "crates/trustee-upgrade"]
 resolver = "2"
 

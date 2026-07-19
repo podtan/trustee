@@ -8,17 +8,14 @@ mod app;
 mod event;
 mod helpers;
 mod render;
-mod tui_sink;
 mod types;
 mod workflow;
 
 pub use app::App;
 pub use types::TuiMessage;
+pub use trustee_core::types::BuildInfo;
 
 use std::collections::HashMap;
-
-/// Build information passed from the main binary
-pub type BuildInfo = abk::cli::BuildInfo;
 
 /// Run the TUI application with configuration
 ///
@@ -33,10 +30,10 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let mut app = App::new();
 
-    // Store config and secrets in the app for workflow execution
-    app.config_toml = Some(config_toml.clone());
-    app.secrets = Some(secrets);
-    app.build_info = Some(build_info);
+    // Store config and secrets in the session for workflow execution
+    app.session.config_toml = Some(config_toml);
+    app.session.secrets = Some(secrets);
+    app.session.build_info = Some(build_info);
 
     // Parse [tui.auto_handoff] settings from the merged config
     app.parse_auto_handoff_config();
