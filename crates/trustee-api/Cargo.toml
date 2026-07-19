@@ -15,6 +15,7 @@ trustee-core = { version = "0.1.0", path = "../trustee-core" }
 trustee-web = { version = "0.1.0", path = "../trustee-web" }
 # Web framework (rustls for static Pi/ARM builds)
 axum = { version = "0.8", features = ["ws"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
 tokio = { version = "1.0", features = ["full"] }
 tower-http = { version = "0.7", features = ["cors"] }
 tower = "0.5"
@@ -29,11 +30,17 @@ mime_guess = "2"
 # Stream utilities for WebSocket split
 futures = "0.3"
 # OIDC auth (resource server: JWT validation + optional login flow)
-pep = { version = "0.4", features = ["oidc", "axum", "config", "token-provider"] }
+pep = { version = "0.4", features = ["oidc", "axum", "config"] }
 # HTTP client for OAuth code exchange (rustls)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
 # URL parsing
 url = "2"
+# Cookie encoding for auth
+time = "0.3"
+# URL encoding for error redirects
+urlencoding = "2.1"
+# TOML parsing for config
+toml = "0.8"
 # Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"

@@ -136,6 +136,7 @@
 <div id="header">
   <h1>🤖 Trustee</h1>
   <span class="context-badge" id="context-tokens">0 tokens</span>
+  <span class="context-badge" id="user-badge" style="display:none; cursor:pointer;" title="Click to logout"></span>
 </div>
 
 <div id="status-bar">
@@ -429,9 +430,40 @@ outputEl.addEventListener('scroll', () => {
   autoScroll = (outputEl.scrollTop + outputEl.clientHeight >= outputEl.scrollHeight - 4);
 });
 
+// --- Auth ---
+async function checkAuth() {
+  try {
+    const res = await fetch(API + '/auth/me');
+    const data = await res.json();
+    if (data.auth_enabled && !data.authenticated) {
+      // Auth required but not authenticated — redirect to login
+      window.location.href = API + '/auth/login';
+      return false;
+    }
+    if (data.authenticated && data.name) {
+      const badge = document.getElementById('user-badge');
+      badge.textContent = (data.dev_mode ? '🔧 ' : '') + data.name;
+      badge.style.display = '';
+      badge.onclick = async () => {
+        await fetch(API + '/auth/logout', { method: 'POST' });
+        window.location.reload();
+      };
+    }
+    return true;
+  } catch(e) {
+    // Server might not have auth — continue normally
+    return true;
+  }
+}
+
 // --- Init ---
-refreshSession();
-connectWS();
+(async () => {
+  const authed = await checkAuth();
+  if (authed) {
+    refreshSession();
+    connectWS();
+  }
+})();
 </script>
 </body>
 </html>

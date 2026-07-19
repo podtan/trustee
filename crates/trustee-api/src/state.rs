@@ -1,10 +1,12 @@
-//! Shared server state: wraps `Session` and a broadcast channel.
+//! Shared server state: wraps `Session`, broadcast channel, and auth state.
 
 use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc, Mutex};
 use trustee_core::session::Session;
 use trustee_core::types::TuiMessage;
+
+use crate::auth::AuthState;
 
 /// Shared state accessible by all axum handlers.
 #[derive(Clone)]
@@ -14,14 +16,17 @@ pub struct ServerState {
     /// Broadcast sender for WebSocket fan-out.
     /// Messages are JSON-serialized `TuiMessage` strings.
     pub ws_tx: broadcast::Sender<String>,
+    /// Auth state (None = auth disabled, all endpoints open).
+    pub auth: Option<Arc<AuthState>>,
 }
 
 impl ServerState {
-    /// Create new shared state from a session and broadcast sender.
-    pub fn new(session: Session, ws_tx: broadcast::Sender<String>) -> Self {
+    /// Create new shared state from a session, broadcast sender, and optional auth.
+    pub fn new(session: Session, ws_tx: broadcast::Sender<String>, auth: Option<Arc<AuthState>>) -> Self {
         Self {
             session: Arc::new(Mutex::new(session)),
             ws_tx,
+            auth,
         }
     }
 
