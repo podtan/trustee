@@ -192,9 +192,12 @@
 
     /* Mobile: full-screen output, panel becomes slide-up bottom sheet */
     @media (max-width: 600px) {
-      #output { font-size: 15px; padding: 8px 10px; line-height: 1.6; }
+      #output { font-size: 15px; padding: 8px 10px 70px; line-height: 1.6; }
       #input { font-size: 16px; padding: 8px 10px; }
-      #input-bar { padding: 6px 10px; }
+      #input-bar {
+        padding: 6px 10px;
+        position: fixed; bottom: 0; left: 0; right: 0; z-index: 500;
+      }
       button { padding: 8px 14px; font-size: 14px; }
 
       /* Panel becomes bottom sheet overlay */
