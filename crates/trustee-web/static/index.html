@@ -659,7 +659,7 @@ function handleMessage(msg) {
       document.getElementById('context-tokens').textContent = msg.count.toLocaleString() + ' tokens';
       break;
     case 'McpServerStatus':
-      refreshSession();
+      refreshMcpOnly();
       break;
     case 'ResumeInfo':
       // ResumeInfo is a mid-execution checkpoint, NOT a completion signal.
@@ -827,6 +827,16 @@ async function refreshSession() {
       document.getElementById('context-tokens').textContent = data.context_tokens.toLocaleString() + ' tokens';
     }
   } catch(e) { /* server starting */ }
+}
+
+// Lightweight refresh: only update MCP panel, don't touch output (preserves text selection)
+async function refreshMcpOnly() {
+  try {
+    const res = await fetch(API + '/api/v1/session');
+    if (!res.ok) return;
+    const data = await res.json();
+    renderMcp(data.mcp_servers || []);
+  } catch(e) {}
 }
 
 function renderTodos(content) {
@@ -1071,7 +1081,9 @@ if (window.visualViewport) {
 }
 
 // Focus input on tap in empty output area (mobile UX)
-outputEl.addEventListener('click', () => {
+// But don't steal focus if user is selecting text
+outputEl.addEventListener('click', (e) => {
+  if (window.getSelection().toString()) return;  // user selected text, leave them alone
   if (!document.getElementById('input').disabled) {
     document.getElementById('input').focus();
   }
