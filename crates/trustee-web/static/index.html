@@ -632,12 +632,15 @@ function handleMessage(msg) {
       appendDelta(msg.delta, true);
       break;
     case 'WorkflowCompleted':
+      closeAgentBubble();
       updateState('Idle');
       break;
     case 'WorkflowError':
+      closeAgentBubble();
       updateState('Idle');
       break;
     case 'WorkflowCancelled':
+      closeAgentBubble();
       updateState('Idle');
       break;
     case 'TodoUpdate':
@@ -662,6 +665,7 @@ function handleMessage(msg) {
       // messages signal the actual end.
       break;
     case 'HandoffReady':
+      closeAgentBubble();
       updateState('Idle');
       break;
     case 'WorkflowStarted':
