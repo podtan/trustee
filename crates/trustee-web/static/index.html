@@ -413,6 +413,62 @@
     .hljs-addition { color: #aff5b4; background: #033a16; }
     .hljs-emphasis { font-style: italic; }
     .hljs-strong { font-weight: 700; }
+
+    /* --- User menu (torpi-style) --- */
+    #header-user {
+      position: relative;
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 4px;
+      transition: background 0.15s;
+    }
+    #header-user:hover { background: #2a2a3a; }
+    .user-avatar {
+      width: 28px; height: 28px;
+      background: #2563eb;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 600; color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    .user-menu {
+      position: absolute;
+      top: 100%; right: 8px;
+      background: #1a1a2e;
+      border: 1px solid #444;
+      border-radius: 8px;
+      padding: 8px;
+      min-width: 180px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      z-index: 2000;
+      display: none;
+    }
+    .user-menu.open { display: block; }
+    .user-info {
+      padding: 8px 12px;
+      border-bottom: 1px solid #333;
+      margin-bottom: 4px;
+    }
+    .user-info-name {
+      font-weight: 600; color: #e0e0e0; font-size: 13px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    .user-info-email {
+      font-size: 11px; color: #888; margin-top: 2px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    .dev-badge {
+      display: inline-block; font-size: 9px; padding: 1px 5px;
+      background: #dc2626; color: #fff; border-radius: 3px; margin-left: 6px;
+      vertical-align: middle;
+    }
+    .user-menu-item {
+      padding: 8px 12px; border-radius: 4px; cursor: pointer;
+      color: #e0e0e0; font-size: 13px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    .user-menu-item:hover { background: #2a2a3a; }
+    .user-menu-item.danger { color: #f87171; }
   </style>
 </head>
 <body>
@@ -420,7 +476,16 @@
 <div id="header">
   <h1>🤖 Trustee</h1>
   <span class="context-badge" id="context-tokens">0 tokens</span>
-  <span class="context-badge" id="user-badge" style="display:none; cursor:pointer;" title="Click to logout"></span>
+  <div id="header-user" style="display:none;">
+    <div class="user-avatar" id="user-avatar"></div>
+    <div class="user-menu" id="user-menu">
+      <div class="user-info">
+        <div class="user-info-name" id="user-info-name"></div>
+        <div class="user-info-email" id="user-info-email"></div>
+      </div>
+      <div class="user-menu-item danger" id="user-signout">Sign Out</div>
+    </div>
+  </div>
 </div>
 
 <div id="status-bar">
@@ -970,13 +1035,37 @@ async function checkAuth() {
       return false;
     }
     if (data.authenticated && data.name) {
-      const badge = document.getElementById('user-badge');
-      badge.textContent = (data.dev_mode ? '🔧 ' : '') + data.name;
-      badge.style.display = '';
-      badge.onclick = async () => {
+      const headerUser = document.getElementById('header-user');
+      const avatar = document.getElementById('user-avatar');
+      const nameEl = document.getElementById('user-info-name');
+      const emailEl = document.getElementById('user-info-email');
+      const menu = document.getElementById('user-menu');
+
+      // Avatar initials
+      const initials = (data.name || data.username || '?')
+        .split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
+      avatar.textContent = initials;
+
+      // Name + dev badge
+      nameEl.innerHTML = escapeHtml(data.name) + (data.dev_mode ? '<span class="dev-badge">DEV</span>' : '');
+      emailEl.textContent = data.email || '';
+
+      headerUser.style.display = '';
+
+      // Toggle menu on avatar click
+      headerUser.onclick = (e) => {
+        e.stopPropagation();
+        menu.classList.toggle('open');
+      };
+
+      // Sign out
+      document.getElementById('user-signout').onclick = async () => {
         await fetch(API + '/auth/logout', { method: 'POST' });
         window.location.reload();
       };
+
+      // Close menu on click outside
+      document.addEventListener('click', () => menu.classList.remove('open'));
     }
     return true;
   } catch(e) {
