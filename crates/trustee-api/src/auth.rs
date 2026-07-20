@@ -222,7 +222,62 @@ impl AuthState {
             .enrich_claims_with_userinfo(&mut claims, token, &self.config.issuer_url, None)
             .await;
 
+        // PEP only merges groups/role from userinfo. If name/email are missing
+        // (Kanidm JWTs only contain sub), fetch them from userinfo directly.
+        if claims.name.is_none() || claims.email.is_none() {
+            self.fill_userinfo_fields(&mut claims, token).await;
+        }
+
         Ok(claims)
+    }
+
+    /// Fetch name/email/preferred_username from the OIDC userinfo endpoint
+    /// and fill in any that are missing from the JWT claims.
+    async fn fill_userinfo_fields(&self, claims: &mut JwtClaims, token: &str) {
+        // Derive userinfo URL from issuer
+        // For Kanidm: issuer_url is the discovery endpoint,
+        // userinfo is at {issuer_url}/userinfo
+        let userinfo_url = format!("{}/userinfo", self.config.issuer_url.trim_end_matches('/'));
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(&userinfo_url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/json")
+            .send()
+            .await;
+
+        let Ok(resp) = resp else {
+            tracing::debug!("Userinfo request failed for name/email enrichment");
+            return;
+        };
+
+        if !resp.status().is_success() {
+            tracing::debug!("Userinfo returned {} for name/email enrichment", resp.status());
+            return;
+        }
+
+        let Ok(userinfo): Result<serde_json::Map<String, serde_json::Value>, _> = resp.json().await else {
+            return;
+        };
+
+        tracing::debug!("Userinfo keys: {:?}", userinfo.keys().collect::<Vec<_>>());
+
+        if claims.name.is_none() {
+            if let Some(name) = userinfo.get("name").and_then(|v| v.as_str()) {
+                claims.name = Some(name.to_string());
+            }
+        }
+        if claims.email.is_none() {
+            if let Some(email) = userinfo.get("email").and_then(|v| v.as_str()) {
+                claims.email = Some(email.to_string());
+            }
+        }
+        if claims.preferred_username.is_none() {
+            if let Some(uname) = userinfo.get("preferred_username").and_then(|v| v.as_str()) {
+                claims.preferred_username = Some(uname.to_string());
+            }
+        }
     }
 }
 

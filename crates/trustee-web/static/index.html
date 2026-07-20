@@ -470,9 +470,51 @@
     }
     .user-menu-item:hover { background: #2a2a3a; }
     .user-menu-item.danger { color: #f87171; }
+
+    /* --- Login screen --- */
+    #login-overlay {
+      position: fixed; inset: 0; z-index: 9999;
+      background: #0e0e0e;
+      display: flex; align-items: center; justify-content: center;
+      padding: 16px;
+    }
+    #login-overlay.hidden { display: none; }
+    .login-box {
+      text-align: center; max-width: 320px; width: 100%;
+    }
+    .login-logo { font-size: 48px; margin-bottom: 16px; }
+    .login-title { font-size: 24px; font-weight: 600; color: #e0e0e0; margin-bottom: 8px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    .login-subtitle { font-size: 14px; color: #888; margin-bottom: 32px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    .login-btn {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      width: 100%; padding: 14px 24px; font-size: 16px; font-weight: 500;
+      color: #fff; background: #2563eb; border: none; border-radius: 8px;
+      cursor: pointer; transition: background 0.15s, transform 0.1s;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    .login-btn:hover { background: #3b82f6; }
+    .login-btn:active { transform: scale(0.98); }
+    .login-btn:disabled { background: #1e3a5f; cursor: not-allowed; }
+    .login-error {
+      margin-top: 16px; padding: 12px; background: rgba(248,113,113,0.1);
+      border: 1px solid #f87171; border-radius: 8px; color: #f87171;
+      font-size: 14px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
   </style>
 </head>
 <body>
+
+<div id="login-overlay" class="hidden">
+  <div class="login-box">
+    <div class="login-logo">🤖</div>
+    <h1 class="login-title">Trustee</h1>
+    <p class="login-subtitle">Sign in to access your agent</p>
+    <button class="login-btn" id="login-btn" onclick="this.disabled=true;this.textContent='Signing in...';window.location.href='/auth/login'">
+      Sign in with SSO
+    </button>
+    <div id="login-error"></div>
+  </div>
+</div>
 
 <div id="header">
   <h1>🤖 Trustee</h1>
@@ -1031,44 +1073,59 @@ async function checkAuth() {
     const res = await fetch(API + '/auth/me');
     const data = await res.json();
     if (data.auth_enabled && !data.authenticated) {
-      // Auth required but not authenticated — redirect to login
-      window.location.href = API + '/auth/login';
+      // Show login screen instead of auto-redirect
+      const overlay = document.getElementById('login-overlay');
+      overlay.classList.remove('hidden');
+      // Check for error param in URL (from failed callback)
+      const params = new URLSearchParams(window.location.search);
+      const errParam = params.get('error');
+      if (errParam) {
+        document.getElementById('login-error').innerHTML = '<div class="login-error">' + escapeHtml(decodeURIComponent(errParam)) + '</div>';
+        window.history.replaceState({}, '', window.location.pathname);
+      }
       return false;
     }
     if (data.authenticated) {
       const displayName = data.name || data.username || data.email || data.sub;
-      if (!displayName) return true; // no user info to show
-      const headerUser = document.getElementById('header-user');
-      const avatar = document.getElementById('user-avatar');
-      const nameEl = document.getElementById('user-info-name');
-      const emailEl = document.getElementById('user-info-email');
-      const menu = document.getElementById('user-menu');
+      if (displayName) {
+        const headerUser = document.getElementById('header-user');
+        const avatar = document.getElementById('user-avatar');
+        const nameEl = document.getElementById('user-info-name');
+        const emailEl = document.getElementById('user-info-email');
+        const menu = document.getElementById('user-menu');
 
-      // Avatar initials
-      const initials = displayName
-        .split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
-      avatar.textContent = initials;
+        // Avatar initials
+        const initials = displayName
+          .split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
+        avatar.textContent = initials;
 
-      // Name + dev badge
-      nameEl.innerHTML = escapeHtml(displayName) + (data.dev_mode ? '<span class="dev-badge">DEV</span>' : '');
-      emailEl.textContent = data.email || data.username || '';
+        // Name + dev badge
+        nameEl.innerHTML = escapeHtml(displayName) + (data.dev_mode ? '<span class="dev-badge">DEV</span>' : '');
+        emailEl.textContent = data.email || data.username || '';
 
-      headerUser.style.display = '';
+        headerUser.style.display = '';
 
-      // Toggle menu on avatar click
-      headerUser.onclick = (e) => {
-        e.stopPropagation();
-        menu.classList.toggle('open');
-      };
+        // Toggle menu on avatar click
+        headerUser.onclick = (e) => {
+          e.stopPropagation();
+          menu.classList.toggle('open');
+        };
 
-      // Sign out
-      document.getElementById('user-signout').onclick = async () => {
-        await fetch(API + '/auth/logout', { method: 'POST' });
-        window.location.reload();
-      };
+        // Sign out — clear cookie then show login screen
+        document.getElementById('user-signout').onclick = async () => {
+          await fetch(API + '/auth/logout', { method: 'POST', credentials: 'include' });
+          // Hide user menu, show login overlay
+          document.getElementById('header-user').style.display = 'none';
+          document.getElementById('login-overlay').classList.remove('hidden');
+          // Re-enable login button
+          const btn = document.getElementById('login-btn');
+          btn.disabled = false;
+          btn.textContent = 'Sign in with SSO';
+        };
 
-      // Close menu on click outside
-      document.addEventListener('click', () => menu.classList.remove('open'));
+        // Close menu on click outside
+        document.addEventListener('click', () => menu.classList.remove('open'));
+      }
     }
     return true;
   } catch(e) {
