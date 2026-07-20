@@ -930,9 +930,19 @@ document.getElementById('input').addEventListener('keydown', (e) => {
 
 // Auto-resize textarea on input (fallback for browsers without field-sizing)
 const inputEl = document.getElementById('input');
+const inputBar = document.getElementById('input-bar');
+const fabPanelEl = document.getElementById('fab-panel');
+
+function syncFabPosition() {
+  if (!isMobile()) return;
+  const h = inputBar.offsetHeight;
+  fabPanelEl.style.bottom = (h + 12) + 'px';
+}
+
 inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+  syncFabPosition();
 });
 
 outputEl.addEventListener('scroll', () => {
@@ -1044,6 +1054,7 @@ window.addEventListener('resize', () => {
   } else {
     initMobile();
   }
+  syncFabPosition();
 });
 
 // --- Mobile keyboard handling ---
@@ -1052,6 +1063,7 @@ window.addEventListener('resize', () => {
 if (window.visualViewport) {
   const handleViewport = () => {
     document.body.style.height = window.visualViewport.height + 'px';
+    syncFabPosition();
   };
   window.visualViewport.addEventListener('resize', handleViewport);
   window.visualViewport.addEventListener('scroll', handleViewport);
@@ -1067,6 +1079,7 @@ outputEl.addEventListener('click', () => {
 
 // --- Init ---
 (async () => {
+  syncFabPosition();
   const authed = await checkAuth();
   if (authed) {
     refreshSession();
