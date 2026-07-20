@@ -421,6 +421,7 @@
       padding: 4px 8px;
       border-radius: 4px;
       transition: background 0.15s;
+      margin-left: auto;
     }
     #header-user:hover { background: #2a2a3a; }
     .user-avatar {
@@ -1034,7 +1035,9 @@ async function checkAuth() {
       window.location.href = API + '/auth/login';
       return false;
     }
-    if (data.authenticated && data.name) {
+    if (data.authenticated) {
+      const displayName = data.name || data.username || data.email || data.sub;
+      if (!displayName) return true; // no user info to show
       const headerUser = document.getElementById('header-user');
       const avatar = document.getElementById('user-avatar');
       const nameEl = document.getElementById('user-info-name');
@@ -1042,13 +1045,13 @@ async function checkAuth() {
       const menu = document.getElementById('user-menu');
 
       // Avatar initials
-      const initials = (data.name || data.username || '?')
+      const initials = displayName
         .split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
       avatar.textContent = initials;
 
       // Name + dev badge
-      nameEl.innerHTML = escapeHtml(data.name) + (data.dev_mode ? '<span class="dev-badge">DEV</span>' : '');
-      emailEl.textContent = data.email || '';
+      nameEl.innerHTML = escapeHtml(displayName) + (data.dev_mode ? '<span class="dev-badge">DEV</span>' : '');
+      emailEl.textContent = data.email || data.username || '';
 
       headerUser.style.display = '';
 
