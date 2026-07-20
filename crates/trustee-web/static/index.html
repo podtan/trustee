@@ -280,7 +280,7 @@
       #fab-panel {
         position: fixed;
         right: 12px;
-        bottom: 60px;
+        bottom: 72px;
         width: 44px;
         height: 44px;
         border-radius: 50%;
@@ -427,7 +427,7 @@
   <span id="state">Idle</span>
   <span id="spinner-container"></span>
   <button id="btn-cancel" class="danger" style="display:none; padding: 4px 12px; font-size: 12px;">Cancel</button>
-  <button id="btn-handoff" style="display:none; padding: 4px 12px; font-size: 12px;">Handoff</button>
+  <button id="btn-handoff" disabled style="padding: 4px 12px; font-size: 12px;">Handoff</button>
 </div>
 
 <div id="sheet-backdrop"></div>
@@ -866,7 +866,10 @@ function updateState(state) {
   const cancelling = state === 'Cancelling';
   document.getElementById('spinner-container').innerHTML = running ? '<span class="spinner"></span>' : '';
   document.getElementById('btn-cancel').style.display = running ? '' : 'none';
-  document.getElementById('btn-handoff').style.display = (running || cancelling) ? '' : 'none';
+  // Handoff always visible — disabled until there's session context
+  const handoffBtn = document.getElementById('btn-handoff');
+  handoffBtn.style.display = '';
+  handoffBtn.disabled = (running || cancelling) ? false : !window._hasSession;
   document.getElementById('btn-send').disabled = running || cancelling;
   document.getElementById('input').disabled = running || cancelling;
 }
