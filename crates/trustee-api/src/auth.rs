@@ -377,6 +377,9 @@ async fn login_handler(
         .map_err(|e| AuthError::OidcError(e.to_string()))?;
 
     // Set PKCE state cookie (HttpOnly, SameSite=Lax)
+    // Secure flag follows the redirect_uri scheme — HTTP localhost/LAN must not
+    // set Secure or the browser drops the cookie and PKCE state is lost.
+    let secure = auth.client_config.redirect_uri.starts_with("https");
     let pkce_cookie = Cookie::build((
         auth.pkce_manager.cookie_name().to_string(),
         pkce_session.cookie_value,
@@ -384,7 +387,7 @@ async fn login_handler(
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
-        .secure(!auth.is_dev_mode())
+        .secure(secure)
         .max_age(TimeDuration::seconds(auth.pkce_manager.ttl().as_secs() as i64))
         .build();
 
@@ -447,8 +450,9 @@ async fn callback_handler(
         .map(StdDuration::from_secs)
         .unwrap_or(StdDuration::from_secs(3600));
 
-    // Set auth cookie
-    let cookie = create_auth_cookie(&auth.config.cookie_name, &auth_token, max_age, !auth.is_dev_mode());
+    // Set auth cookie — Secure only when redirect_uri is HTTPS
+    let secure = auth.client_config.redirect_uri.starts_with("https");
+    let cookie = create_auth_cookie(&auth.config.cookie_name, &auth_token, max_age, secure);
 
     // Clear PKCE cookie (single-use)
     let clear_pkce = Cookie::build((auth.pkce_manager.cookie_name().to_string(), ""))
