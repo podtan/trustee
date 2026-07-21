@@ -132,12 +132,13 @@ pub async fn run(
                     }
                 };
 
-                // Use hyper-util auto builder with the tower service from axum
+                // Use hyper-util auto builder with the tower service from axum.
+                // serve_connection_with_upgrades is required for WebSocket support.
                 let io = hyper_util::rt::TokioIo::new(tls_stream);
                 let svc = hyper_util::service::TowerToHyperService::new(app);
 
                 let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection(io, svc)
+                    .serve_connection_with_upgrades(io, svc)
                     .await;
             });
         }
