@@ -930,6 +930,10 @@ async function refreshSession() {
     updateState(data.workflow_state || 'Idle');
     renderTodosRaw(data.todo_lines || []);
     renderMcp(data.mcp_servers || []);
+    // If there's existing session content, enable handoff button
+    if ((data.output_lines || []).length > 0) {
+      window._hasSession = true;
+    }
     if (data.context_tokens) {
       document.getElementById('context-tokens').textContent = data.context_tokens.toLocaleString() + ' tokens';
     }
