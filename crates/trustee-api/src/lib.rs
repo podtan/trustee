@@ -95,6 +95,11 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     if use_tls {
+        // Install ring as the process-level crypto provider (required when
+        // rustls is built with default-features=false to avoid ambiguity
+        // with aws-lc-rs pulled in transitively by other crates).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         // Ensure self-signed certs exist
         let cert_dir = tls::default_cert_dir();
         let (cert_path, key_path) = tls::ensure_certs(&cert_dir)?;
