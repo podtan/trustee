@@ -714,9 +714,16 @@ function renderLines(lines) {
 }
 
 // --- WebSocket streaming ---
+let wsReconnectDelay = 1000;
+const WS_MAX_RECONNECT_DELAY = 30000;
+
 function connectWS() {
   const wsUrl = (API.startsWith('https') ? 'wss' : 'ws') + '://' + window.location.host + '/api/v1/session/stream';
   ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    wsReconnectDelay = 1000; // reset on successful connect
+  };
 
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
@@ -724,7 +731,11 @@ function connectWS() {
   };
 
   ws.onclose = () => {
-    setTimeout(() => { if (!ws || ws.readyState === WebSocket.CLOSED) connectWS(); }, 2000);
+    setTimeout(() => {
+      if (!ws || ws.readyState === WebSocket.CLOSED) connectWS();
+    }, wsReconnectDelay);
+    // Exponential backoff with cap
+    wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_MAX_RECONNECT_DELAY);
   };
 
   ws.onerror = () => { ws.close(); };
