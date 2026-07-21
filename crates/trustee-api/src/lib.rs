@@ -127,7 +127,7 @@ pub async fn run(
                 let tls_stream = match acceptor.accept(tcp_stream).await {
                     Ok(s) => s,
                     Err(e) => {
-                        tracing::warn!("TLS accept failed from {}: {}", peer_addr, e);
+                        tracing::debug!("TLS accept failed from {}: {}", peer_addr, e);
                         return;
                     }
                 };
