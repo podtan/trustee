@@ -329,8 +329,9 @@ async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
 /// Usage: `trustee web [--addr 0.0.0.0:3000]`
 #[cfg(feature = "web")]
 async fn run_web_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    // Parse optional --addr argument
+    // Parse optional arguments
     let mut addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();
+    let mut no_tls = false;
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--addr" || args[i] == "-a" {
@@ -341,6 +342,9 @@ async fn run_web_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 eprintln!("Error: --addr requires a value (e.g. 0.0.0.0:3000)");
                 std::process::exit(1);
             }
+        } else if args[i] == "--no-tls" {
+            no_tls = true;
+            i += 1;
         } else {
             i += 1;
         }
@@ -387,9 +391,10 @@ async fn run_web_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     let merged_config = merge_config(&user_config_toml)?;
 
-    eprintln!("🌐 Starting Trustee Web on http://{}", addr);
+    let scheme = if no_tls { "http" } else { "https" };
+    eprintln!("🌐 Starting Trustee Web on {}://{}", scheme, addr);
 
-    trustee_api::run(merged_config, secrets, build_info(), addr).await?;
+    trustee_api::run(merged_config, secrets, build_info(), addr, !no_tls).await?;
 
     Ok(())
 }

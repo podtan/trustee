@@ -8,6 +8,7 @@
 //! token. Otherwise, all endpoints are open.
 
 pub mod auth;
+pub mod tls;
 mod routes;
 mod state;
 
@@ -29,11 +30,15 @@ pub use state::ServerState;
 ///
 /// If `[oidc]` or `[dev]` sections are found in the config TOML, auth is
 /// enabled — all `/api/v1/*` endpoints (except health) require a valid token.
+///
+/// By default serves over HTTPS using a self-signed certificate from
+/// `~/.trustee/certs/`. If `use_tls` is false, serves plain HTTP.
 pub async fn run(
     config_toml: String,
     secrets: std::collections::HashMap<String, String>,
     build_info: trustee_core::types::BuildInfo,
     addr: SocketAddr,
+    use_tls: bool,
 ) -> Result<()> {
     // Parse auth config from TOML (returns None if no [oidc] or [dev] sections)
     let auth_state = AuthConfig::from_toml(&config_toml).map(|cfg| {
@@ -88,8 +93,53 @@ pub async fn run(
 
     // Start server
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("Trustee API listening on http://{}", addr);
-    axum::serve(listener, app).await?;
+
+    if use_tls {
+        // Ensure self-signed certs exist
+        let cert_dir = tls::default_cert_dir();
+        let (cert_path, key_path) = tls::ensure_certs(&cert_dir)?;
+
+        // Load TLS config
+        let tls_config = tls::load_tls_config(&cert_path, &key_path)?;
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls_config));
+
+        tracing::info!("Trustee API listening on https://{}", addr);
+
+        // Manual accept loop — spawn hyper-util auto connection per TLS stream
+        loop {
+            let (tcp_stream, peer_addr) = match listener.accept().await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    tracing::warn!("TCP accept failed: {}", e);
+                    continue;
+                }
+            };
+
+            let acceptor = acceptor.clone();
+            let app = app.clone();
+
+            tokio::spawn(async move {
+                let tls_stream = match acceptor.accept(tcp_stream).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("TLS accept failed from {}: {}", peer_addr, e);
+                        return;
+                    }
+                };
+
+                // Use hyper-util auto builder with the tower service from axum
+                let io = hyper_util::rt::TokioIo::new(tls_stream);
+                let svc = hyper_util::service::TowerToHyperService::new(app);
+
+                let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection(io, svc)
+                    .await;
+            });
+        }
+    } else {
+        tracing::info!("Trustee API listening on http://{}", addr);
+        axum::serve(listener, app).await?;
+    }
 
     Ok(())
 }
