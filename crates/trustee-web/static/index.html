@@ -192,7 +192,7 @@
 
     /* Mobile: full-screen output, panel becomes slide-up bottom sheet */
     @media (max-width: 600px) {
-      #output { font-size: 15px; padding: 8px 10px 70px; line-height: 1.6; }
+      #output { font-size: 15px; padding: 8px 10px; line-height: 1.6; }
       #input { font-size: 16px; padding: 8px 10px; }
       #input-bar {
         padding: 6px 10px;
@@ -1057,7 +1057,10 @@ const fabPanelEl = document.getElementById('fab-panel');
 function syncFabPosition() {
   if (!isMobile()) return;
   const h = inputBar.offsetHeight;
+  // Position FAB above input bar
   fabPanelEl.style.bottom = (h + 12) + 'px';
+  // Set output padding-bottom so content doesn't go under fixed input bar
+  outputEl.style.paddingBottom = (h + 12) + 'px';
 }
 
 inputEl.addEventListener('input', () => {
@@ -1220,11 +1223,13 @@ window.addEventListener('resize', () => {
 });
 
 // --- Mobile keyboard handling ---
-// 100dvh handles most modern browsers, but visualViewport is needed
-// for older Android browsers where the keyboard overlaps content.
+// 100dvh handles the keyboard in modern browsers (Chrome 108+, Firefox 101+).
+// The visualViewport body height hack was removed because it caused a black box
+// to appear over the output when the Android keyboard opened (body height shrank
+// but content was already taller, leaving a black void).
+// We only sync the FAB position on viewport resize now.
 if (window.visualViewport) {
   const handleViewport = () => {
-    document.body.style.height = window.visualViewport.height + 'px';
     syncFabPosition();
   };
   window.visualViewport.addEventListener('resize', handleViewport);
