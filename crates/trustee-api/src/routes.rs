@@ -13,6 +13,17 @@ use tokio::sync::broadcast;
 
 use crate::ServerState;
 
+/// Attach a `Set-Cookie` header to a response if the cookie value is present.
+/// Used for rolling session cookies from `check_auth`.
+fn with_rolling_cookie(mut response: Response, cookie: Option<String>) -> Response {
+    if let Some(cookie_str) = cookie {
+        if let Ok(value) = cookie_str.parse() {
+            response.headers_mut().insert(header::SET_COOKIE, value);
+        }
+    }
+    response
+}
+
 // ---------------------------------------------------------------------------
 // DTOs
 // ---------------------------------------------------------------------------
@@ -68,8 +79,8 @@ pub async fn health() -> Json<HealthResponse> {
 pub async fn get_session(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<SessionResponse>, StatusCode> {
-    crate::auth::check_auth(&state.auth, &headers).await?;
+) -> Result<Response, StatusCode> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
     let session = state.session.lock().await;
 
     let workflow_state = match session.workflow_state {
@@ -89,7 +100,7 @@ pub async fn get_session(
         })
         .collect();
 
-    Ok(Json(SessionResponse {
+    let resp = Json(SessionResponse {
         workflow_state: workflow_state.to_string(),
         output_lines: session.output_lines.clone(),
         todo_lines: session.todo_lines.clone(),
@@ -97,7 +108,8 @@ pub async fn get_session(
         context_tokens: session.current_context_tokens,
         input: session.input.clone(),
         resume_info_present: session.resume_info.is_some(),
-    }))
+    });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
 /// POST /api/v1/session/command — submit a command for execution.
@@ -105,8 +117,8 @@ pub async fn post_command(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
     Json(req): Json<CommandRequest>,
-) -> Result<Json<CommandResponse>, (StatusCode, String)> {
-    crate::auth::check_auth(&state.auth, &headers)
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
     {
@@ -127,15 +139,16 @@ pub async fn post_command(
     let state_msg = serde_json::json!({"type": "StateChanged", "state": "Running"});
     let _ = state.ws_tx.send(state_msg.to_string());
 
-    Ok(Json(CommandResponse { accepted: true }))
+    let resp = Json(CommandResponse { accepted: true });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
 /// POST /api/v1/session/cancel — cancel the running workflow.
 pub async fn post_cancel(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<CommandResponse>, StatusCode> {
-    crate::auth::check_auth(&state.auth, &headers).await?;
+) -> Result<Response, StatusCode> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
     let cancelled;
     {
         let session = state.session.lock().await;
@@ -152,19 +165,21 @@ pub async fn post_cancel(
         let _ = state.ws_tx.send(state_msg.to_string());
     }
 
-    Ok(Json(CommandResponse { accepted: true }))
+    let resp = Json(CommandResponse { accepted: true });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
 /// POST /api/v1/session/handoff — trigger session handoff.
 pub async fn post_handoff(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<CommandResponse>, StatusCode> {
-    crate::auth::check_auth(&state.auth, &headers).await?;
+) -> Result<Response, StatusCode> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
     let mut session = state.session.lock().await;
     session.trigger_handoff(String::new());
 
-    Ok(Json(CommandResponse { accepted: true }))
+    let resp = Json(CommandResponse { accepted: true });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
 /// GET /api/v1/session/stream — WebSocket for live message streaming.
@@ -173,7 +188,7 @@ pub async fn ws_handler(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, StatusCode> {
-    crate::auth::check_auth(&state.auth, &headers).await?;
+    let _cookie = crate::auth::check_auth(&state.auth, &headers).await?;
     Ok(ws.on_upgrade(move |socket| handle_ws(socket, state)))
 }
 

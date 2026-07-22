@@ -319,11 +319,16 @@ impl From<JwtClaims> for AuthUser {
     }
 }
 
+/// Cookie max-age for session cookies (1 hour, matching the server-side idle timeout).
+const SESSION_COOKIE_MAX_AGE: StdDuration = StdDuration::from_secs(3600);
+
 /// Check authentication for a protected endpoint.
 ///
-/// Returns `Ok(())` if auth is not configured (open mode), or if a valid
-/// token is present. Returns `Err(StatusCode::UNAUTHORIZED)` if auth is
-/// configured but no valid token is found.
+/// Returns `Ok(None)` if auth is not configured (open mode), or if a valid
+/// token is present without needing cookie renewal. Returns `Ok(Some(cookie))`
+/// if auth succeeded and the caller should include the given `Set-Cookie`
+/// header value in the response (rolling session). Returns `Err(StatusCode)`
+/// if auth is configured but no valid token is found.
 ///
 /// Token sources (in order):
 /// 1. `Authorization: Bearer <token>` header (raw JWT — validated directly)
@@ -334,9 +339,9 @@ impl From<JwtClaims> for AuthUser {
 pub async fn check_auth(
     auth: &Option<Arc<AuthState>>,
     headers: &axum::http::HeaderMap,
-) -> Result<(), StatusCode> {
+) -> Result<Option<String>, StatusCode> {
     let Some(auth) = auth.as_ref() else {
-        return Ok(()); // Auth not configured — allow
+        return Ok(None); // Auth not configured — allow
     };
 
     // 1. Try Bearer header first (raw JWT — e.g. from API clients, Torpi proxy)
@@ -350,14 +355,14 @@ pub async fn check_auth(
         if token.starts_with("dev:") {
             let parts: Vec<&str> = token.splitn(4, ':').collect();
             return if parts.len() >= 4 {
-                Ok(())
+                Ok(None)
             } else {
                 Err(StatusCode::UNAUTHORIZED)
             };
         }
 
         return match auth.validate_token(&token).await {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(None),
             Err(e) => {
                 tracing::warn!("Bearer token validation failed: {}", e);
                 Err(StatusCode::UNAUTHORIZED)
@@ -380,7 +385,7 @@ pub async fn check_auth(
     if session_id.starts_with("dev:") {
         let parts: Vec<&str> = session_id.splitn(4, ':').collect();
         return if parts.len() >= 4 {
-            Ok(())
+            Ok(None)
         } else {
             Err(StatusCode::UNAUTHORIZED)
         };
@@ -389,7 +394,17 @@ pub async fn check_auth(
     // Session-based: look up via WebSessionManager (auto-refreshes)
     match auth.session_manager.get_token(&session_id).await {
         Ok(access_token) => match auth.validate_token(&access_token).await {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                // Roll the cookie — reset max-age so active users stay logged in
+                let secure = auth.client_config.redirect_uri.starts_with("https");
+                let cookie = create_auth_cookie(
+                    &auth.config.cookie_name,
+                    &session_id,
+                    SESSION_COOKIE_MAX_AGE,
+                    secure,
+                );
+                Ok(Some(cookie.to_string()))
+            }
             Err(e) => {
                 tracing::warn!("Session token validation failed: {}", e);
                 Err(StatusCode::UNAUTHORIZED)
@@ -579,9 +594,9 @@ async fn callback_handler(
         .await
         .map_err(|e| AuthError::TokenExchangeFailed(format!("Session creation failed: {}", e)))?;
 
-    // Cookie lifetime: use a long max-age since refresh is handled server-side.
-    // The session_id is opaque and doesn't expire when the access token does.
-    let max_age = StdDuration::from_secs(86400 * 7); // 7 days
+    // Cookie lifetime matches server-side idle timeout (1 hour).
+    // The cookie is rolled on every successful request via check_auth().
+    let max_age = SESSION_COOKIE_MAX_AGE;
 
     // Set auth cookie — Secure only when redirect_uri is HTTPS
     let secure = auth.client_config.redirect_uri.starts_with("https");
