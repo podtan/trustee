@@ -406,8 +406,31 @@ pub async fn check_auth(
                 Ok(Some(cookie.to_string()))
             }
             Err(e) => {
-                tracing::warn!("Session token validation failed: {}", e);
-                Err(StatusCode::UNAUTHORIZED)
+                // Token was returned but JWT validation failed (e.g. ExpiredSignature
+                // due to clock skew). Force-refresh and retry once.
+                tracing::warn!("Session token validation failed: {} — attempting force-refresh", e);
+                match auth.session_manager.force_refresh(&session_id).await {
+                    Ok(new_token) => match auth.validate_token(&new_token).await {
+                        Ok(_) => {
+                            let secure = auth.client_config.redirect_uri.starts_with("https");
+                            let cookie = create_auth_cookie(
+                                &auth.config.cookie_name,
+                                &session_id,
+                                SESSION_COOKIE_MAX_AGE,
+                                secure,
+                            );
+                            Ok(Some(cookie.to_string()))
+                        }
+                        Err(e2) => {
+                            tracing::warn!("Session token still invalid after force-refresh: {}", e2);
+                            Err(StatusCode::UNAUTHORIZED)
+                        }
+                    },
+                    Err(e2) => {
+                        tracing::warn!("Force-refresh failed: {}", e2);
+                        Err(StatusCode::UNAUTHORIZED)
+                    }
+                }
             }
         },
         Err(e) => {
