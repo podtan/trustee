@@ -42,7 +42,7 @@ tokio-util = { version = "0.7", optional = true }
 trustee-tui = { version = "0.1.55", path = "crates/trustee-tui", optional = true }
 # Web/API dependencies (optional)
 trustee-core = { version = "0.1.5", path = "crates/trustee-core", optional = true }
-trustee-api = { version = "0.1.5", path = "crates/trustee-api", optional = true }
+trustee-api = { version = "0.1.6", path = "crates/trustee-api", optional = true }
 # Tracing for web server logging (optional, used by trustee-api)
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }

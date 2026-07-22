@@ -25,6 +25,7 @@ use axum_extra::extract::cookie::{Cookie, SameSite};
 use pep::oidc_client::OidcClient;
 use pep::oidc_resource_server::ResourceServerClient;
 use pep::oidc::pkce_cookie::PkceCookieManager;
+use pep::session_manager::WebSessionManager;
 use pep::{DevConfig, JwtClaims, JwtValidationOptions, OidcClientConfig};
 use serde::Deserialize;
 use time::Duration as TimeDuration;
@@ -178,6 +179,8 @@ pub struct AuthState {
     pub config: AuthConfig,
     /// Stateless PKCE cookie manager
     pub pkce_manager: PkceCookieManager,
+    /// Web session manager (cookie session_id → server-side token with auto-refresh)
+    pub session_manager: Arc<WebSessionManager>,
 }
 
 impl AuthState {
@@ -189,11 +192,20 @@ impl AuthState {
             StdDuration::from_secs(600),
         );
 
+        let session_manager = Arc::new(WebSessionManager::new(
+            OidcClient::new(),
+            config.issuer_url.clone(),
+            config.client_id.clone(),
+            config.client_secret.clone(),
+            config.scope.clone(),
+        ));
+
         Self {
             oidc_client: OidcClient::new(),
             resource_server: ResourceServerClient::new(),
             client_config: config.oidc_client_config(),
             pkce_manager,
+            session_manager,
             config,
         }
     }
@@ -314,8 +326,9 @@ impl From<JwtClaims> for AuthUser {
 /// configured but no valid token is found.
 ///
 /// Token sources (in order):
-/// 1. `Authorization: Bearer <token>` header
-/// 2. `trustee_token=<token>` cookie
+/// 1. `Authorization: Bearer <token>` header (raw JWT — validated directly)
+/// 2. `trustee_token=<session_id>` cookie (looked up in WebSessionManager,
+///    auto-refreshed if near expiry)
 ///
 /// Dev mode tokens use the format `dev:email:name:username`.
 pub async fn check_auth(
@@ -326,40 +339,101 @@ pub async fn check_auth(
         return Ok(()); // Auth not configured — allow
     };
 
-    // Extract token
-    let token = headers
+    // 1. Try Bearer header first (raw JWT — e.g. from API clients, Torpi proxy)
+    if let Some(token) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_string())
-        .or_else(|| {
-            headers
-                .get(header::COOKIE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|cookies| extract_token_from_cookies(cookies, &auth.config.cookie_name))
-        });
+    {
+        // Dev mode token
+        if token.starts_with("dev:") {
+            let parts: Vec<&str> = token.splitn(4, ':').collect();
+            return if parts.len() >= 4 {
+                Ok(())
+            } else {
+                Err(StatusCode::UNAUTHORIZED)
+            };
+        }
 
-    let Some(token) = token else {
+        return match auth.validate_token(&token).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!("Bearer token validation failed: {}", e);
+                Err(StatusCode::UNAUTHORIZED)
+            }
+        };
+    }
+
+    // 2. Try cookie (session_id → WebSessionManager → access token with auto-refresh)
+    let session_id = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| extract_token_from_cookies(cookies, &auth.config.cookie_name));
+
+    let Some(session_id) = session_id else {
         tracing::warn!("No auth token found in request");
         return Err(StatusCode::UNAUTHORIZED);
     };
 
-    // Dev mode token
-    if token.starts_with("dev:") {
-        let parts: Vec<&str> = token.splitn(4, ':').collect();
-        if parts.len() >= 4 {
-            return Ok(());
-        }
-        return Err(StatusCode::UNAUTHORIZED);
+    // Dev mode token in cookie
+    if session_id.starts_with("dev:") {
+        let parts: Vec<&str> = session_id.splitn(4, ':').collect();
+        return if parts.len() >= 4 {
+            Ok(())
+        } else {
+            Err(StatusCode::UNAUTHORIZED)
+        };
     }
 
-    // Real JWT — validate via PEP ResourceServerClient
-    match auth.validate_token(&token).await {
-        Ok(_) => Ok(()),
+    // Session-based: look up via WebSessionManager (auto-refreshes)
+    match auth.session_manager.get_token(&session_id).await {
+        Ok(access_token) => match auth.validate_token(&access_token).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!("Session token validation failed: {}", e);
+                Err(StatusCode::UNAUTHORIZED)
+            }
+        },
         Err(e) => {
-            tracing::warn!("Token validation failed: {}", e);
+            tracing::warn!("Session lookup/refresh failed: {}", e);
             Err(StatusCode::UNAUTHORIZED)
         }
+    }
+}
+
+/// Extract a valid access token from the request (for use by handlers that
+/// need the token itself, not just auth checking).
+///
+/// Resolves session_id cookies to actual access tokens via WebSessionManager.
+/// Bearer headers are returned as-is.
+async fn resolve_access_token(
+    auth: &AuthState,
+    headers: &axum::http::HeaderMap,
+) -> Result<String, StatusCode> {
+    // Bearer header — return as-is
+    if let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+    {
+        return Ok(token);
+    }
+
+    // Cookie — resolve session_id → access_token
+    let session_id = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| extract_token_from_cookies(cookies, &auth.config.cookie_name));
+
+    match session_id {
+        Some(sid) if sid.starts_with("dev:") => Ok(sid),
+        Some(sid) => auth.session_manager.get_token(&sid).await.map_err(|e| {
+            tracing::warn!("Failed to resolve session token: {}", e);
+            StatusCode::UNAUTHORIZED
+        }),
+        None => Err(StatusCode::UNAUTHORIZED),
     }
 }
 
@@ -499,15 +573,19 @@ async fn callback_handler(
         .await
         .map_err(|e| AuthError::TokenExchangeFailed(e.to_string()))?;
 
-    let auth_token = token_response.access_token;
-    let max_age = token_response
-        .expires_in
-        .map(StdDuration::from_secs)
-        .unwrap_or(StdDuration::from_secs(3600));
+    let session_id = auth
+        .session_manager
+        .create_session(&token_response)
+        .await
+        .map_err(|e| AuthError::TokenExchangeFailed(format!("Session creation failed: {}", e)))?;
+
+    // Cookie lifetime: use a long max-age since refresh is handled server-side.
+    // The session_id is opaque and doesn't expire when the access token does.
+    let max_age = StdDuration::from_secs(86400 * 7); // 7 days
 
     // Set auth cookie — Secure only when redirect_uri is HTTPS
     let secure = auth.client_config.redirect_uri.starts_with("https");
-    let cookie = create_auth_cookie(&auth.config.cookie_name, &auth_token, max_age, secure);
+    let cookie = create_auth_cookie(&auth.config.cookie_name, &session_id, max_age, secure);
 
     // Clear PKCE cookie (single-use)
     let clear_pkce = Cookie::build((auth.pkce_manager.cookie_name().to_string(), ""))
@@ -554,9 +632,9 @@ async fn me_handler(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(String::from);
 
-    let token = bearer.or_else(|| extract_token_from_cookies(cookie_header, &auth.config.cookie_name));
+    let token = bearer.clone().or_else(|| extract_token_from_cookies(cookie_header, &auth.config.cookie_name));
 
-    let Some(token) = token else {
+    let Some(cookie_value) = token else {
         return axum::Json(serde_json::json!({
             "authenticated": false,
             "auth_enabled": true
@@ -564,9 +642,9 @@ async fn me_handler(
         .into_response();
     };
 
-    // Dev mode token
-    if token.starts_with("dev:") {
-        let parts: Vec<&str> = token.splitn(4, ':').collect();
+    // Dev mode token (stored directly in cookie, no session manager)
+    if cookie_value.starts_with("dev:") {
+        let parts: Vec<&str> = cookie_value.splitn(4, ':').collect();
         if parts.len() >= 4 {
             return axum::Json(serde_json::json!({
                 "authenticated": true,
@@ -580,8 +658,27 @@ async fn me_handler(
         }
     }
 
+    // Bearer header = raw JWT; Cookie value = session_id → resolve to access token
+    let access_token = if bearer.is_some() {
+        // Already have the raw token from Bearer header
+        cookie_value
+    } else {
+        // Cookie value is a session_id — resolve via WebSessionManager
+        match auth.session_manager.get_token(&cookie_value).await {
+            Ok(token) => token,
+            Err(e) => {
+                tracing::debug!("Session token resolution failed for /auth/me: {}", e);
+                return axum::Json(serde_json::json!({
+                    "authenticated": false,
+                    "auth_enabled": true
+                }))
+                .into_response();
+            }
+        }
+    };
+
     // Real JWT — validate and return claims
-    match auth.validate_token(&token).await {
+    match auth.validate_token(&access_token).await {
         Ok(claims) => axum::Json(serde_json::json!({
             "authenticated": true,
             "auth_enabled": true,
@@ -603,15 +700,27 @@ async fn me_handler(
     }
 }
 
-/// POST /auth/logout — clear auth cookie.
+/// POST /auth/logout — destroy session and clear auth cookie.
 async fn logout_handler(
     State(state): State<crate::ServerState>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     let cookie_name = state
         .auth
         .as_ref()
         .map(|a| a.config.cookie_name.as_str())
         .unwrap_or("trustee_token");
+
+    // Destroy the session on the server side
+    if let Some(ref auth) = state.auth {
+        if let Some(cookie_header) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+            if let Some(session_id) = extract_token_from_cookies(cookie_header, cookie_name) {
+                if !session_id.starts_with("dev:") {
+                    let _ = auth.session_manager.destroy_session(&session_id);
+                }
+            }
+        }
+    }
 
     let cookie = Cookie::build((cookie_name.to_string(), ""))
         .path("/")

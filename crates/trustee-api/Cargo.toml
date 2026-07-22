@@ -1,6 +1,6 @@
 [package]
 name = "trustee-api"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "REST + WebSocket API server for Trustee agent"
 license = "MIT OR Apache-2.0"
@@ -36,7 +36,7 @@ mime_guess = "2"
 # Stream utilities for WebSocket split
 futures = "0.3"
 # OIDC auth (resource server: JWT validation + optional login flow)
-pep = { version = "0.4", features = ["oidc", "axum", "config"] }
+pep = { version = "0.4", features = ["oidc", "axum", "config", "token-provider"] }
 # HTTP client for OAuth code exchange (rustls)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
 # URL parsing
