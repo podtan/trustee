@@ -10,7 +10,7 @@ categories = ["command-line-utilities", "web-programming"]
 
 [dependencies]
 # Core shared types and workflow logic
-trustee-core = { version = "0.1.5", path = "../trustee-core" }
+trustee-core = { version = "0.1.6", path = "../trustee-core" }
 # Embedded web frontend
 trustee-web = { version = "0.1.5", path = "../trustee-web" }
 # Web framework (rustls for static Pi/ARM builds)
