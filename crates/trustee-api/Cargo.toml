@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "web-programming"]
 # Core shared types and workflow logic
 trustee-core = { version = "0.1.7", path = "../trustee-core" }
 # Embedded web frontend
-trustee-web = { version = "0.1.5", path = "../trustee-web" }
+trustee-web = { version = "0.1.6", path = "../trustee-web" }
 # Web framework (rustls for static Pi/ARM builds)
 axum = { version = "0.8", features = ["ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }

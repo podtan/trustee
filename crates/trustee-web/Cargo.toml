@@ -1,6 +1,6 @@
 [package]
 name = "trustee-web"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "Static web frontend for Trustee agent (embedded via rust-embed)"
 license = "MIT OR Apache-2.0"
