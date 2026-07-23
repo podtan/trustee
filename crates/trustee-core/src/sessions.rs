@@ -253,6 +253,7 @@ pub async fn create_resume_info(
                     session_id: session_id.to_string(),
                     checkpoint_id: latest.checkpoint_id.clone(),
                     iteration: latest.iteration,
+                    project_path: Some(project.project_path.clone()),
                 }));
             }
 
