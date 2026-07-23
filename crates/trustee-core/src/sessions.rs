@@ -110,15 +110,23 @@ pub async fn list_all_sessions(config_toml: &str) -> anyhow::Result<Vec<SessionS
     let mut summaries = Vec::new();
 
     for project in &projects {
-        let project_storage = manager
-            .get_project_storage(&project.project_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get project storage: {}", e))?;
+        // Skip projects whose path can't be resolved (e.g. deleted dirs,
+        // permission denied) — don't let one bad project kill the whole list.
+        let project_storage = match manager.get_project_storage(&project.project_path).await {
+            Ok(ps) => ps,
+            Err(e) => {
+                tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
+                continue;
+            }
+        };
 
-        let sessions = project_storage
-            .list_sessions()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to list sessions: {}", e))?;
+        let sessions = match project_storage.list_sessions().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!("Failed to list sessions for {}: {}", project.project_path.display(), e);
+                continue;
+            }
+        };
 
         let is_current = paths_match(&project.project_path, &current_dir);
 
@@ -157,15 +165,21 @@ pub async fn get_session_detail(
         .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
 
     for project in &projects {
-        let project_storage = manager
-            .get_project_storage(&project.project_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get project storage: {}", e))?;
+        let project_storage = match manager.get_project_storage(&project.project_path).await {
+            Ok(ps) => ps,
+            Err(e) => {
+                tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
+                continue;
+            }
+        };
 
-        let sessions = project_storage
-            .list_sessions()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to list sessions: {}", e))?;
+        let sessions = match project_storage.list_sessions().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!("Failed to list sessions for {}: {}", project.project_path.display(), e);
+                continue;
+            }
+        };
 
         if let Some(session) = sessions.iter().find(|s| s.session_id == session_id) {
             let session_storage = project_storage
@@ -207,15 +221,21 @@ pub async fn create_resume_info(
         .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
 
     for project in &projects {
-        let project_storage = manager
-            .get_project_storage(&project.project_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get project storage: {}", e))?;
+        let project_storage = match manager.get_project_storage(&project.project_path).await {
+            Ok(ps) => ps,
+            Err(e) => {
+                tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
+                continue;
+            }
+        };
 
-        let sessions = project_storage
-            .list_sessions()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to list sessions: {}", e))?;
+        let sessions = match project_storage.list_sessions().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!("Failed to list sessions for {}: {}", project.project_path.display(), e);
+                continue;
+            }
+        };
 
         if sessions.iter().any(|s| s.session_id == session_id) {
             let session_storage = project_storage

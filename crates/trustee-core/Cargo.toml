@@ -22,3 +22,5 @@ chrono = { version = "0.4", features = ["serde"] }
 abk = { version = "0.8.2", features = ["cli", "orchestration", "agent", "observability"] }
 # Config parsing
 toml = "0.8"
+# Structured logging (used by sessions module for debug logging)
+tracing = "0.1"
