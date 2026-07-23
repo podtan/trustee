@@ -351,8 +351,12 @@ pub async fn check_auth(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_string())
     {
-        // Dev mode token
+        // Dev mode token — only accepted when dev mode is currently enabled
         if token.starts_with("dev:") {
+            if !auth.config.dev_config.local_dev_mode {
+                tracing::warn!("Dev token presented but dev mode is disabled — rejecting");
+                return Err(StatusCode::UNAUTHORIZED);
+            }
             let parts: Vec<&str> = token.splitn(4, ':').collect();
             return if parts.len() >= 4 {
                 Ok(None)
@@ -381,8 +385,12 @@ pub async fn check_auth(
         return Err(StatusCode::UNAUTHORIZED);
     };
 
-    // Dev mode token in cookie
+    // Dev mode token in cookie — only accepted when dev mode is currently enabled
     if session_id.starts_with("dev:") {
+        if !auth.config.dev_config.local_dev_mode {
+            tracing::warn!("Dev cookie presented but dev mode is disabled — rejecting");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
         let parts: Vec<&str> = session_id.splitn(4, ':').collect();
         return if parts.len() >= 4 {
             Ok(None)
@@ -466,7 +474,14 @@ async fn resolve_access_token(
         .and_then(|cookies| extract_token_from_cookies(cookies, &auth.config.cookie_name));
 
     match session_id {
-        Some(sid) if sid.starts_with("dev:") => Ok(sid),
+        Some(sid) if sid.starts_with("dev:") => {
+            if !auth.config.dev_config.local_dev_mode {
+                tracing::warn!("Dev cookie in resolve_access_token but dev mode is disabled — rejecting");
+                Err(StatusCode::UNAUTHORIZED)
+            } else {
+                Ok(sid)
+            }
+        }
         Some(sid) => auth.session_manager.get_token(&sid).await.map_err(|e| {
             tracing::warn!("Failed to resolve session token: {}", e);
             StatusCode::UNAUTHORIZED
@@ -681,7 +696,8 @@ async fn me_handler(
     };
 
     // Dev mode token (stored directly in cookie, no session manager)
-    if cookie_value.starts_with("dev:") {
+    // Only report as authenticated when dev mode is currently enabled
+    if cookie_value.starts_with("dev:") && auth.config.dev_config.local_dev_mode {
         let parts: Vec<&str> = cookie_value.splitn(4, ':').collect();
         if parts.len() >= 4 {
             return axum::Json(serde_json::json!({
