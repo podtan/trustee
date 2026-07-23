@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use abk::checkpoint::{
     get_storage_manager,
-    models::{CheckpointMetadata, SessionMetadata as AbkSessionMetadata},
+    models::{CheckpointMetadata, ChatMessage, SessionMetadata as AbkSessionMetadata},
     storage::ProjectMetadata as AbkProjectMetadata,
 };
 use abk::cli::ResumeInfo;
@@ -262,4 +262,245 @@ pub async fn create_resume_info(
     }
 
     Ok(None)
+}
+
+// -----------------------------------------------------------------------
+// Conversation history loading
+// -----------------------------------------------------------------------
+
+/// A single chat message rendered in the Web UI conversation history.
+///
+/// Each message maps to how the TUI/Web already renders things:
+/// - `user` messages → right-aligned chat bubble
+/// - `assistant` messages → left-aligned agent bubble (markdown)
+/// - `assistant` with `tool_calls` → tool-pending/tool-done lines
+/// - `tool` messages → hidden (tool results are shown via tool_calls)
+/// - `reasoning` → collapsible reasoning section
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryMessage {
+    /// "user", "assistant", or "tool"
+    pub role: String,
+    /// Main message text
+    pub content: String,
+    /// Reasoning/thinking content (if any)
+    pub reasoning: Option<String>,
+    /// Tool calls (assistant messages that invoke tools)
+    pub tool_calls: Option<Vec<HistoryToolCall>>,
+    /// Tool name (for tool-role messages)
+    pub name: Option<String>,
+}
+
+/// A tool call within a message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryToolCall {
+    pub name: String,
+    /// Short description of what the tool was called with (for display)
+    pub hint: String,
+}
+
+/// Metadata about the session/task for the history header.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionHistory {
+    pub session_id: String,
+    pub checkpoint_id: String,
+    pub task_description: String,
+    pub iteration: u32,
+    pub total_messages: usize,
+    pub messages: Vec<HistoryMessage>,
+}
+
+/// Load conversation history from a session's latest checkpoint.
+///
+/// Returns messages suitable for rendering in the Web UI. System messages
+/// are filtered out, tool results are summarized, and reasoning is
+/// preserved separately.
+pub async fn load_session_history(
+    session_id: &str,
+) -> anyhow::Result<Option<SessionHistory>> {
+    let manager = get_storage_manager()
+        .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e))?;
+
+    let projects = manager
+        .list_projects()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
+
+    for project in &projects {
+        let project_storage = match manager.get_project_storage(&project.project_path).await {
+            Ok(ps) => ps,
+            Err(e) => {
+                tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
+                continue;
+            }
+        };
+
+        let sessions = match project_storage.list_sessions().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!("Failed to list sessions for {}: {}", project.project_path.display(), e);
+                continue;
+            }
+        };
+
+        if !sessions.iter().any(|s| s.session_id == session_id) {
+            continue;
+        }
+
+        let session_storage = project_storage
+            .create_session(session_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get session storage: {}", e))?;
+
+        let checkpoints = session_storage
+            .list_checkpoints()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list checkpoints: {}", e))?;
+
+        let latest = match checkpoints.iter().max_by_key(|cp| cp.created_at) {
+            Some(cp) => cp,
+            None => return Ok(None),
+        };
+
+        let checkpoint_id = latest.checkpoint_id.clone();
+        let iteration = latest.iteration;
+
+        let checkpoint = session_storage
+            .load_checkpoint(&checkpoint_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to load checkpoint: {}", e))?;
+
+        let task_description = checkpoint.agent_state.task_description.clone();
+        let total_messages = checkpoint.conversation_state.messages.len();
+
+        let messages = convert_messages(&checkpoint.conversation_state.messages);
+
+        return Ok(Some(SessionHistory {
+            session_id: session_id.to_string(),
+            checkpoint_id,
+            task_description,
+            iteration,
+            total_messages,
+            messages,
+        }));
+    }
+
+    Ok(None)
+}
+
+/// Convert ABK `ChatMessage`s to Web UI-friendly `HistoryMessage`s.
+///
+/// - System messages are dropped (not useful in UI)
+/// - Tool-role messages are dropped (tool results shown via assistant's tool_calls)
+/// - Very long content is truncated to avoid massive payloads
+fn convert_messages(messages: &[ChatMessage]) -> Vec<HistoryMessage> {
+    const MAX_CONTENT_LEN: usize = 10_000;
+
+    let mut result = Vec::new();
+
+    for msg in messages {
+        // Skip system messages — not useful in the conversation view
+        if msg.role == "system" {
+            continue;
+        }
+
+        // Skip tool-role messages — tool results are shown via the
+        // assistant's tool_calls and a compact tool-done line
+        if msg.role == "tool" {
+            continue;
+        }
+
+        let content = if msg.content.len() > MAX_CONTENT_LEN {
+            format!("{}...\n[truncated]", &msg.content[..MAX_CONTENT_LEN])
+        } else {
+            msg.content.clone()
+        };
+
+        // Convert tool calls if present
+        let tool_calls = msg.tool_calls.as_ref().map(|calls| {
+            calls
+                .iter()
+                .map(|tc| {
+                    let hint = summarize_tool_args(&tc.function.name, &tc.function.arguments);
+                    HistoryToolCall {
+                        name: tc.function.name.clone(),
+                        hint,
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+
+        // For assistant messages that only contain tool calls (empty content),
+        // we still emit them so tool call lines render
+        if msg.role == "assistant" && content.is_empty() && tool_calls.is_some() {
+            result.push(HistoryMessage {
+                role: "assistant".to_string(),
+                content: String::new(),
+                reasoning: msg.reasoning.clone(),
+                tool_calls,
+                name: None,
+            });
+            continue;
+        }
+
+        result.push(HistoryMessage {
+            role: msg.role.clone(),
+            content,
+            reasoning: msg.reasoning.clone(),
+            tool_calls,
+            name: msg.name.clone(),
+        });
+    }
+
+    result
+}
+
+/// Create a short human-readable hint from tool call arguments.
+///
+/// e.g. `{"command": "ls -la /tmp"}` → `ls -la /tmp`
+///      `{"file_path": "/foo/bar.rs"}` → `/foo/bar.rs`
+fn summarize_tool_args(name: &str, args: &str) -> String {
+    let parsed: serde_json::Value = match serde_json::from_str(args) {
+        Ok(v) => v,
+        Err(_) => return args.chars().take(200).collect(),
+    };
+
+    let obj = match parsed.as_object() {
+        Some(o) => o,
+        None => return args.chars().take(200).collect(),
+    };
+
+    match name {
+        "bash" | "execute_command" => {
+            obj.get("command").and_then(|v| v.as_str()).map(|s| s.to_string())
+        }
+        "read" | "read_file" => {
+            obj.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string())
+        }
+        "write" | "write_file" | "edit" => {
+            obj.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string())
+        }
+        "grep" | "search" => {
+            obj.get("pattern").and_then(|v| v.as_str()).map(|s| s.to_string())
+        }
+        "glob" => {
+            obj.get("pattern").and_then(|v| v.as_str()).map(|s| s.to_string())
+        }
+        "todowrite" => {
+            let count = obj.get("todos").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            Some(format!("{} items", count))
+        }
+        "websearch" | "webfetch" => {
+            obj.get("query").or_else(|| obj.get("url")).and_then(|v| v.as_str()).map(|s| s.to_string())
+        }
+        _ => {
+            obj.values().next().and_then(|v| match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                _ => Some(v.to_string()),
+            })
+        }
+    }
+    .unwrap_or_default()
+    .chars()
+    .take(200)
+    .collect()
 }

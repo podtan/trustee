@@ -93,6 +93,16 @@ pub struct ResumeRequestBody {
     pub checkpoint_id: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SessionHistoryResponse {
+    pub session_id: String,
+    pub checkpoint_id: String,
+    pub task_description: String,
+    pub iteration: u32,
+    pub total_messages: usize,
+    pub messages: Vec<trustee_core::sessions::HistoryMessage>,
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -431,6 +441,37 @@ pub async fn resume_session(
         iteration,
     });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
+/// GET /api/v1/sessions/{id}/history — load conversation history from
+/// the latest checkpoint for display in the Web UI.
+pub async fn get_session_history(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let history = trustee_core::sessions::load_session_history(&session_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match history {
+        Some(h) => {
+            let resp = Json(SessionHistoryResponse {
+                session_id: h.session_id,
+                checkpoint_id: h.checkpoint_id,
+                task_description: h.task_description,
+                iteration: h.iteration,
+                total_messages: h.total_messages,
+                messages: h.messages,
+            });
+            Ok(with_rolling_cookie(resp.into_response(), cookie))
+        }
+        None => Err((StatusCode::NOT_FOUND, "Session not found".to_string())),
+    }
 }
 
 // ---------------------------------------------------------------------------

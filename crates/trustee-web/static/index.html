@@ -1484,19 +1484,116 @@ async function resumeSession(sessionId, checkpointCount) {
     outputEl.innerHTML = '';
     window._hasSession = true;
 
-    // Re-render with a resume banner
+    // Resume banner
     const banner = document.createElement('div');
     banner.className = 'line warn';
-    banner.textContent = `🔄 Resumed from checkpoint "${data.checkpoint_id}" (iteration ${data.iteration}) — type to continue`;
+    banner.textContent = `🔄 Resumed from checkpoint "${data.checkpoint_id}" (iteration ${data.iteration})`;
     outputEl.appendChild(banner);
+
+    // Fetch and render conversation history
+    try {
+      const histRes = await fetch(API + '/api/v1/sessions/' + encodeURIComponent(sessionId) + '/history');
+      if (histRes.ok) {
+        const histData = await histRes.json();
+        renderHistory(histData);
+      }
+    } catch(e) {
+      // History loading is best-effort — don't fail the resume
+    }
+
+    // Hint to continue
+    const hint = document.createElement('div');
+    hint.className = 'line info';
+    hint.textContent = `Type to continue this session...`;
+    outputEl.appendChild(hint);
 
     showToast(`Session resumed — ${checkpointCount} checkpoint${checkpointCount !== 1 ? 's' : ''} loaded`, 'success');
 
     // Enable input
     document.getElementById('btn-handoff').disabled = false;
     document.getElementById('input').focus();
+    if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
   } catch (e) {
     showToast('Failed to resume session.', 'error');
+  }
+}
+
+// Render conversation history from checkpoint into the output area.
+// Reuses the same rendering patterns as live messages:
+// - user messages → right-aligned chat bubble
+// - assistant text → left-aligned agent bubble with markdown
+// - assistant tool_calls → tool-pending/tool-done lines
+// - reasoning → collapsible reasoning section
+function renderHistory(histData) {
+  if (!histData.messages || !histData.messages.length) return;
+
+  // Task description header
+  if (histData.task_description) {
+    const taskEl = document.createElement('div');
+    taskEl.className = 'line info';
+    taskEl.textContent = `📋 Task: ${histData.task_description}`;
+    outputEl.appendChild(taskEl);
+  }
+
+  for (const msg of histData.messages) {
+    // User message → chat bubble
+    if (msg.role === 'user') {
+      closeAgentBubble();
+      closeReasoningSection();
+      const wrap = document.createElement('div');
+      wrap.className = 'msg-user';
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.textContent = msg.content;
+      wrap.appendChild(bubble);
+      outputEl.appendChild(wrap);
+      continue;
+    }
+
+    // Assistant message
+    if (msg.role === 'assistant') {
+      // Reasoning → collapsible section
+      if (msg.reasoning && msg.reasoning.trim()) {
+        closeAgentBubble();
+        const details = document.createElement('details');
+        details.className = 'reasoning-section';
+        const summary = document.createElement('summary');
+        summary.textContent = '💭 Reasoning';
+        details.appendChild(summary);
+        const content = document.createElement('div');
+        content.className = 'reasoning-content';
+        content.textContent = msg.reasoning;
+        details.appendChild(content);
+        outputEl.appendChild(details);
+      }
+
+      // Tool calls → tool-done lines
+      if (msg.tool_calls && msg.tool_calls.length) {
+        closeAgentBubble();
+        for (const tc of msg.tool_calls) {
+          const div = document.createElement('div');
+          div.className = 'line tool-line success';
+          const label = tc.hint ? `${tc.name} ${tc.hint}` : tc.name;
+          div.textContent = '✓ ' + label;
+          outputEl.appendChild(div);
+        }
+      }
+
+      // Text content → agent bubble with markdown
+      if (msg.content && msg.content.trim()) {
+        closeReasoningSection();
+        const wrap = document.createElement('div');
+        wrap.className = 'msg-agent';
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble md';
+        bubble.innerHTML = renderMarkdown(msg.content);
+        highlightCodeIn(bubble);
+        wrap.appendChild(bubble);
+        outputEl.appendChild(wrap);
+      }
+
+      continue;
+    }
   }
 }
 
