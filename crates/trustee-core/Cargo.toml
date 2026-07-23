@@ -20,7 +20,7 @@ serde_json = "1"
 # Date/time (comes transitively from abk but we need it directly)
 chrono = { version = "0.4", features = ["serde"] }
 # ABK for workflow execution
-abk = { version = "0.8.3", path = "../../../abk", features = ["cli", "orchestration", "agent", "observability"] }
+abk = { version = "0.8.3", features = ["cli", "orchestration", "agent", "observability"] }
 # Config parsing
 toml = "0.8"
 # Structured logging (used by sessions module for debug logging)
