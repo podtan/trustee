@@ -84,6 +84,10 @@ pub async fn run(
         .route("/api/v1/session/cancel", post(routes::post_cancel))
         .route("/api/v1/session/handoff", post(routes::post_handoff))
         .route("/api/v1/session/stream", get(routes::ws_handler))
+        // Session discovery & resume
+        .route("/api/v1/sessions", get(routes::list_sessions))
+        .route("/api/v1/sessions/{id}", get(routes::get_session_detail))
+        .route("/api/v1/sessions/{id}/resume", post(routes::resume_session))
         // Static files from trustee-web
         .route("/", get(routes::serve_index))
         .route("/{file}", get(routes::serve_static))

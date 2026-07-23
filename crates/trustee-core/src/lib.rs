@@ -10,4 +10,5 @@
 
 pub mod config;
 pub mod session;
+pub mod sessions;
 pub mod types;

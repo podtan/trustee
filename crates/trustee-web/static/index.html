@@ -499,6 +499,99 @@
       border: 1px solid #f87171; border-radius: 8px; color: #f87171;
       font-size: 14px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
+
+    /* --- Sessions overlay --- */
+    #sessions-overlay {
+      position: fixed; inset: 0; z-index: 9000;
+      background: rgba(0,0,0,0.7);
+      display: flex; align-items: flex-start; justify-content: center;
+      padding: 40px 16px;
+      overflow-y: auto;
+    }
+    #sessions-overlay.hidden { display: none; }
+    .sessions-modal {
+      background: #12121a;
+      border: 1px solid #333;
+      border-radius: 12px;
+      width: 100%; max-width: 700px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    .sessions-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px;
+      border-bottom: 1px solid #333;
+    }
+    .sessions-title {
+      font-size: 16px; font-weight: 600; color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    .sessions-close {
+      background: none; border: none; color: #888; font-size: 20px;
+      cursor: pointer; padding: 4px 8px; border-radius: 4px; font-family: inherit;
+    }
+    .sessions-close:hover { background: #2a2a3a; color: #e0e0e0; }
+    .sessions-body {
+      padding: 12px 16px;
+      max-height: 70vh; overflow-y: auto;
+    }
+    .session-card {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 14px; margin-bottom: 8px;
+      background: #1a1a2e; border: 1px solid #2a2a3a; border-radius: 8px;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .session-card:hover { border-color: #444; background: #1e1e32; }
+    .session-card.current-project { border-left: 3px solid #60a5fa; }
+    .session-card-info { flex: 1; min-width: 0; overflow: hidden; }
+    .session-card-id {
+      font-size: 13px; font-weight: 600; color: #e0e0e0;
+      font-family: 'SF Mono', 'Monaco', 'Cascadia Code', monospace;
+    }
+    .session-card-meta {
+      font-size: 12px; color: #888; margin-top: 3px;
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    }
+    .session-card-desc {
+      font-size: 12px; color: #aaa; margin-top: 3px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .session-badge {
+      display: inline-block; padding: 1px 7px; font-size: 11px;
+      background: #2563eb; color: #fff; border-radius: 10px;
+      white-space: nowrap;
+    }
+    .session-badge.muted { background: #333; color: #aaa; }
+    .session-card-actions { flex-shrink: 0; margin-left: 12px; }
+    .session-card-actions button {
+      padding: 6px 14px; font-size: 12px;
+    }
+    .sessions-empty {
+      text-align: center; padding: 40px 20px; color: #666; font-size: 14px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    .sessions-loading {
+      text-align: center; padding: 40px 20px; color: #888; font-size: 14px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    .sessions-loading .spinner {
+      display: inline-block; width: 20px; height: 20px;
+      border: 2px solid #333; border-top-color: #60a5fa;
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+      margin-right: 8px; vertical-align: middle;
+    }
+
+    /* --- Toast --- */
+    #toast {
+      position: fixed; top: 60px; left: 50%; transform: translateX(-50%);
+      padding: 10px 20px; background: #1e1e2e; border: 1px solid #444;
+      border-radius: 8px; color: #e0e0e0; font-size: 13px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      z-index: 9500; box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      opacity: 0; pointer-events: none; transition: opacity 0.3s;
+    }
+    #toast.visible { opacity: 1; }
+    #toast.success { border-color: #4ade80; }
+    #toast.error { border-color: #f87171; }
   </style>
 </head>
 <body>
@@ -534,6 +627,7 @@
   <span id="state">Idle</span>
   <span id="spinner-container"></span>
   <button id="btn-cancel" class="danger" style="display:none; padding: 4px 12px; font-size: 12px;">Cancel</button>
+  <button id="btn-sessions" style="padding: 4px 12px; font-size: 12px;">📚 Sessions</button>
   <button id="btn-handoff" disabled style="padding: 4px 12px; font-size: 12px;">Handoff</button>
 </div>
 
@@ -560,6 +654,22 @@
 </div>
 
 <button id="fab-panel">📋</button>
+
+<!-- Sessions overlay -->
+<div id="sessions-overlay" class="hidden">
+  <div class="sessions-modal">
+    <div class="sessions-header">
+      <span class="sessions-title">Available Sessions</span>
+      <button class="sessions-close" id="sessions-close">✕</button>
+    </div>
+    <div class="sessions-body" id="sessions-body">
+      <div class="sessions-loading"><span class="spinner"></span>Loading sessions...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
 
 <div id="input-bar">
   <textarea id="input" rows="1" placeholder="Type a task and press Enter..." autocomplete="off"></textarea>
@@ -1257,7 +1367,176 @@ outputEl.addEventListener('click', (e) => {
   }
 });
 
-// --- Init ---
+// --- Sessions browser ---
+const sessionsOverlay = document.getElementById('sessions-overlay');
+const sessionsBody = document.getElementById('sessions-body');
+
+document.getElementById('btn-sessions').addEventListener('click', openSessionsOverlay);
+document.getElementById('sessions-close').addEventListener('click', closeSessionsOverlay);
+
+// Close overlay on backdrop click
+sessionsOverlay.addEventListener('click', (e) => {
+  if (e.target === sessionsOverlay) closeSessionsOverlay();
+});
+
+// Close on Escape key
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !sessionsOverlay.classList.contains('hidden')) {
+    closeSessionsOverlay();
+  }
+});
+
+function openSessionsOverlay() {
+  sessionsOverlay.classList.remove('hidden');
+  fetchSessions();
+}
+
+function closeSessionsOverlay() {
+  sessionsOverlay.classList.add('hidden');
+}
+
+async function fetchSessions() {
+  sessionsBody.innerHTML = '<div class="sessions-loading"><span class="spinner"></span>Loading sessions...</div>';
+  try {
+    const res = await fetch(API + '/api/v1/sessions');
+    if (!res.ok) {
+      sessionsBody.innerHTML = '<div class="sessions-empty">Failed to load sessions. Please try again.</div>';
+      return;
+    }
+    const data = await res.json();
+    renderSessionCards(data.sessions || []);
+  } catch (e) {
+    sessionsBody.innerHTML = '<div class="sessions-empty">Failed to load sessions. Please try again.</div>';
+  }
+}
+
+function renderSessionCards(sessions) {
+  if (!sessions.length) {
+    sessionsBody.innerHTML = '<div class="sessions-empty">No sessions available for resume.<br>Run a task first to create checkpoints.</div>';
+    return;
+  }
+
+  sessionsBody.innerHTML = '';
+  for (const s of sessions) {
+    const card = document.createElement('div');
+    card.className = 'session-card' + (s.is_current_project ? ' current-project' : '');
+
+    const idDisplay = s.session_id.length > 20
+      ? s.session_id.substring(0, 8) + '…' + s.session_id.substring(s.session_id.length - 6)
+      : s.session_id;
+
+    const projectName = s.project_path.split('/').filter(Boolean).pop() || s.project_path;
+    const timeAgo = formatSessionTimeAgo(s.last_accessed);
+
+    let metaHtml = `<span>${escapeHtml(projectName)}</span> · <span>${timeAgo}</span>`;
+    if (s.is_current_project) {
+      metaHtml = '<span style="color:#60a5fa">● current project</span> · ' + metaHtml;
+    }
+
+    let descHtml = '';
+    if (s.description) {
+      const truncDesc = s.description.length > 60
+        ? s.description.substring(0, 57) + '…'
+        : s.description;
+      descHtml = `<div class="session-card-desc">${escapeHtml(truncDesc)}</div>`;
+    }
+
+    card.innerHTML = `
+      <div class="session-card-info">
+        <div class="session-card-id">${escapeHtml(idDisplay)}</div>
+        <div class="session-card-meta">
+          ${metaHtml}
+          <span class="session-badge">${s.checkpoint_count} checkpoint${s.checkpoint_count !== 1 ? 's' : ''}</span>
+        </div>
+        ${descHtml}
+      </div>
+      <div class="session-card-actions">
+        <button onclick="resumeSession('${s.session_id}', ${s.checkpoint_count})">Resume</button>
+      </div>
+    `;
+    sessionsBody.appendChild(card);
+  }
+}
+
+async function resumeSession(sessionId, checkpointCount) {
+  try {
+    const res = await fetch(API + '/api/v1/sessions/' + encodeURIComponent(sessionId) + '/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+
+    if (res.status === 409) {
+      showToast('Cannot resume while workflow is running. Cancel first.', 'error');
+      return;
+    }
+    if (res.status === 404) {
+      showToast('Session or checkpoint not found.', 'error');
+      return;
+    }
+    if (!res.ok) {
+      showToast('Failed to resume session.', 'error');
+      return;
+    }
+
+    const data = await res.json();
+    closeSessionsOverlay();
+    outputEl.innerHTML = '';
+    window._hasSession = true;
+
+    // Re-render with a resume banner
+    const banner = document.createElement('div');
+    banner.className = 'line warn';
+    banner.textContent = `🔄 Resumed from checkpoint "${data.checkpoint_id}" (iteration ${data.iteration}) — type to continue`;
+    outputEl.appendChild(banner);
+
+    showToast(`Session resumed — ${checkpointCount} checkpoint${checkpointCount !== 1 ? 's' : ''} loaded`, 'success');
+
+    // Enable input
+    document.getElementById('btn-handoff').disabled = false;
+    document.getElementById('input').focus();
+  } catch (e) {
+    showToast('Failed to resume session.', 'error');
+  }
+}
+
+function formatSessionTimeAgo(dateStr) {
+  const now = Date.now();
+  const then = new Date(dateStr).getTime();
+  const diff = Math.floor((now - then) / 1000);
+
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + ' min ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  if (diff < 604800) return Math.floor(diff / 86400) + 'd ago';
+  if (diff < 2419200) return Math.floor(diff / 604800) + 'w ago';
+  return Math.floor(diff / 2419200) + 'mo ago';
+}
+
+// --- Toast ---
+let toastTimer = null;
+function showToast(msg, type) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = type || '';
+  el.classList.add('visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('visible'), 4000);
+}
+
+// Handle SessionResumed message from WebSocket
+// (add to existing handleMessage switch)
+const _origHandleMessage = handleMessage;
+handleMessage = function(msg) {
+  if (msg.type === 'SessionResumed') {
+    // Server confirmed resume — close overlay if open
+    closeSessionsOverlay();
+    return;
+  }
+  _origHandleMessage(msg);
+};
+
+
 (async () => {
   syncFabPosition();
   const authed = await checkAuth();

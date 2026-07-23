@@ -64,6 +64,36 @@ pub struct HealthResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Session discovery DTOs
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct SessionListResponse {
+    pub sessions: Vec<trustee_core::sessions::SessionSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionDetailResponse {
+    pub session: trustee_core::sessions::SessionSummary,
+    pub checkpoints: Vec<trustee_core::sessions::CheckpointSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResumeResponse {
+    pub accepted: bool,
+    pub session_id: String,
+    pub checkpoint_id: String,
+    pub iteration: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResumeRequestBody {
+    /// Optional specific checkpoint ID to resume from.
+    /// If omitted, resumes from the latest checkpoint.
+    pub checkpoint_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
@@ -250,6 +280,157 @@ async fn handle_ws(socket: WebSocket, state: ServerState) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Session discovery handlers
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/sessions — list all sessions with checkpoints available for resume.
+pub async fn list_sessions(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let config_toml = {
+        let session = state.session.lock().await;
+        match &session.config_toml {
+            Some(c) => c.clone(),
+            None => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Configuration not loaded".to_string(),
+                ))
+            }
+        }
+    };
+
+    let sessions = trustee_core::sessions::list_all_sessions(&config_toml)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let resp = Json(SessionListResponse { sessions });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
+/// GET /api/v1/sessions/{id} — get session detail with checkpoints.
+pub async fn get_session_detail(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let config_toml = {
+        let session = state.session.lock().await;
+        match &session.config_toml {
+            Some(c) => c.clone(),
+            None => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Configuration not loaded".to_string(),
+                ))
+            }
+        }
+    };
+
+    let detail = trustee_core::sessions::get_session_detail(&config_toml, &session_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match detail {
+        Some((session, checkpoints)) => {
+            let resp = Json(SessionDetailResponse {
+                session,
+                checkpoints,
+            });
+            Ok(with_rolling_cookie(resp.into_response(), cookie))
+        }
+        None => Err((StatusCode::NOT_FOUND, "Session not found".to_string())),
+    }
+}
+
+/// POST /api/v1/sessions/{id}/resume — resume from the latest checkpoint.
+///
+/// Sets `session.resume_info` so the next `/session/command` continues
+/// from the restored checkpoint.
+pub async fn resume_session(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    _body: Option<Json<ResumeRequestBody>>,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let config_toml = {
+        let session = state.session.lock().await;
+        // Reject if workflow is running
+        if session.workflow_state != trustee_core::types::WorkflowState::Idle {
+            return Err((
+                StatusCode::CONFLICT,
+                "Workflow is running or cancelling".to_string(),
+            ));
+        }
+        match &session.config_toml {
+            Some(c) => c.clone(),
+            None => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Configuration not loaded".to_string(),
+                ))
+            }
+        }
+    };
+
+    let resume_info = trustee_core::sessions::create_resume_info(&config_toml, &session_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let resume_info = match resume_info {
+        Some(info) => info,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                "Session or checkpoint not found".to_string(),
+            ))
+        }
+    };
+
+    // If the caller specified a specific checkpoint_id, validate it belongs to the session
+    // For now we always use the latest checkpoint from create_resume_info.
+    // Future: accept optional checkpoint_id in the body to resume from a specific one.
+    let checkpoint_id = resume_info.checkpoint_id.clone();
+    let iteration = resume_info.iteration;
+
+    {
+        let mut session = state.session.lock().await;
+        session.resume_info = Some(resume_info);
+        // Clear output so the user sees a fresh context when they resume
+        session.output_lines.clear();
+    }
+
+    // Broadcast state so clients know resume info is loaded
+    let msg = serde_json::json!({
+        "type": "SessionResumed",
+        "session_id": session_id,
+        "checkpoint_id": checkpoint_id,
+    });
+    let _ = state.ws_tx.send(msg.to_string());
+
+    let resp = Json(ResumeResponse {
+        accepted: true,
+        session_id: session_id.clone(),
+        checkpoint_id,
+        iteration,
+    });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
 // ---------------------------------------------------------------------------

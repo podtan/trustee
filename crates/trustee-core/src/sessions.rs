@@ -1,0 +1,245 @@
+//! Session discovery for the API/Web layer.
+//!
+//! Wraps `abk::checkpoint` to provide serializable session listing, detail,
+//! and resume-info creation — used by the Trustee REST API so users can
+//! browse and resume checkpoint sessions from the Web UI.
+
+use serde::{Deserialize, Serialize};
+
+use abk::checkpoint::{
+    get_storage_manager,
+    models::{CheckpointMetadata, SessionMetadata as AbkSessionMetadata},
+    storage::ProjectMetadata as AbkProjectMetadata,
+};
+use abk::cli::ResumeInfo;
+
+/// Compact session info suitable for JSON API responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub project_name: String,
+    pub project_path: String,
+    pub checkpoint_count: usize,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_accessed: chrono::DateTime<chrono::Utc>,
+    pub description: Option<String>,
+    pub is_current_project: bool,
+}
+
+/// Compact checkpoint info for the session detail endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointSummary {
+    pub checkpoint_id: String,
+    pub session_id: String,
+    pub iteration: u32,
+    pub workflow_step: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+// -----------------------------------------------------------------------
+// Conversion helpers
+// -----------------------------------------------------------------------
+
+fn session_to_summary(
+    session: &AbkSessionMetadata,
+    project: &AbkProjectMetadata,
+    is_current: bool,
+) -> SessionSummary {
+    SessionSummary {
+        session_id: session.session_id.clone(),
+        project_name: project.name.clone(),
+        project_path: project.project_path.to_string_lossy().to_string(),
+        checkpoint_count: session.checkpoint_count as usize,
+        created_at: session.created_at,
+        last_accessed: session.last_accessed,
+        description: session.description.clone(),
+        is_current_project: is_current,
+    }
+}
+
+fn checkpoint_to_summary(cp: &CheckpointMetadata) -> CheckpointSummary {
+    CheckpointSummary {
+        checkpoint_id: cp.checkpoint_id.clone(),
+        session_id: cp.session_id.clone(),
+        iteration: cp.iteration,
+        workflow_step: format!("{:?}", cp.workflow_step),
+        created_at: cp.created_at,
+    }
+}
+
+/// Derive the working directory from a trustee config TOML string.
+///
+/// Looks for `[agent] working_dir`. Falls back to the current directory
+/// of the process if not specified or unparseable.
+fn config_working_dir(config_toml: &str) -> std::path::PathBuf {
+    if let Ok(value) = toml::from_str::<toml::Value>(config_toml) {
+        if let Some(agent) = value.get("agent") {
+            if let Some(wd) = agent.get("working_dir").and_then(|v| v.as_str()) {
+                return std::path::PathBuf::from(wd);
+            }
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// Check whether two paths refer to the same project by canonicalising.
+fn paths_match(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let ca = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
+    let cb = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
+    ca == cb
+}
+
+// -----------------------------------------------------------------------
+// Public API
+// -----------------------------------------------------------------------
+
+/// List all sessions across all projects that have at least one checkpoint.
+///
+/// Sessions from the current project (derived from `config_toml`) are listed
+/// first, then everything else sorted by `last_accessed` descending.
+pub async fn list_all_sessions(config_toml: &str) -> anyhow::Result<Vec<SessionSummary>> {
+    let current_dir = config_working_dir(config_toml);
+    let manager = get_storage_manager()
+        .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e))?;
+
+    let projects = manager
+        .list_projects()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
+
+    let mut summaries = Vec::new();
+
+    for project in &projects {
+        let project_storage = manager
+            .get_project_storage(&project.project_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get project storage: {}", e))?;
+
+        let sessions = project_storage
+            .list_sessions()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list sessions: {}", e))?;
+
+        let is_current = paths_match(&project.project_path, &current_dir);
+
+        for session in sessions {
+            // Only include sessions that have checkpoints (resumable)
+            if session.checkpoint_count > 0 {
+                summaries.push(session_to_summary(&session, project, is_current));
+            }
+        }
+    }
+
+    // Sort: current project first, then by last_accessed descending
+    summaries.sort_by(|a, b| match (a.is_current_project, b.is_current_project) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => b.last_accessed.cmp(&a.last_accessed),
+    });
+
+    Ok(summaries)
+}
+
+/// Get detailed information about a specific session, including its checkpoints.
+///
+/// Searches all projects for the given `session_id`.
+/// Returns `None` if the session is not found.
+pub async fn get_session_detail(
+    _config_toml: &str,
+    session_id: &str,
+) -> anyhow::Result<Option<(SessionSummary, Vec<CheckpointSummary>)>> {
+    let manager = get_storage_manager()
+        .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e))?;
+
+    let projects = manager
+        .list_projects()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
+
+    for project in &projects {
+        let project_storage = manager
+            .get_project_storage(&project.project_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get project storage: {}", e))?;
+
+        let sessions = project_storage
+            .list_sessions()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list sessions: {}", e))?;
+
+        if let Some(session) = sessions.iter().find(|s| s.session_id == session_id) {
+            let session_storage = project_storage
+                .create_session(session_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to get session storage: {}", e))?;
+
+            let checkpoints = session_storage
+                .list_checkpoints()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to list checkpoints: {}", e))?;
+
+            let summary = session_to_summary(session, project, false);
+            let cp_summaries: Vec<CheckpointSummary> =
+                checkpoints.iter().map(checkpoint_to_summary).collect();
+
+            return Ok(Some((summary, cp_summaries)));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Create a `ResumeInfo` from the latest checkpoint of a given session.
+///
+/// Searches all projects for `session_id`, finds the most recent checkpoint,
+/// and returns a `ResumeInfo` suitable for setting on `Session::resume_info`.
+/// Returns `None` if the session or its checkpoints are not found.
+pub async fn create_resume_info(
+    _config_toml: &str,
+    session_id: &str,
+) -> anyhow::Result<Option<ResumeInfo>> {
+    let manager = get_storage_manager()
+        .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e))?;
+
+    let projects = manager
+        .list_projects()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
+
+    for project in &projects {
+        let project_storage = manager
+            .get_project_storage(&project.project_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get project storage: {}", e))?;
+
+        let sessions = project_storage
+            .list_sessions()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list sessions: {}", e))?;
+
+        if sessions.iter().any(|s| s.session_id == session_id) {
+            let session_storage = project_storage
+                .create_session(session_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to get session storage: {}", e))?;
+
+            let checkpoints = session_storage
+                .list_checkpoints()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to list checkpoints: {}", e))?;
+
+            if let Some(latest) = checkpoints.iter().max_by_key(|cp| cp.created_at) {
+                return Ok(Some(ResumeInfo {
+                    session_id: session_id.to_string(),
+                    checkpoint_id: latest.checkpoint_id.clone(),
+                    iteration: latest.iteration,
+                }));
+            }
+
+            // Session found but no checkpoints
+            return Ok(None);
+        }
+    }
+
+    Ok(None)
+}
