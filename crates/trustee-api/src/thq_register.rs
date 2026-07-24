@@ -189,7 +189,7 @@ pub fn spawn(config: ThqConfig) {
         last_seen: chrono::Utc::now().to_rfc3339(),
     };
 
-    let url = format!("{}/thq/api/agents/register", config.torpi_url);
+    let url = format!("{}/thq/api/agents", config.torpi_url);
     let interval_secs = config.heartbeat_interval;
 
     tokio::spawn(async move {
