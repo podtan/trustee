@@ -333,9 +333,22 @@
       padding: 8px 16px;
       background: #161616;
       border-bottom: 1px solid #333;
+      position: relative;
     }
-    #header h1 { font-size: 14px; color: #ccc; }
-    .context-badge { font-size: 11px; color: #888; margin-left: auto; }
+    #header h1 {
+      font-size: 14px; color: #ccc;
+      position: absolute;
+      left: 50%; transform: translateX(-50%);
+      font-weight: 600; letter-spacing: 0.5px;
+    }
+    #btn-burger {
+      background: none; border: none; cursor: pointer;
+      font-size: 18px; color: #ccc; padding: 4px 8px;
+      border-radius: 4px; transition: background 0.15s;
+      line-height: 1;
+    }
+    #btn-burger:hover { background: #2a2a3a; }
+    .context-badge { font-size: 11px; color: #888; }
 
     /* --- Markdown rendering inside agent bubbles --- */
     .bubble.md {
@@ -609,7 +622,8 @@
 </div>
 
 <div id="header">
-  <h1>🤖 Trustee</h1>
+  <button id="btn-burger" title="Sessions">☰</button>
+  <h1>Trustee</h1>
   <span class="context-badge" id="context-tokens">0 tokens</span>
   <div id="header-user" style="display:none;">
     <div class="user-avatar" id="user-avatar"></div>
@@ -627,7 +641,6 @@
   <span id="state">Idle</span>
   <span id="spinner-container"></span>
   <button id="btn-cancel" class="danger" style="display:none; padding: 4px 12px; font-size: 12px;">Cancel</button>
-  <button id="btn-sessions" style="padding: 4px 12px; font-size: 12px;">📚 Sessions</button>
   <button id="btn-handoff" disabled style="padding: 4px 12px; font-size: 12px;">Handoff</button>
 </div>
 
@@ -1371,7 +1384,7 @@ outputEl.addEventListener('click', (e) => {
 const sessionsOverlay = document.getElementById('sessions-overlay');
 const sessionsBody = document.getElementById('sessions-body');
 
-document.getElementById('btn-sessions').addEventListener('click', openSessionsOverlay);
+document.getElementById('btn-burger').addEventListener('click', openSessionsOverlay);
 document.getElementById('sessions-close').addEventListener('click', closeSessionsOverlay);
 
 // Close overlay on backdrop click
