@@ -11,6 +11,7 @@ pub mod auth;
 pub mod tls;
 mod routes;
 mod state;
+mod thq_register;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -51,6 +52,9 @@ pub async fn run(
         Arc::new(AuthState::new(cfg))
     });
 
+    // Parse THQ registration config before config_toml is moved into session
+    let thq_config = thq_register::ThqConfig::from_toml(&config_toml);
+
     // Build the session
     let (mut session, workflow_rx) = trustee_core::session::Session::new();
     session.config_toml = Some(config_toml);
@@ -66,6 +70,13 @@ pub async fn run(
 
     // Start background message drain task (owns workflow_rx directly — no deadlock)
     state.clone().spawn_drain_task(workflow_rx);
+
+    // THQ auto-registration with Torpi (if [thq] section is present in config)
+    if let Some(cfg) = thq_config {
+        thq_register::spawn(cfg);
+    } else {
+        tracing::debug!("THQ registration not configured (no [thq] section)");
+    }
 
     // Build router
     //

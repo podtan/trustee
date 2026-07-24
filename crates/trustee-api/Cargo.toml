@@ -50,3 +50,7 @@ toml = "0.8"
 # Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"
+# UUID generation for agent identity
+uuid = { version = "1", features = ["v4"] }
+# DateTime for registration timestamps
+chrono = "0.4"
