@@ -348,6 +348,11 @@
       line-height: 1;
     }
     #btn-burger:hover { background: #2a2a3a; }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
     .context-badge { font-size: 11px; color: #888; }
 
     /* --- Markdown rendering inside agent bubbles --- */
@@ -624,8 +629,9 @@
 <div id="header">
   <button id="btn-burger" title="Sessions">☰</button>
   <h1>Trustee</h1>
-  <span class="context-badge" id="context-tokens">0 tokens</span>
-  <div id="header-user" style="display:none;">
+  <div class="header-right">
+    <span class="context-badge" id="context-tokens">0 tokens</span>
+    <div id="header-user" style="display:none;">
     <div class="user-avatar" id="user-avatar"></div>
     <div class="user-menu" id="user-menu">
       <div class="user-info">
@@ -634,6 +640,7 @@
       </div>
       <div class="user-menu-item danger" id="user-signout">Sign Out</div>
     </div>
+  </div>
   </div>
 </div>
 
