@@ -36,7 +36,7 @@ mime_guess = "2"
 # Stream utilities for WebSocket split
 futures = "0.3"
 # OIDC auth (resource server: JWT validation + optional login flow)
-pep = { version = "0.4", features = ["oidc", "axum", "config", "token-provider"] }
+pep = { version = "0.4.3", features = ["oidc", "axum", "config", "token-provider"] }
 # HTTP client for OAuth code exchange (rustls)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
 # URL parsing
