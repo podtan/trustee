@@ -5,27 +5,8 @@
 
 # MCP (Model Context Protocol) Server Configuration
 [mcp]
-enabled = true
+enabled = false
 timeout_seconds = 30
-
-[[mcp.servers]]
-name = "pdt"
-url = "http://127.0.0.1:8001"
-transport = "http"
-auto_init = true
-
-[[mcp.servers]]
-name = "nghr"
-url = "http://127.0.0.1:8002"
-transport = "http"
-auto_init = true
-
-
-[[mcp.servers]]
-name = "trp"
-url = "http://127.0.0.1:8010"
-transport = "http"
-auto_init = true
 
 
 # Uncomment below to override checkpoint storage to DocumentDB:
