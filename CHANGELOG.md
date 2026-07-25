@@ -2,6 +2,74 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.7] - 2026-07-25
+
+### Added
+- **feat(thq): auto-register trustee-web with Torpi on startup** — New `[thq]` config section. When present, trustee-web spawns a background task that POSTs to Torpi's `/thq/api/agents` endpoint on startup and re-registers every `heartbeat_interval` seconds (default 30s). Agent identity is a stable UUID v4 persisted to `~/.trustee/agent_id`. Config: `torpi_url`, `advertise_url`, `agent_name`, `agent_role`, `capabilities`, `tags`, `heartbeat_interval`.
+- **feat(web): redesign header — burger menu, centered title, no icon** — Header now uses a burger menu for session browsing, centered title, and groups user avatar + context token badge in the right section.
+
+### Fixed
+- **fix(thq): correct registration endpoint to POST /thq/api/agents** — Initial implementation used `/thq/api/agents/register` which does not exist; corrected to match Torpi's router definition.
+- **fix(api): pin pep to 0.4.3 for session_manager module availability** — Ensures `WebSessionManager` and related modules are available from PEP.
+- **fix(web): group tokens + user in header-right div** — Header layout fix to prevent overlapping elements.
+- **fix(auth): reject stale dev tokens when dev mode is disabled** — Dev-mode tokens (`dev:...`) in cookies or Bearer headers are now rejected when `local_dev_mode = false`, preventing stale dev sessions from bypassing OIDC.
+- **fix(deps): upgrade abk to 0.8.3** — Cross-project session resume and cancel-checkpoint metadata sync fixes.
+- **fix(deps): upgrade abk to 0.8.2 / 0.8.1** — Cancel-checkpoint and metadata sync fixes.
+- **fix(api): add force-refresh retry on JWT ExpiredSignature** — When session token validation fails due to expiry, force-refreshes via `WebSessionManager` and retries before returning 401.
+
+### Changed
+- **chore: remove sample mcp servers from default config** — Cleaned up sample MCP server entries from config files.
+- **chore: use abk 0.8.3 from crates.io** — Removed local path overrides.
+- **deps: bump trustee-api to 0.1.8.**
+
+## [0.2.6] - 2026-07-23
+
+### Added
+- **feat(web): add session browsing and resume from Web UI** — Burger menu opens a sessions overlay listing all sessions with checkpoints across all projects. Each card shows session ID, project, time ago, checkpoint count, and a Resume button.
+- **feat(web): load conversation history on session resume** — After resuming, the full conversation history (user messages, agent responses with markdown, tool calls, reasoning) is rendered in the output panel.
+- **feat(api): integrate PEP 0.4.2 WebSessionManager for session-based auth** — Replaced direct JWT-in-cookie with server-side session management. Browser cookie holds a session_id; access token is stored server-side with auto-refresh.
+- **feat(api): upgrade to pep 0.4.3 with idle-timeout eviction and rolling cookies** — Sessions auto-expire after idle timeout; cookies are rolled on every successful auth (sliding window).
+
+### Fixed
+- **fix: skip projects with unresolvable paths in session discovery** — Projects with paths that no longer exist are silently skipped instead of causing an error.
+- **fix(web): cross-project session resume** — Session resume now works across different project directories.
+
+### Changed
+- **chore: bump trustee-web to 0.1.6 (session browser UI).**
+
+## [0.2.5] - 2026-07-22
+
+### Added
+- **feat(api): integrate PEP WebSessionManager for session-based auth with auto-refresh** — Tokens are managed server-side; cookies contain session_id instead of raw JWT.
+- **feat(api): upgrade to pep 0.4.3 with idle-timeout eviction and rolling cookies** — Idle timeout evicts stale sessions; rolling cookies keep active users logged in.
+
+### Fixed
+- **fix(api): add force-refresh retry on JWT ExpiredSignature** — Force-refreshes token and retries once when JWT validation fails due to expiry.
+
+## [0.2.4] - 2026-07-21
+
+### Added
+- **feat(api): HTTPS by default with self-signed cert auto-generation** — Trustee-web now serves HTTPS by default using a self-signed certificate from `~/.trustee/certs/`. Use `--no-tls` for plain HTTP.
+
+### Fixed
+- **fix(api): install ring crypto provider before TLS init** — Prevents panic when rustls is built without default features.
+- **fix(api): WebSocket upgrade support in TLS mode** — Manual TLS accept loop with `hyper-util` auto builder and `serve_connection_with_upgrades` for WS support.
+- **fix(web): mobile black box + output under input bar** — Fixes layout issues on mobile where content appeared under the fixed input bar.
+- **fix(web): WebSocket reconnect exponential backoff** — WS reconnection now uses exponential backoff with 30s cap.
+- **fix(api): lower TLS accept failure log from WARN to DEBUG** — Reduces log noise from expected TLS handshake failures.
+- **fix(web): handoff button enabled on page reload with existing session** — Button state correctly reflects session content on reload.
+
+## [0.2.3] - 2026-07-20
+
+### Added
+- **feat(web): torpi-style user avatar + dropdown menu in header** — Circular avatar with initials, dropdown menu with name/email and sign-out.
+
+### Fixed
+- **fix(web): text selection vanishes — McpServerStatus was re-rendering all output** — MCP status updates no longer cause full output re-render, preserving text selection.
+- **fix(auth): PKCE/auth cookies use Secure flag based on redirect_uri scheme** — HTTP localhost/LAN connections no longer set Secure, preventing browser from dropping the cookie.
+- **fix(auth): user name/email from userinfo + login screen + sign out** — Fetches name/email from OIDC userinfo endpoint when missing from JWT. Login overlay with "Sign in with SSO" button.
+- **fix(web): user avatar not showing — fallback name + margin-left:auto** — Avatar now falls back to name/email/sub.
+
 ## [0.2.0] - 2026-07-19
 
 ### Added
