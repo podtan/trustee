@@ -1,5 +1,7 @@
 //! Axum route handlers for the Trustee API.
 
+use std::sync::Arc;
+
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -161,6 +163,12 @@ pub async fn post_command(
     let cookie = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    // C1: If auth is configured, push the current session token into
+    // FileTokenStore so that any MCP servers using `type = "web-session"`
+    // credentials can pick it up via InteractiveTokenProvider.
+    inject_session_token(&state.auth, &headers).await;
+
     {
         let mut session = state.session.lock().await;
 
@@ -515,4 +523,146 @@ pub async fn serve_static(Path(file): Path<String>) -> Response {
         )
             .into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// MCP session token injection (C1 — web-session credentials)
+// ---------------------------------------------------------------------------
+
+/// Reserved credential name in FileTokenStore for web session tokens.
+/// ABK's `WebSession` credential type reads from this name.
+const WEB_SESSION_CRED_NAME: &str = "__web_session";
+
+/// Push the current user's access token into `FileTokenStore` so that
+/// MCP servers with `type = "web-session"` credentials can read it.
+///
+/// Called before each agent command execution. If no auth is configured
+/// or the token cannot be resolved, this is a no-op (the agent will fail
+/// at MCP init with a clear error if it tries to use web-session creds).
+async fn inject_session_token(
+    auth: &Option<Arc<crate::auth::AuthState>>,
+    headers: &axum::http::HeaderMap,
+) {
+    use pep::{FileTokenStore, StoredToken, TokenStore};
+
+    let Some(auth_state) = auth.as_ref() else {
+        return; // No auth configured — nothing to inject
+    };
+
+    // Resolve the current access token
+    let access_token = match resolve_access_token_for_mcp(auth_state, headers).await {
+        Ok(token) => token,
+        Err(e) => {
+            tracing::debug!("Skipping MCP session token injection: {}", e);
+            return;
+        }
+    };
+
+    // Compute expiry from JWT exp claim, or default to 15 min
+    let expires_at = jwt_expiry(&access_token).unwrap_or_else(|| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Default: 15 minutes from now (conservative Kanidm TTL)
+        compute_rfc3339(now + 900)
+    });
+
+    let stored = StoredToken::new(
+        &access_token,
+        None,           // No separate refresh token — session manager owns refresh
+        "Bearer",
+        &expires_at,
+        None,
+    );
+
+    let agent_name = std::env::var("ABK_AGENT_NAME").unwrap_or_else(|_| "trustee".into());
+    let store = FileTokenStore::new(&agent_name);
+
+    if let Err(e) = store.save(WEB_SESSION_CRED_NAME, &stored) {
+        tracing::warn!("Failed to write session token to FileTokenStore: {}", e);
+    } else {
+        tracing::debug!("Injected session token for web-session MCP credentials (expires {})", expires_at);
+    }
+}
+
+/// Resolve the current user's access token from Bearer header or session cookie.
+async fn resolve_access_token_for_mcp(
+    auth: &crate::auth::AuthState,
+    headers: &axum::http::HeaderMap,
+) -> Result<String, String> {
+    // Bearer header — return as-is
+    if let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+    {
+        if token.starts_with("dev:") {
+            return Err("dev tokens not supported for MCP".to_string());
+        }
+        return Ok(token);
+    }
+
+    // Cookie → session_id → WebSessionManager → access token
+    let session_id = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies
+                .split(';')
+                .map(|c| c.trim())
+                .find_map(|c| c.strip_prefix(&format!("{}=", auth.config.cookie_name)))
+                .map(|s| s.to_string())
+        })
+        .ok_or("no session cookie")?;
+
+    if session_id.starts_with("dev:") {
+        return Err("dev tokens not supported for MCP".to_string());
+    }
+
+    auth.session_manager
+        .get_token(&session_id)
+        .await
+        .map_err(|e| format!("session lookup: {e}"))
+}
+
+/// Extract `exp` claim from a JWT and format as RFC-3339.
+fn jwt_expiry(token: &str) -> Option<String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    // JWT payload is base64url (no padding)
+    use base64::Engine;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(parts[1]))
+        .ok()?;
+
+    let json: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    let exp = json.get("exp")?.as_u64()?;
+
+    Some(compute_rfc3339(exp))
+}
+
+/// Convert epoch seconds to RFC-3339 UTC timestamp.
+fn compute_rfc3339(epoch_secs: u64) -> String {
+    let days = epoch_secs / 86400;
+    let rem = epoch_secs % 86400;
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let s = rem % 60;
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mon = if mp < 10 { mp + 3 } else { mp - 9 };
+    let yr = if mon <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", yr, mon, d, h, m, s)
 }

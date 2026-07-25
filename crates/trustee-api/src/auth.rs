@@ -19,7 +19,7 @@ use axum::{
     body::Body,
     extract::{Query, State},
     http::{header, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Json, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use pep::oidc_client::OidcClient;
@@ -512,6 +512,10 @@ pub fn auth_routes() -> axum::Router<crate::ServerState> {
         .route("/callback", axum::routing::get(callback_handler))
         .route("/me", axum::routing::get(me_handler))
         .route("/logout", axum::routing::post(logout_handler))
+        .route("/mcp/login", axum::routing::get(mcp_login_handler))
+        .route("/mcp/callback", axum::routing::get(mcp_callback_handler))
+        .route("/mcp/status", axum::routing::get(mcp_status_handler))
+        .route("/mcp/logout", axum::routing::post(mcp_logout_handler))
 }
 
 /// Query parameters for OIDC callback.
@@ -789,6 +793,483 @@ async fn logout_handler(
         .header(header::SET_COOKIE, cookie.to_string())
         .body(Body::empty())
         .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// MCP auth routes: /auth/mcp/login, /callback, /status, /logout (C2)
+// ---------------------------------------------------------------------------
+
+/// Query parameters for MCP login initiation.
+#[derive(Debug, Deserialize)]
+pub struct McpLoginQuery {
+    pub cred: String,
+}
+
+/// Query parameters for MCP OIDC callback.
+#[derive(Debug, Deserialize)]
+pub struct McpCallbackQuery {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
+/// GET /auth/mcp/login?cred=<name> — initiate per-server OIDC PKCE login.
+///
+/// Reads the credential config from the session's config_toml, verifies it's
+/// `type = "web-interactive"`, then redirects to the OIDC provider.
+async fn mcp_login_handler(
+    State(state): State<crate::ServerState>,
+    Query(query): Query<McpLoginQuery>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AuthError> {
+    // Require authentication — user must be logged into trustee-web
+    crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|_| AuthError::AuthNotConfigured)?;
+
+    let auth = state.auth.as_ref().ok_or(AuthError::AuthNotConfigured)?;
+
+    // Parse MCP credential config from session's config_toml
+    let cred_config = load_mcp_credential(&state, &query.cred).await?;
+
+    let (issuer_url, client_id, client_secret, scope) = match &cred_config {
+        McpCredentialInfo::WebInteractive {
+            issuer_url,
+            client_id,
+            client_secret,
+            scope,
+        } => (issuer_url.clone(), client_id.clone(), client_secret.clone(), scope.clone()),
+        _ => {
+            return Ok(Redirect::temporary(&format!(
+                "/?mcp_error={}",
+                urlencoding::encode(&format!("Credential '{}' is not web-interactive type", query.cred))
+            ))
+            .into_response());
+        }
+    };
+
+    // Build PKCE pair using a separate PkceCookieManager for MCP
+    let oidc_client = OidcClient::new();
+    let verifier = OidcClient::generate_code_verifier();
+    let challenge = OidcClient::generate_code_challenge(&verifier);
+    let oauth_state = OidcClient::generate_state();
+
+    // Build OidcClientConfig for the MCP credential's OIDC client
+    let mcp_redirect_uri = format!(
+        "{}/auth/mcp/callback",
+        auth.client_config.redirect_uri.trim_end_matches('/').trim_end_matches("/auth/callback")
+    );
+
+    let mcp_client_config = OidcClientConfig {
+        issuer_url: issuer_url.clone(),
+        client_id: client_id.clone(),
+        client_secret: client_secret.clone(),
+        redirect_uri: mcp_redirect_uri.clone(),
+        scope: scope.clone(),
+        code_challenge_method: "S256".to_string(),
+    };
+
+    // Build authorization URL
+    let auth_url = oidc_client
+        .build_authorization_url(&mcp_client_config, &oauth_state, Some(&challenge))
+        .await
+        .map_err(|e| AuthError::OidcError(e.to_string()))?;
+
+    // Store PKCE state + credential name in the in-memory map
+    mcp_pkce().insert(oauth_state.clone(), verifier.clone(), query.cred.clone()).await;
+
+    tracing::info!(
+        "Initiating MCP browser login for credential '{}' (issuer={})",
+        query.cred, issuer_url
+    );
+
+    Ok(Response::builder()
+        .status(StatusCode::TEMPORARY_REDIRECT)
+        .header(header::LOCATION, &auth_url)
+        .body(Body::empty())
+        .unwrap())
+}
+
+/// GET /auth/mcp/callback — handle MCP OIDC callback, store tokens.
+async fn mcp_callback_handler(
+    State(state): State<crate::ServerState>,
+    Query(query): Query<McpCallbackQuery>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AuthError> {
+    let auth = state.auth.as_ref().ok_or(AuthError::AuthNotConfigured)?;
+
+    // Check for errors from IdP
+    if let Some(error) = query.error {
+        let desc = query.error_description.unwrap_or_default();
+        tracing::error!("MCP OIDC error: {} - {}", error, desc);
+        return Ok(Redirect::temporary(&format!(
+            "/?mcp_error={}&error_description={}",
+            urlencoding::encode(&error),
+            urlencoding::encode(&desc)
+        ))
+        .into_response());
+    }
+
+    let code = query.code.ok_or(AuthError::MissingCode)?;
+    let oauth_state = query.state.ok_or(AuthError::MissingState)?;
+
+    // Look up PKCE verifier + credential name from in-memory store
+    let pkce_data = mcp_pkce().take(&oauth_state).await
+        .ok_or(AuthError::InvalidState)?;
+
+    let verifier = pkce_data.verifier;
+    let cred_name = &pkce_data.cred_name;
+
+    // Parse the MCP credential config to get OIDC settings for token exchange
+    let cred_config = load_mcp_credential(&state, cred_name).await?;
+
+    let (issuer_url, client_id, client_secret, scope) = match &cred_config {
+        McpCredentialInfo::WebInteractive {
+            issuer_url,
+            client_id,
+            client_secret,
+            scope,
+        } => (issuer_url.clone(), client_id.clone(), client_secret.clone(), scope.clone()),
+        _ => {
+            return Ok(Redirect::temporary(&format!(
+                "/?mcp_error={}",
+                urlencoding::encode("Credential is not web-interactive type")
+            ))
+            .into_response());
+        }
+    };
+
+    // Build redirect URI (must match what was used in login)
+    let mcp_redirect_uri = format!(
+        "{}/auth/mcp/callback",
+        auth.client_config.redirect_uri.trim_end_matches('/').trim_end_matches("/auth/callback")
+    );
+
+    let mcp_client_config = OidcClientConfig {
+        issuer_url: issuer_url.clone(),
+        client_id: client_id.clone(),
+        client_secret: client_secret.clone(),
+        redirect_uri: mcp_redirect_uri,
+        scope: scope.clone(),
+        code_challenge_method: "S256".to_string(),
+    };
+
+    // Exchange code for tokens
+    tracing::info!("Exchanging MCP authorization code for tokens (credential={})", cred_name);
+    let oidc_client = OidcClient::new();
+    let token_response = oidc_client
+        .exchange_code_for_tokens(&mcp_client_config, &code, Some(&verifier))
+        .await
+        .map_err(|e| AuthError::TokenExchangeFailed(e.to_string()))?;
+
+    // Compute expires_at
+    let expires_at = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let expires_epoch = now + token_response.expires_in.unwrap_or(900);
+        let days = expires_epoch / 86400;
+        let rem = expires_epoch % 86400;
+        let h = rem / 3600;
+        let m = (rem % 3600) / 60;
+        let s = rem % 60;
+        let z = days as i64 + 719468;
+        let era = if z >= 0 { z } else { z - 146096 } / 146097;
+        let doe = (z - era * 146097) as u64;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let mon = if mp < 10 { mp + 3 } else { mp - 9 };
+        let yr = if mon <= 2 { y + 1 } else { y };
+        format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", yr, mon, d, h, m, s)
+    };
+
+    // Store via FileTokenStore (same as `trustee mcp auth`)
+    use pep::{FileTokenStore, StoredToken, TokenStore};
+
+    let stored = StoredToken::new(
+        &token_response.access_token,
+        token_response.refresh_token.clone(),
+        "Bearer",
+        &expires_at,
+        token_response.scope.clone(),
+    );
+
+    let agent_name = std::env::var("ABK_AGENT_NAME").unwrap_or_else(|_| "trustee".into());
+    let token_store = FileTokenStore::new(&agent_name);
+
+    if let Err(e) = token_store.save(cred_name, &stored) {
+        tracing::error!("Failed to store MCP token: {}", e);
+        return Ok(Redirect::temporary(&format!(
+            "/?mcp_error={}",
+            urlencoding::encode(&format!("Failed to store token: {}", e))
+        ))
+        .into_response());
+    }
+
+    tracing::info!(
+        "MCP authentication successful for credential '{}' (expires {})",
+        cred_name, expires_at
+    );
+
+    Ok(Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, format!("/?mcp_connected={}", urlencoding::encode(cred_name)))
+        .body(Body::empty())
+        .unwrap())
+}
+
+/// GET /auth/mcp/status — return connection status for all MCP credentials.
+async fn mcp_status_handler(
+    State(state): State<crate::ServerState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    use pep::{FileTokenStore, TokenStore};
+
+    // Require auth
+    if let Err(code) = crate::auth::check_auth(&state.auth, &headers).await {
+        return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response();
+    }
+
+    // Parse MCP config from session
+    let config_toml = {
+        let session = state.session.lock().await;
+        match &session.config_toml {
+            Some(t) => t.clone(),
+            None => return (StatusCode::INTERNAL_SERVER_ERROR, "Config not loaded").into_response(),
+        }
+    };
+
+    let mcp_config: toml::Value = match toml::from_str(&config_toml) {
+        Ok(v) => v,
+        Err(_) => return Json(serde_json::json!([])).into_response(),
+    };
+
+    let agent_name = std::env::var("ABK_AGENT_NAME").unwrap_or_else(|_| "trustee".into());
+    let token_store = FileTokenStore::new(&agent_name);
+
+    // Build server → credential mapping
+    let servers = mcp_config
+        .get("mcp")
+        .and_then(|m| m.get("servers"))
+        .and_then(|s| s.as_array());
+    let credentials = mcp_config
+        .get("mcp")
+        .and_then(|m| m.get("credentials"))
+        .and_then(|c| c.as_table());
+
+    let mut cred_servers: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    if let Some(servers) = servers {
+        for server in servers {
+            let name = server.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let cred_ref = server.get("credentials").and_then(|c| c.as_str()).unwrap_or("");
+            if !cred_ref.is_empty() {
+                cred_servers
+                    .entry(cred_ref.to_string())
+                    .or_default()
+                    .push(name.to_string());
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+
+    if let Some(creds) = credentials {
+        for (cred_name, cred_config) in creds {
+            let cred_type = cred_config.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
+            let servers_using = cred_servers.get(cred_name).cloned().unwrap_or_default();
+
+            if cred_type == "web-session" {
+                // Session credentials are always "connected" if auth is enabled
+                let connected = state.auth.is_some();
+                result.push(serde_json::json!({
+                    "credential": cred_name,
+                    "type": cred_type,
+                    "connected": connected,
+                    "servers": servers_using,
+                }));
+            } else if cred_type == "web-interactive" || cred_type == "interactive" {
+                // Check token store
+                let status = match token_store.load(cred_name) {
+                    Ok(Some(token)) => {
+                        let expired = token.is_expired();
+                        serde_json::json!({
+                            "credential": cred_name,
+                            "type": cred_type,
+                            "connected": !expired,
+                            "expires_at": token.expires_at,
+                            "servers": servers_using,
+                        })
+                    }
+                    _ => serde_json::json!({
+                        "credential": cred_name,
+                        "type": cred_type,
+                        "connected": false,
+                        "servers": servers_using,
+                    }),
+                };
+                result.push(status);
+            }
+        }
+    }
+
+    Json(serde_json::Value::Array(result)).into_response()
+}
+
+/// POST /auth/mcp/logout?cred=<name> — remove stored MCP tokens.
+async fn mcp_logout_handler(
+    State(state): State<crate::ServerState>,
+    Query(query): Query<McpLoginQuery>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    use pep::{FileTokenStore, TokenStore};
+
+    // Require auth
+    if let Err(code) = crate::auth::check_auth(&state.auth, &headers).await {
+        return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response();
+    }
+
+    let agent_name = std::env::var("ABK_AGENT_NAME").unwrap_or_else(|_| "trustee".into());
+    let token_store = FileTokenStore::new(&agent_name);
+
+    match token_store.delete(&query.cred) {
+        Ok(()) => {
+            tracing::info!("Removed MCP credentials for '{}'", query.cred);
+            Json(serde_json::json!({"success": true})).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to remove MCP credentials: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MCP auth helpers
+// ---------------------------------------------------------------------------
+
+/// In-memory store for MCP PKCE state (state token → verifier + credential name).
+/// Entries expire after 10 minutes. Not persisted across restarts.
+struct McpPkceStore {
+    entries: tokio::sync::Mutex<std::collections::HashMap<String, McpPkceEntry>>,
+}
+
+struct McpPkceEntry {
+    verifier: String,
+    cred_name: String,
+    created_at: std::time::Instant,
+}
+
+impl McpPkceStore {
+    fn new() -> Self {
+        Self {
+            entries: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Insert a PKCE entry. Cleans up entries older than 10 minutes.
+    async fn insert(&self, state: String, verifier: String, cred_name: String) {
+        let mut map = self.entries.lock().await;
+        // Cleanup expired entries (older than 10 min)
+        let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(600);
+        map.retain(|_, v| v.created_at > cutoff);
+        map.insert(state, McpPkceEntry {
+            verifier,
+            cred_name,
+            created_at: std::time::Instant::now(),
+        });
+    }
+
+    /// Take and remove a PKCE entry (single-use).
+    async fn take(&self, state: &str) -> Option<McpPkceEntry> {
+        let mut map = self.entries.lock().await;
+        map.remove(state)
+    }
+}
+
+/// Global singleton PKCE store for MCP browser logins.
+static MCP_PKCE: std::sync::OnceLock<McpPkceStore> = std::sync::OnceLock::new();
+
+/// Get or initialize the global MCP PKCE store.
+fn mcp_pkce() -> &'static McpPkceStore {
+    MCP_PKCE.get_or_init(McpPkceStore::new)
+}
+
+/// Simplified MCP credential info (parsed from TOML).
+enum McpCredentialInfo {
+    WebInteractive {
+        issuer_url: String,
+        client_id: String,
+        client_secret: Option<String>,
+        scope: String,
+    },
+    Other(String),
+}
+
+/// Load a specific MCP credential from the session's config_toml.
+async fn load_mcp_credential(
+    state: &crate::ServerState,
+    cred_name: &str,
+) -> Result<McpCredentialInfo, AuthError> {
+    let config_toml = {
+        let session = state.session.lock().await;
+        session
+            .config_toml
+            .clone()
+            .ok_or(AuthError::AuthNotConfigured)?
+    };
+
+    let config: toml::Value = toml::from_str(&config_toml)
+        .map_err(|e| AuthError::OidcError(format!("Config parse error: {}", e)))?;
+
+    let cred = config
+        .get("mcp")
+        .and_then(|m| m.get("credentials"))
+        .and_then(|c| c.as_table())
+        .and_then(|c| c.get(cred_name))
+        .ok_or_else(|| AuthError::OidcError(format!("Credential '{}' not found", cred_name)))?;
+
+    let cred_type = cred.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
+
+    match cred_type {
+        "web-interactive" => {
+            let issuer_url = cred
+                .get("issuer_url")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AuthError::OidcError("Missing issuer_url".into()))?
+                .to_string();
+            let client_id = cred
+                .get("client_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| AuthError::OidcError("Missing client_id".into()))?
+                .to_string();
+            let client_secret = cred
+                .get("client_secret")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let scope = cred
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("openid profile email")
+                .to_string();
+
+            Ok(McpCredentialInfo::WebInteractive {
+                issuer_url,
+                client_id,
+                client_secret,
+                scope,
+            })
+        }
+        other => Ok(McpCredentialInfo::Other(other.to_string())),
+    }
 }
 
 // ---------------------------------------------------------------------------
