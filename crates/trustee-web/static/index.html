@@ -610,6 +610,59 @@
     #toast.visible { opacity: 1; }
     #toast.success { border-color: #4ade80; }
     #toast.error { border-color: #f87171; }
+
+    /* --- MCP Connections modal --- */
+    #mcp-overlay {
+      position: fixed; inset: 0; z-index: 9000;
+      background: rgba(0,0,0,0.7);
+      display: flex; align-items: flex-start; justify-content: center;
+      padding: 40px 16px;
+      overflow-y: auto;
+    }
+    #mcp-overlay.hidden { display: none; }
+    .mcp-modal {
+      background: #12121a;
+      border: 1px solid #333;
+      border-radius: 12px;
+      width: 100%; max-width: 540px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    .mcp-cred-card {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 16px; margin-bottom: 8px;
+      background: #1a1a2e; border: 1px solid #2a2a3a; border-radius: 8px;
+    }
+    .mcp-cred-info { flex: 1; min-width: 0; }
+    .mcp-cred-name {
+      font-size: 14px; font-weight: 600; color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .mcp-cred-meta {
+      font-size: 12px; color: #888; margin-top: 4px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    .mcp-cred-servers {
+      font-size: 11px; color: #666; margin-top: 2px;
+    }
+    .mcp-dot {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; flex-shrink: 0;
+    }
+    .mcp-dot.ok { background: #4ade80; }
+    .mcp-dot.warn { background: #fbbf24; }
+    .mcp-dot.fail { background: #6b7280; }
+    .mcp-dot.error { background: #f87171; }
+    .mcp-btn-sm {
+      padding: 6px 14px; font-size: 12px; flex-shrink: 0; margin-left: 10px;
+    }
+    #btn-mcp {
+      background: none; border: 1px solid #333; color: #888;
+      padding: 4px 10px; font-size: 11px; border-radius: 4px;
+      cursor: pointer; font-family: inherit;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    #btn-mcp:hover { border-color: #555; color: #ccc; }
   </style>
 </head>
 <body>
@@ -630,6 +683,7 @@
   <button id="btn-burger" title="Sessions">☰</button>
   <h1>Trustee</h1>
   <div class="header-right">
+    <button id="btn-mcp" title="MCP Connections">🔌 MCP</button>
     <span class="context-badge" id="context-tokens">0 tokens</span>
     <div id="header-user" style="display:none;">
     <div class="user-avatar" id="user-avatar"></div>
@@ -684,6 +738,19 @@
     </div>
     <div class="sessions-body" id="sessions-body">
       <div class="sessions-loading"><span class="spinner"></span>Loading sessions...</div>
+    </div>
+  </div>
+</div>
+
+<!-- MCP Connections overlay -->
+<div id="mcp-overlay" class="hidden">
+  <div class="mcp-modal">
+    <div class="sessions-header">
+      <span class="sessions-title">🔌 MCP Connections</span>
+      <button class="sessions-close" id="mcp-close">✕</button>
+    </div>
+    <div class="sessions-body" id="mcp-status-body">
+      <div class="sessions-loading"><span class="spinner"></span>Loading MCP status...</div>
     </div>
   </div>
 </div>
@@ -1630,6 +1697,121 @@ function formatSessionTimeAgo(dateStr) {
   return Math.floor(diff / 2419200) + 'mo ago';
 }
 
+// --- MCP Connections panel ---
+const mcpOverlay = document.getElementById('mcp-overlay');
+const mcpStatusBody = document.getElementById('mcp-status-body');
+let mcpPollTimer = null;
+
+document.getElementById('btn-mcp').addEventListener('click', openMcpOverlay);
+document.getElementById('mcp-close').addEventListener('click', closeMcpOverlay);
+
+mcpOverlay.addEventListener('click', (e) => {
+  if (e.target === mcpOverlay) closeMcpOverlay();
+});
+
+async function openMcpOverlay() {
+  mcpOverlay.classList.remove('hidden');
+  await fetchMcpStatus();
+  // Poll every 30s while open
+  mcpPollTimer = setInterval(fetchMcpStatus, 30000);
+}
+
+function closeMcpOverlay() {
+  mcpOverlay.classList.add('hidden');
+  if (mcpPollTimer) { clearInterval(mcpPollTimer); mcpPollTimer = null; }
+}
+
+async function fetchMcpStatus() {
+  try {
+    const res = await fetch(API + '/auth/mcp/status', { credentials: 'include' });
+    if (!res.ok) {
+      mcpStatusBody.innerHTML = '<div class="sessions-empty">Failed to load MCP status.</div>';
+      return;
+    }
+    const data = await res.json();
+    renderMcpStatus(data);
+  } catch (e) {
+    mcpStatusBody.innerHTML = '<div class="sessions-empty">Failed to load MCP status.</div>';
+  }
+}
+
+function renderMcpStatus(credentials) {
+  if (!credentials || !credentials.length) {
+    mcpStatusBody.innerHTML = '<div class="sessions-empty">No MCP credentials configured.<br>Add credentials in trustee.toml.</div>';
+    return;
+  }
+
+  mcpStatusBody.innerHTML = '';
+  for (const cred of credentials) {
+    const card = document.createElement('div');
+    card.className = 'mcp-cred-card';
+
+    const dotClass = cred.connected ? 'ok' : 'fail';
+    const statusText = cred.type === 'web-session'
+      ? (cred.connected ? 'Session (auto)' : 'No session')
+      : (cred.connected ? 'Connected' : 'Not connected');
+
+    let metaHtml = `<span style="color:#888">${escapeHtml(cred.type)}</span> · <span>${statusText}</span>`;
+    if (cred.expires_at && cred.connected && cred.type !== 'web-session') {
+      metaHtml += ` · expires ${escapeHtml(cred.expires_at)}`;
+    }
+
+    const serversList = (cred.servers || []).join(', ');
+    const serversHtml = serversList ? `<div class="mcp-cred-servers">Used by: ${escapeHtml(serversList)}</div>` : '';
+
+    let actionHtml = '';
+    if (cred.type === 'web-interactive') {
+      if (cred.connected) {
+        actionHtml = `<button class="mcp-btn-sm danger" onclick="mcpDisconnect('${escapeHtml(cred.credential)}')">Disconnect</button>`;
+      } else {
+        actionHtml = `<button class="mcp-btn-sm" onclick="mcpConnect('${escapeHtml(cred.credential)}')">Connect</button>`;
+      }
+    }
+
+    card.innerHTML = `
+      <div class="mcp-cred-info">
+        <div class="mcp-cred-name"><span class="mcp-dot ${dotClass}"></span> ${escapeHtml(cred.credential)}</div>
+        <div class="mcp-cred-meta">${metaHtml}</div>
+        ${serversHtml}
+      </div>
+      ${actionHtml}
+    `;
+    mcpStatusBody.appendChild(card);
+  }
+}
+
+async function mcpConnect(credName) {
+  window.location.href = API + '/auth/mcp/login?cred=' + encodeURIComponent(credName);
+}
+
+async function mcpDisconnect(credName) {
+  try {
+    await fetch(API + '/auth/mcp/logout?cred=' + encodeURIComponent(credName), {
+      method: 'POST',
+      credentials: 'include',
+    });
+    showToast(`Disconnected ${credName}`, 'success');
+    fetchMcpStatus();
+  } catch (e) {
+    showToast('Failed to disconnect', 'error');
+  }
+}
+
+// Check for MCP callback redirects (connected or error)
+function checkMcpCallback() {
+  const params = new URLSearchParams(window.location.search);
+  const connected = params.get('mcp_connected');
+  const error = params.get('mcp_error');
+  if (connected) {
+    showToast(`Connected to ${decodeURIComponent(connected)}`, 'success');
+    window.history.replaceState({}, '', window.location.pathname);
+  }
+  if (error) {
+    showToast(`MCP error: ${decodeURIComponent(error)}`, 'error');
+    window.history.replaceState({}, '', window.location.pathname);
+  }
+}
+
 // --- Toast ---
 let toastTimer = null;
 function showToast(msg, type) {
@@ -1656,6 +1838,7 @@ handleMessage = function(msg) {
 
 (async () => {
   syncFabPosition();
+  checkMcpCallback();
   const authed = await checkAuth();
   if (authed) {
     refreshSession();
