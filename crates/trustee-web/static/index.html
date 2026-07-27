@@ -1516,8 +1516,21 @@ function renderSessionCards(sessions) {
     const card = document.createElement('div');
     card.className = 'session-card' + (s.is_current_project ? ' current-project' : '');
 
-    // Prefer human-readable names, fall back to raw values
-    const displayTitle = s.description || s.session_id;
+    // Prefer human-readable names, fall back to auto-deriving from session_id
+    let displayTitle;
+    if (s.description) {
+      displayTitle = s.description;
+    } else {
+      // Try to extract task slug from session_YYYY_MM_DD_HH_MM_slug format
+      const parts = s.session_id.split('_');
+      if (parts.length > 6 && parts[0] === 'session') {
+        // Rejoin everything after the timestamp parts
+        const slug = parts.slice(5).join(' ');
+        displayTitle = slug || s.session_id;
+      } else {
+        displayTitle = s.session_id;
+      }
+    }
     const idDisplay = displayTitle.length > 60
       ? displayTitle.substring(0, 57) + '…'
       : displayTitle;
