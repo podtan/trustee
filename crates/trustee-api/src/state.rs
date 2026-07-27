@@ -77,6 +77,10 @@ pub struct ServerState {
     pub auth: Option<Arc<AuthState>>,
     /// Shared config TOML (all users share the same agent config).
     pub config_toml: Option<String>,
+    /// Shared secrets (injected into every per-user session).
+    pub secrets: Option<std::collections::HashMap<String, String>>,
+    /// Shared build info (injected into every per-user session).
+    pub build_info: Option<trustee_core::types::BuildInfo>,
     /// Global concurrency limiter — limits the number of simultaneous workflows
     /// across all users. Prevents resource exhaustion on shared infrastructure.
     /// Default: 8 concurrent workflows.
@@ -112,6 +116,8 @@ impl ServerState {
             ws_tx,
             auth,
             config_toml: None,
+            secrets: None,
+            build_info: None,
             workflow_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
         }
     }
@@ -119,6 +125,18 @@ impl ServerState {
     /// Set the shared config TOML.
     pub fn with_config_toml(mut self, config_toml: String) -> Self {
         self.config_toml = Some(config_toml);
+        self
+    }
+
+    /// Set the shared secrets.
+    pub fn with_secrets(mut self, secrets: std::collections::HashMap<String, String>) -> Self {
+        self.secrets = Some(secrets);
+        self
+    }
+
+    /// Set the shared build info.
+    pub fn with_build_info(mut self, build_info: trustee_core::types::BuildInfo) -> Self {
+        self.build_info = Some(build_info);
         self
     }
 
@@ -160,6 +178,10 @@ impl ServerState {
                 }
             }
         }
+
+        // Copy shared secrets and build info
+        session.secrets = self.secrets.clone();
+        session.build_info = self.build_info.clone();
 
         // Isolate checkpoint storage per user by setting a unique project_id.
         // The project_id becomes the storage partition key in ABK's checkpoint
