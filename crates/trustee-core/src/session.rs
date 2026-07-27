@@ -184,10 +184,16 @@ impl Session {
             TuiMessage::ResumeInfo(info) => {
                 if self.workflow_state == WorkflowState::Cancelling && info.is_none() {
                     self.resume_info = self.backup_resume_info.take();
-                } else {
+                } else if info.is_some() {
+                    // Only overwrite with a valid resume_info.
+                    // Don't let ResumeInfo(None) clobber a valid Some that was
+                    // set by an earlier incremental checkpoint message — this
+                    // happens when the error/cancel path fails to create a
+                    // final checkpoint but earlier checkpoints exist.
                     self.resume_info = info;
                     self.backup_resume_info = None;
                 }
+                // If info is None and we're not cancelling, keep existing resume_info.
                 if self.workflow_state == WorkflowState::Cancelling {
                     self.workflow_state = WorkflowState::Idle;
                 }
@@ -323,6 +329,10 @@ impl Session {
             let task_result = result.unwrap_or_else(|e| abk::cli::TaskResult {
                 success: false,
                 error: Some(e.to_string()),
+                // resume_info will be None here, but the on_checkpoint channel
+                // may have already delivered a valid ResumeInfo via TuiMessage.
+                // The ResumeInfo handler now ignores None when a valid Some exists,
+                // so this None won't clobber the earlier incremental checkpoint.
                 resume_info: None,
             });
 
