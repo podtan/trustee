@@ -104,6 +104,10 @@ pub async fn run(
         .route("/api/v1/session/cancel", post(routes::post_cancel))
         .route("/api/v1/session/handoff", post(routes::post_handoff))
         .route("/api/v1/session/stream", get(routes::ws_handler))
+        // Session naming
+        .route("/api/v1/session/name", post(routes::set_session_name))
+        .route("/api/v1/session/new", post(routes::new_session))
+        .route("/api/v1/project/name", post(routes::set_project_name))
         // Session discovery & resume
         .route("/api/v1/sessions", get(routes::list_sessions))
         .route("/api/v1/sessions/{id}", get(routes::get_session_detail))

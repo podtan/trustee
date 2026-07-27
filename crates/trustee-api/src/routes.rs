@@ -39,6 +39,8 @@ pub struct SessionResponse {
     pub context_tokens: usize,
     pub input: String,
     pub resume_info_present: bool,
+    pub session_name: Option<String>,
+    pub project_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +108,32 @@ pub struct SessionHistoryResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Naming DTOs
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SetNameRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NewSessionRequest {
+    pub session_name: Option<String>,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetNameResponse {
+    pub accepted: bool,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NewSessionResponse {
+    pub accepted: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
@@ -150,6 +178,8 @@ pub async fn get_session(
         context_tokens: session.current_context_tokens,
         input: session.input.clone(),
         resume_info_present: session.resume_info.is_some(),
+        session_name: session.session_name.clone(),
+        project_name: session.project_name.clone(),
     });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
@@ -269,6 +299,8 @@ async fn handle_ws(socket: WebSocket, state: ServerState) {
             context_tokens: session.current_context_tokens,
             input: session.input.clone(),
             resume_info_present: session.resume_info.is_some(),
+            session_name: session.session_name.clone(),
+            project_name: session.project_name.clone(),
         };
         if let Ok(json) = serde_json::to_string(&snapshot) {
             let _ = sender.send(Message::Text(json.into())).await;
@@ -484,6 +516,96 @@ pub async fn get_session_history(
         }
         None => Err((StatusCode::NOT_FOUND, "Session not found".to_string())),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Session/project naming handlers
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/session/name — set the display name for the current session.
+///
+/// This name flows through RunContext on the next `execute_command()`,
+/// becoming `SessionMetadata.description` in checkpoint storage.
+pub async fn set_session_name(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SetNameRequest>,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    {
+        let mut session = state.session.lock().await;
+        session.session_name = Some(req.name.clone());
+    }
+
+    let resp = Json(SetNameResponse {
+        accepted: true,
+        name: req.name,
+    });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
+/// POST /api/v1/project/name — set the display name for the current project.
+///
+/// This name flows through RunContext on the next `execute_command()`,
+/// becoming `ProjectMetadata.name` in checkpoint storage.
+pub async fn set_project_name(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SetNameRequest>,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    {
+        let mut session = state.session.lock().await;
+        session.project_name = Some(req.name.clone());
+    }
+
+    let resp = Json(SetNameResponse {
+        accepted: true,
+        name: req.name,
+    });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
+/// POST /api/v1/session/new — start a fresh session.
+///
+/// Clears `resume_info` (severing connection to the previous checkpoint)
+/// and optionally sets session identity fields for the next workflow.
+pub async fn new_session(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<NewSessionRequest>,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    {
+        let mut session = state.session.lock().await;
+        if session.workflow_state != trustee_core::types::WorkflowState::Idle {
+            return Err((
+                StatusCode::CONFLICT,
+                "Workflow is running or cancelling".to_string(),
+            ));
+        }
+        session.resume_info = None;
+        session.backup_resume_info = None;
+        session.output_lines.clear();
+        session.session_name = req.session_name;
+        session.session_id = req.session_id;
+    }
+
+    // Broadcast so WebSocket clients know to reset their view
+    let msg = serde_json::json!({ "type": "NewSession" });
+    let _ = state.ws_tx.send(msg.to_string());
+
+    let resp = Json(NewSessionResponse { accepted: true });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
 // ---------------------------------------------------------------------------

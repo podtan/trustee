@@ -296,6 +296,16 @@ impl Session {
 
         if !is_continuation {
             self.output_lines.clear();
+            // Auto-derive session_name from the first command if not explicitly set.
+            // Truncate to 80 chars for a reasonable display name.
+            if self.session_name.is_none() {
+                let derived = if command.len() > 80 {
+                    format!("{}...", &command[..77])
+                } else {
+                    command.clone()
+                };
+                self.session_name = Some(derived);
+            }
         }
 
         self.output_lines.push(format!("> {}", command));
@@ -315,6 +325,10 @@ impl Session {
 
         let agent_name = self.agent_name.clone();
         let token_store = self.token_store.clone();
+        let project_id = self.project_id.clone();
+        let project_name = self.project_name.clone();
+        let session_id = self.session_id.clone();
+        let session_name = self.session_name.clone();
 
         self.backup_resume_info = self.resume_info.clone();
         let resume_info = self.resume_info.take();
@@ -343,6 +357,23 @@ impl Session {
             // Build RunContext from session fields for stateless operation
             let mut run_ctx = RunContext::new()
                 .with_agent_name(agent_name.clone());
+
+            // Set project identity if any field is provided
+            if project_id.is_some() || project_name.is_some() {
+                run_ctx = run_ctx.with_project(abk::context::ProjectIdentity {
+                    id: project_id.unwrap_or_else(|| "default".to_string()),
+                    name: project_name,
+                });
+            }
+
+            // Set session identity if any field is provided
+            if session_id.is_some() || session_name.is_some() {
+                run_ctx = run_ctx.with_session(abk::context::SessionIdentity {
+                    id: session_id.unwrap_or_else(|| "default".to_string()),
+                    name: session_name,
+                });
+            }
+
             #[cfg(feature = "registry-mcp-token")]
             {
                 if let Some(ref ts) = token_store {

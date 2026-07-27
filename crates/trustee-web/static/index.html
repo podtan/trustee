@@ -1504,28 +1504,31 @@ function renderSessionCards(sessions) {
   }
 
   sessionsBody.innerHTML = '';
+
+  // Add "New Session" button at top
+  const newBtn = document.createElement('button');
+  newBtn.style.cssText = 'width:100%;padding:10px;margin-bottom:12px;background:#2563eb;color:white;border:none;border-radius:6px;cursor:pointer;font-size:14px;';
+  newBtn.textContent = '✚ New Session';
+  newBtn.onclick = () => startNewSession();
+  sessionsBody.appendChild(newBtn);
+
   for (const s of sessions) {
     const card = document.createElement('div');
     card.className = 'session-card' + (s.is_current_project ? ' current-project' : '');
 
-    const idDisplay = s.session_id.length > 20
-      ? s.session_id.substring(0, 8) + '…' + s.session_id.substring(s.session_id.length - 6)
-      : s.session_id;
+    // Prefer human-readable names, fall back to raw values
+    const displayTitle = s.description || s.session_id;
+    const idDisplay = displayTitle.length > 60
+      ? displayTitle.substring(0, 57) + '…'
+      : displayTitle;
 
-    const projectName = s.project_path.split('/').filter(Boolean).pop() || s.project_path;
+    const projectName = s.project_name
+      || (s.project_path.split('/').filter(Boolean).pop() || s.project_path);
     const timeAgo = formatSessionTimeAgo(s.last_accessed);
 
     let metaHtml = `<span>${escapeHtml(projectName)}</span> · <span>${timeAgo}</span>`;
     if (s.is_current_project) {
       metaHtml = '<span style="color:#60a5fa">● current project</span> · ' + metaHtml;
-    }
-
-    let descHtml = '';
-    if (s.description) {
-      const truncDesc = s.description.length > 60
-        ? s.description.substring(0, 57) + '…'
-        : s.description;
-      descHtml = `<div class="session-card-desc">${escapeHtml(truncDesc)}</div>`;
     }
 
     card.innerHTML = `
@@ -1535,13 +1538,53 @@ function renderSessionCards(sessions) {
           ${metaHtml}
           <span class="session-badge">${s.checkpoint_count} checkpoint${s.checkpoint_count !== 1 ? 's' : ''}</span>
         </div>
-        ${descHtml}
       </div>
       <div class="session-card-actions">
         <button onclick="resumeSession('${s.session_id}', ${s.checkpoint_count})">Resume</button>
       </div>
     `;
     sessionsBody.appendChild(card);
+  }
+}
+
+async function startNewSession() {
+  const name = prompt('Session name (optional — leave blank to auto-derive):');
+  if (name === null) return; // user cancelled
+
+  try {
+    const res = await fetch(API + '/api/v1/session/new', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_name: name || null,
+      }),
+    });
+
+    if (res.status === 409) {
+      showToast('Cannot start new session while workflow is running. Cancel first.', 'error');
+      return;
+    }
+    if (!res.ok) {
+      showToast('Failed to start new session.', 'error');
+      return;
+    }
+
+    showToast('Started new session', 'success');
+    closeSessionsOverlay();
+  } catch (e) {
+    showToast('Failed to start new session.', 'error');
+  }
+}
+
+async function saveSessionName(name) {
+  try {
+    await fetch(API + '/api/v1/session/name', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+  } catch (e) {
+    // Best-effort
   }
 }
 
