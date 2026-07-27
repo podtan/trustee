@@ -219,9 +219,17 @@ pub async fn post_command(
             ));
         }
 
+        // Check global concurrency limit (across all users)
+        let permit = state.workflow_semaphore.clone().acquire_owned().await
+            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".to_string()))?;
+
         // Wire the per-user token store into the session so it flows
         // through RunContext to ABK's MCP credential initialization.
         session.token_store = Some(token_store);
+
+        // Store the concurrency permit — it will be dropped when the
+        // workflow completes and state transitions back to Idle.
+        session.workflow_permit = Some(permit);
 
         session.input = req.command;
         session.execute_command();

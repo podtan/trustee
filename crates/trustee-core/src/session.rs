@@ -81,6 +81,12 @@ pub struct Session {
     pub session_id: Option<String>,
     /// Human-readable session name. None = no description
     pub session_name: Option<String>,
+
+    /// Concurrency permit — held while a workflow is running.
+    /// When the workflow completes (state → Idle), this is dropped,
+    /// releasing the permit back to the global semaphore.
+    /// None when no workflow is running or when concurrency limiting is disabled.
+    pub workflow_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl Session {
@@ -116,6 +122,7 @@ impl Session {
             project_name: None,
             session_id: None,
             session_name: None,
+            workflow_permit: None,
         };
         (session, workflow_rx)
     }
@@ -221,6 +228,8 @@ impl Session {
                 // If info is None and we're not cancelling, keep existing resume_info.
                 if self.workflow_state == WorkflowState::Cancelling {
                     self.workflow_state = WorkflowState::Idle;
+                    // Release the concurrency permit when the workflow finishes.
+                    self.workflow_permit = None;
                 }
                 if self.resume_info.is_some() {
                     if std::env::var("RUST_LOG")

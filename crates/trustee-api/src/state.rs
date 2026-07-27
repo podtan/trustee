@@ -77,6 +77,10 @@ pub struct ServerState {
     pub auth: Option<Arc<AuthState>>,
     /// Shared config TOML (all users share the same agent config).
     pub config_toml: Option<String>,
+    /// Global concurrency limiter — limits the number of simultaneous workflows
+    /// across all users. Prevents resource exhaustion on shared infrastructure.
+    /// Default: 8 concurrent workflows.
+    pub workflow_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl ServerState {
@@ -108,12 +112,19 @@ impl ServerState {
             ws_tx,
             auth,
             config_toml: None,
+            workflow_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
         }
     }
 
     /// Set the shared config TOML.
     pub fn with_config_toml(mut self, config_toml: String) -> Self {
         self.config_toml = Some(config_toml);
+        self
+    }
+
+    /// Set the max concurrent workflows.
+    pub fn with_max_concurrent_workflows(mut self, max: usize) -> Self {
+        self.workflow_semaphore = Arc::new(tokio::sync::Semaphore::new(max));
         self
     }
 
