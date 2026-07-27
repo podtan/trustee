@@ -1000,7 +1000,9 @@ async fn mcp_callback_handler(
     );
 
     let agent_name = {
-        let session = state.session.lock().await;
+        let user_key = state.resolve_user_key(&headers).await;
+        let (session_arc, _, _) = state.ensure_user_session(&user_key).await;
+        let session = session_arc.lock().await;
         session.agent_name.clone()
     };
     let token_store = FileTokenStore::new(&agent_name);
@@ -1040,7 +1042,9 @@ async fn mcp_status_handler(
 
     // Parse MCP config from session
     let config_toml = {
-        let session = state.session.lock().await;
+        let user_key = state.resolve_user_key(&headers).await;
+        let (session_arc, _, _) = state.ensure_user_session(&user_key).await;
+        let session = session_arc.lock().await;
         match &session.config_toml {
             Some(t) => t.clone(),
             None => return (StatusCode::INTERNAL_SERVER_ERROR, "Config not loaded").into_response(),
@@ -1053,7 +1057,9 @@ async fn mcp_status_handler(
     };
 
     let agent_name = {
-        let session = state.session.lock().await;
+        let user_key = state.resolve_user_key(&headers).await;
+        let (session_arc, _, _) = state.ensure_user_session(&user_key).await;
+        let session = session_arc.lock().await;
         session.agent_name.clone()
     };
     let token_store = FileTokenStore::new(&agent_name);
@@ -1140,7 +1146,9 @@ async fn mcp_logout_handler(
     }
 
     let agent_name = {
-        let session = state.session.lock().await;
+        let user_key = state.resolve_user_key(&headers).await;
+        let (session_arc, _, _) = state.ensure_user_session(&user_key).await;
+        let session = session_arc.lock().await;
         session.agent_name.clone()
     };
     let token_store = FileTokenStore::new(&agent_name);
@@ -1228,13 +1236,10 @@ async fn load_mcp_credential(
     state: &crate::ServerState,
     cred_name: &str,
 ) -> Result<McpCredentialInfo, AuthError> {
-    let config_toml = {
-        let session = state.session.lock().await;
-        session
-            .config_toml
-            .clone()
-            .ok_or(AuthError::AuthNotConfigured)?
-    };
+    let config_toml = state
+        .config_toml
+        .clone()
+        .ok_or(AuthError::AuthNotConfigured)?;
 
     let config: toml::Value = toml::from_str(&config_toml)
         .map_err(|e| AuthError::OidcError(format!("Config parse error: {}", e)))?;

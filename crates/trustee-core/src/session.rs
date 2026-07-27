@@ -352,8 +352,6 @@ impl Session {
             let tui_sink: abk::orchestration::output::SharedSink =
                 Arc::new(crate::session::TuiForwardSink::new(tx.clone()));
 
-            abk::observability::set_tui_mode(true);
-
             // Build RunContext from session fields for stateless operation
             let mut run_ctx = RunContext::new()
                 .with_agent_name(agent_name.clone());
@@ -381,20 +379,24 @@ impl Session {
                 }
             }
 
-            let result = abk::cli::run_task_from_raw_config(
-                &config_toml,
-                secrets,
-                build_info,
-                &command,
-                Some(tui_sink),
-                resume_info,
-                Some(resume_tx),
-                Some(child_token),
-                Some(&run_ctx),
-            )
+            // Run the entire workflow inside a TUI-mode scope.
+            // This replaces the old set_tui_mode(true)/set_tui_mode(false)
+            // process-global mutations with a task-local scope.
+            let result = abk::observability::with_tui_mode(true, async {
+                abk::cli::run_task_from_raw_config(
+                    &config_toml,
+                    secrets,
+                    build_info,
+                    &command,
+                    Some(tui_sink),
+                    resume_info,
+                    Some(resume_tx),
+                    Some(child_token),
+                    Some(&run_ctx),
+                )
+                .await
+            })
             .await;
-
-            abk::observability::set_tui_mode(false);
 
             let task_result = result.unwrap_or_else(|e| abk::cli::TaskResult {
                 success: false,
@@ -457,8 +459,6 @@ impl Session {
             let cap_sink: abk::orchestration::output::SharedSink =
                 Arc::new(HandoffCaptureSink::new(cap_tx, child_token.clone()));
 
-            abk::observability::set_tui_mode(true);
-
             let base = "Output a session handoff briefing in at most 300 lines. \
                  Do NOT use any tools. Include: the FULL ABSOLUTE PATH of every \
                  project/repository being worked on (e.g. /Projects/Foo/bar — never \
@@ -484,20 +484,22 @@ impl Session {
                 // need MCP credentials, so we skip it here.
             }
 
-            let _res = abk::cli::run_task_from_raw_config(
-                &config_toml,
-                secrets,
-                build_info,
-                &prompt,
-                Some(cap_sink),
-                resume_info,
-                Some(dummy_tx),
-                Some(child_token),
-                Some(&run_ctx),
-            )
+            // Run inside TUI-mode scope (task-local, not process-global)
+            let _res = abk::observability::with_tui_mode(true, async {
+                abk::cli::run_task_from_raw_config(
+                    &config_toml,
+                    secrets,
+                    build_info,
+                    &prompt,
+                    Some(cap_sink),
+                    resume_info,
+                    Some(dummy_tx),
+                    Some(child_token),
+                    Some(&run_ctx),
+                )
+                .await
+            })
             .await;
-
-            abk::observability::set_tui_mode(false);
 
             let mut text_parts = String::new();
             let mut reasoning_parts = String::new();

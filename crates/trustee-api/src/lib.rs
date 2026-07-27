@@ -56,6 +56,7 @@ pub async fn run(
     let thq_config = thq_register::ThqConfig::from_toml(&config_toml);
 
     // Build the session
+    let config_toml_for_state = config_toml.clone(); // Keep a copy for ServerState
     let (mut session, workflow_rx) = trustee_core::session::Session::new();
     session.config_toml = Some(config_toml);
     session.secrets = Some(secrets);
@@ -74,8 +75,9 @@ pub async fn run(
     // Create the broadcast channel for WebSocket fan-out
     let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(256);
 
-    // Wrap session in shared state
-    let state = ServerState::new(session, ws_tx, auth_state);
+    // Wrap session in shared state (with shared config for per-user sessions)
+    let state = ServerState::new(session, ws_tx, auth_state)
+        .with_config_toml(config_toml_for_state);
 
     // Start background message drain task (owns workflow_rx directly — no deadlock)
     state.clone().spawn_drain_task(workflow_rx);

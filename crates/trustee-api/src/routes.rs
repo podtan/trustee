@@ -151,7 +151,9 @@ pub async fn get_session(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, StatusCode> {
     let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
-    let session = state.session.lock().await;
+    let user_key = state.resolve_user_key(&headers).await;
+    let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+    let session = session_arc.lock().await;
 
     let workflow_state = match session.workflow_state {
         trustee_core::types::WorkflowState::Idle => "Idle",
@@ -194,17 +196,21 @@ pub async fn post_command(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
+    let user_key = state.resolve_user_key(&headers).await;
+    let (session_arc, ws_tx, token_store) = state.ensure_user_session(&user_key).await;
+
     // C1: If auth is configured, push the current session token into
-    // FileTokenStore so that any MCP servers using `type = "web-session"`
+    // the per-user MemoryTokenStore so that MCP servers using `type = "web-session"`
     // credentials can pick it up via InteractiveTokenProvider.
+    // This replaces the insecure FileTokenStore that caused cross-user token leakage.
     let agent_name = {
-        let session = state.session.lock().await;
+        let session = session_arc.lock().await;
         session.agent_name.clone()
     };
-    inject_session_token(&state.auth, &headers, &agent_name).await;
+    inject_session_token(&state.auth, &headers, &agent_name, &token_store).await;
 
     {
-        let mut session = state.session.lock().await;
+        let mut session = session_arc.lock().await;
 
         if session.workflow_state != trustee_core::types::WorkflowState::Idle {
             return Err((
@@ -213,13 +219,17 @@ pub async fn post_command(
             ));
         }
 
+        // Wire the per-user token store into the session so it flows
+        // through RunContext to ABK's MCP credential initialization.
+        session.token_store = Some(token_store);
+
         session.input = req.command;
         session.execute_command();
     }
 
     // Broadcast state change so all WebSocket clients know the workflow started.
     let state_msg = serde_json::json!({"type": "StateChanged", "state": "Running"});
-    let _ = state.ws_tx.send(state_msg.to_string());
+    let _ = ws_tx.send(state_msg.to_string());
 
     let resp = Json(CommandResponse { accepted: true });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
@@ -231,9 +241,12 @@ pub async fn post_cancel(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, StatusCode> {
     let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
+    let user_key = state.resolve_user_key(&headers).await;
+    let (session_arc, ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+
     let cancelled;
     {
-        let session = state.session.lock().await;
+        let session = session_arc.lock().await;
 
         cancelled = session.workflow_state == trustee_core::types::WorkflowState::Running;
         if cancelled {
@@ -244,7 +257,7 @@ pub async fn post_cancel(
     // Broadcast state change so all WebSocket clients know the workflow is cancelling.
     if cancelled {
         let state_msg = serde_json::json!({"type": "StateChanged", "state": "Cancelling"});
-        let _ = state.ws_tx.send(state_msg.to_string());
+        let _ = ws_tx.send(state_msg.to_string());
     }
 
     let resp = Json(CommandResponse { accepted: true });
@@ -257,7 +270,9 @@ pub async fn post_handoff(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, StatusCode> {
     let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
-    let mut session = state.session.lock().await;
+    let user_key = state.resolve_user_key(&headers).await;
+    let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+    let mut session = session_arc.lock().await;
     session.trigger_handoff(String::new());
 
     let resp = Json(CommandResponse { accepted: true });
@@ -271,17 +286,23 @@ pub async fn ws_handler(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, StatusCode> {
     let _cookie = crate::auth::check_auth(&state.auth, &headers).await?;
-    Ok(ws.on_upgrade(move |socket| handle_ws(socket, state)))
+    let user_key = state.resolve_user_key(&headers).await;
+    let (session_arc, ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+    Ok(ws.on_upgrade(move |socket| handle_ws(socket, session_arc, ws_tx)))
 }
 
-async fn handle_ws(socket: WebSocket, state: ServerState) {
+async fn handle_ws(
+    socket: WebSocket,
+    session_arc: std::sync::Arc<tokio::sync::Mutex<trustee_core::session::Session>>,
+    ws_tx: broadcast::Sender<String>,
+) {
     use futures::{SinkExt, StreamExt};
     let (mut sender, mut receiver) = socket.split();
-    let mut ws_rx = state.ws_tx.subscribe();
+    let mut ws_rx = ws_tx.subscribe();
 
     // Send current session state as the first message
     {
-        let session = state.session.lock().await;
+        let session = session_arc.lock().await;
         let snapshot = SessionResponse {
             workflow_state: format!("{:?}", session.workflow_state),
             output_lines: session.output_lines.clone(),
@@ -350,7 +371,9 @@ pub async fn list_sessions(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let config_toml = {
-        let session = state.session.lock().await;
+        let user_key = state.resolve_user_key(&headers).await;
+        let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+        let session = session_arc.lock().await;
         match &session.config_toml {
             Some(c) => c.clone(),
             None => {
@@ -381,7 +404,9 @@ pub async fn get_session_detail(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let config_toml = {
-        let session = state.session.lock().await;
+        let user_key = state.resolve_user_key(&headers).await;
+        let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+        let session = session_arc.lock().await;
         match &session.config_toml {
             Some(c) => c.clone(),
             None => {
@@ -424,7 +449,9 @@ pub async fn resume_session(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let config_toml = {
-        let session = state.session.lock().await;
+        let user_key = state.resolve_user_key(&headers).await;
+        let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+        let session = session_arc.lock().await;
         // Reject if workflow is running
         if session.workflow_state != trustee_core::types::WorkflowState::Idle {
             return Err((
@@ -464,7 +491,9 @@ pub async fn resume_session(
     let iteration = resume_info.iteration;
 
     {
-        let mut session = state.session.lock().await;
+        let user_key = state.resolve_user_key(&headers).await;
+        let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+        let mut session = session_arc.lock().await;
         session.resume_info = Some(resume_info);
         // Clear output so the user sees a fresh context when they resume
         session.output_lines.clear();
@@ -476,7 +505,9 @@ pub async fn resume_session(
         "session_id": session_id,
         "checkpoint_id": checkpoint_id,
     });
-    let _ = state.ws_tx.send(msg.to_string());
+    let user_key = state.resolve_user_key(&headers).await;
+    let (_, ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+    let _ = ws_tx.send(msg.to_string());
 
     let resp = Json(ResumeResponse {
         accepted: true,
@@ -535,8 +566,11 @@ pub async fn set_session_name(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
+    let user_key = state.resolve_user_key(&headers).await;
+    let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+
     {
-        let mut session = state.session.lock().await;
+        let mut session = session_arc.lock().await;
         session.session_name = Some(req.name.clone());
     }
 
@@ -560,8 +594,11 @@ pub async fn set_project_name(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
+    let user_key = state.resolve_user_key(&headers).await;
+    let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+
     {
-        let mut session = state.session.lock().await;
+        let mut session = session_arc.lock().await;
         session.project_name = Some(req.name.clone());
     }
 
@@ -585,8 +622,11 @@ pub async fn new_session(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
+    let user_key = state.resolve_user_key(&headers).await;
+    let (session_arc, ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+
     {
-        let mut session = state.session.lock().await;
+        let mut session = session_arc.lock().await;
         if session.workflow_state != trustee_core::types::WorkflowState::Idle {
             return Err((
                 StatusCode::CONFLICT,
@@ -602,7 +642,7 @@ pub async fn new_session(
 
     // Broadcast so WebSocket clients know to reset their view
     let msg = serde_json::json!({ "type": "NewSession" });
-    let _ = state.ws_tx.send(msg.to_string());
+    let _ = ws_tx.send(msg.to_string());
 
     let resp = Json(NewSessionResponse { accepted: true });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
@@ -655,22 +695,26 @@ pub async fn serve_static(Path(file): Path<String>) -> Response {
 // MCP session token injection (C1 — web-session credentials)
 // ---------------------------------------------------------------------------
 
-/// Reserved credential name in FileTokenStore for web session tokens.
+/// Reserved credential name for web session tokens.
 /// ABK's `WebSession` credential type reads from this name.
 const WEB_SESSION_CRED_NAME: &str = "__web_session";
 
-/// Push the current user's access token into `FileTokenStore` so that
-/// MCP servers with `type = "web-session"` credentials can read it.
+/// Push the current user's access token into the per-user `MemoryTokenStore`
+/// so that MCP servers with `type = "web-session"` credentials can read it.
+///
+/// This replaces the insecure `FileTokenStore` that wrote to a shared
+/// `__web_session.json` file, causing cross-user token leakage when
+/// multiple users ran workflows concurrently.
 ///
 /// Called before each agent command execution. If no auth is configured
-/// or the token cannot be resolved, this is a no-op (the agent will fail
-/// at MCP init with a clear error if it tries to use web-session creds).
+/// or the token cannot be resolved, this is a no-op.
 async fn inject_session_token(
     auth: &Option<Arc<crate::auth::AuthState>>,
     headers: &axum::http::HeaderMap,
-    agent_name: &str,
+    _agent_name: &str,
+    token_store: &pep::MemoryTokenStore,
 ) {
-    use pep::{FileTokenStore, StoredToken, TokenStore};
+    use pep::{StoredToken, TokenStore};
 
     let Some(auth_state) = auth.as_ref() else {
         return; // No auth configured — nothing to inject
@@ -703,10 +747,9 @@ async fn inject_session_token(
         None,
     );
 
-    let store = FileTokenStore::new(agent_name);
-
-    if let Err(e) = store.save(WEB_SESSION_CRED_NAME, &stored) {
-        tracing::warn!("Failed to write session token to FileTokenStore: {}", e);
+    // Store in per-user MemoryTokenStore (in-memory, isolated per user)
+    if let Err(e) = token_store.save(WEB_SESSION_CRED_NAME, &stored) {
+        tracing::warn!("Failed to write session token to MemoryTokenStore: {}", e);
     } else {
         tracing::debug!("Injected session token for web-session MCP credentials (expires {})", expires_at);
     }
