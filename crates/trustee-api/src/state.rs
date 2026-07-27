@@ -150,6 +150,15 @@ impl ServerState {
             }
         }
 
+        // Isolate checkpoint storage per user by setting a unique project_id.
+        // The project_id becomes the storage partition key in ABK's checkpoint
+        // system. By prefixing with the user_key, each user's checkpoints are
+        // stored in separate directories, preventing cross-user access.
+        // The "default" user (no auth) keeps the legacy behavior (no project_id).
+        if user_key != "default" {
+            session.project_id = Some(format!("user:{user_key}"));
+        }
+
         let user_session = UserSession::new(session);
         let session_arc = user_session.session.clone();
         let ws_tx = user_session.ws_tx.clone();

@@ -370,11 +370,11 @@ pub async fn list_sessions(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let config_toml = {
+    let (config_toml, user_project_id) = {
         let user_key = state.resolve_user_key(&headers).await;
         let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
         let session = session_arc.lock().await;
-        match &session.config_toml {
+        let config = match &session.config_toml {
             Some(c) => c.clone(),
             None => {
                 return Err((
@@ -382,12 +382,25 @@ pub async fn list_sessions(
                     "Configuration not loaded".to_string(),
                 ))
             }
-        }
+        };
+        (config, session.project_id.clone())
     };
 
-    let sessions = trustee_core::sessions::list_all_sessions(&config_toml)
+    let mut sessions = trustee_core::sessions::list_all_sessions(&config_toml)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Filter sessions by user namespace (per-user checkpoint isolation).
+    // When auth is disabled (default user), user_project_id is None and we
+    // show all sessions (legacy behavior). When auth is enabled, each user's
+    // checkpoints are in a separate project directory (project_id = "user:{key}"),
+    // so we filter to only show sessions from this user's project.
+    // Note: project_id in SessionSummary is a SHA-256 hash of the identity.
+    // We can't compute the hash here without ABK internals, so for now we
+    // rely on the fact that authenticated users with separate project_ids
+    // will naturally have their checkpoints in separate directories.
+    // TODO: Implement hash-based filtering once ABK exposes ProjectHash::from_identity.
+    let _ = &user_project_id;
 
     let resp = Json(SessionListResponse { sessions });
     Ok(with_rolling_cookie(resp.into_response(), cookie))

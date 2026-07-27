@@ -19,6 +19,8 @@ pub struct SessionSummary {
     pub session_id: String,
     pub project_name: String,
     pub project_path: String,
+    /// Project hash (storage partition key) — used for per-user namespace filtering.
+    pub project_id: String,
     pub checkpoint_count: usize,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_accessed: chrono::DateTime<chrono::Utc>,
@@ -49,6 +51,7 @@ fn session_to_summary(
         session_id: session.session_id.clone(),
         project_name: project.name.clone(),
         project_path: project.project_path.to_string_lossy().to_string(),
+        project_id: project.project_hash.clone(),
         checkpoint_count: session.checkpoint_count as usize,
         created_at: session.created_at,
         last_accessed: session.last_accessed,
