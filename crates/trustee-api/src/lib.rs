@@ -62,6 +62,15 @@ pub async fn run(
     session.build_info = Some(build_info);
     session.parse_auto_handoff_config();
 
+    // Extract agent name from config TOML for stateless operation
+    if let Some(ref config_toml_str) = session.config_toml {
+        if let Ok(table) = config_toml_str.parse::<toml::Value>() {
+            if let Some(name) = table.get("agent").and_then(|a| a.get("name")).and_then(|n| n.as_str()) {
+                session.agent_name = name.to_string();
+            }
+        }
+    }
+
     // Create the broadcast channel for WebSocket fan-out
     let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(256);
 

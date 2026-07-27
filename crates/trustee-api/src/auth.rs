@@ -999,7 +999,10 @@ async fn mcp_callback_handler(
         token_response.scope.clone(),
     );
 
-    let agent_name = std::env::var("ABK_AGENT_NAME").unwrap_or_else(|_| "trustee".into());
+    let agent_name = {
+        let session = state.session.lock().await;
+        session.agent_name.clone()
+    };
     let token_store = FileTokenStore::new(&agent_name);
 
     if let Err(e) = token_store.save(cred_name, &stored) {
@@ -1049,7 +1052,10 @@ async fn mcp_status_handler(
         Err(_) => return Json(serde_json::json!([])).into_response(),
     };
 
-    let agent_name = std::env::var("ABK_AGENT_NAME").unwrap_or_else(|_| "trustee".into());
+    let agent_name = {
+        let session = state.session.lock().await;
+        session.agent_name.clone()
+    };
     let token_store = FileTokenStore::new(&agent_name);
 
     // Build server → credential mapping
@@ -1133,7 +1139,10 @@ async fn mcp_logout_handler(
         return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response();
     }
 
-    let agent_name = std::env::var("ABK_AGENT_NAME").unwrap_or_else(|_| "trustee".into());
+    let agent_name = {
+        let session = state.session.lock().await;
+        session.agent_name.clone()
+    };
     let token_store = FileTokenStore::new(&agent_name);
 
     match token_store.delete(&query.cred) {

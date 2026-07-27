@@ -31,9 +31,16 @@ pub async fn run(
     let mut app = App::new();
 
     // Store config and secrets in the session for workflow execution
-    app.session.config_toml = Some(config_toml);
+    app.session.config_toml = Some(config_toml.clone());
     app.session.secrets = Some(secrets);
     app.session.build_info = Some(build_info);
+
+    // Extract agent name from config for stateless operation
+    if let Ok(table) = config_toml.parse::<toml::Value>() {
+        if let Some(name) = table.get("agent").and_then(|a| a.get("name")).and_then(|n| n.as_str()) {
+            app.session.agent_name = name.to_string();
+        }
+    }
 
     // Parse [tui.auto_handoff] settings from the merged config
     app.parse_auto_handoff_config();

@@ -167,7 +167,11 @@ pub async fn post_command(
     // C1: If auth is configured, push the current session token into
     // FileTokenStore so that any MCP servers using `type = "web-session"`
     // credentials can pick it up via InteractiveTokenProvider.
-    inject_session_token(&state.auth, &headers).await;
+    let agent_name = {
+        let session = state.session.lock().await;
+        session.agent_name.clone()
+    };
+    inject_session_token(&state.auth, &headers, &agent_name).await;
 
     {
         let mut session = state.session.lock().await;
@@ -542,6 +546,7 @@ const WEB_SESSION_CRED_NAME: &str = "__web_session";
 async fn inject_session_token(
     auth: &Option<Arc<crate::auth::AuthState>>,
     headers: &axum::http::HeaderMap,
+    agent_name: &str,
 ) {
     use pep::{FileTokenStore, StoredToken, TokenStore};
 
@@ -576,8 +581,7 @@ async fn inject_session_token(
         None,
     );
 
-    let agent_name = std::env::var("ABK_AGENT_NAME").unwrap_or_else(|_| "trustee".into());
-    let store = FileTokenStore::new(&agent_name);
+    let store = FileTokenStore::new(agent_name);
 
     if let Err(e) = store.save(WEB_SESSION_CRED_NAME, &stored) {
         tracing::warn!("Failed to write session token to FileTokenStore: {}", e);

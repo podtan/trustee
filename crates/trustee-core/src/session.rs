@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use abk::cli::ResumeInfo;
+use abk::context::RunContext;
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -62,6 +63,24 @@ pub struct Session {
     pub should_quit: bool,
     /// Whether auto-scroll is enabled (follows new output)
     pub auto_scroll: bool,
+
+    // --- TMU Phase 1: Stateless Core ---
+    /// Agent name for checkpoint/token paths (replaces ABK_AGENT_NAME env var).
+    /// Defaults to "trustee". Set from config at startup.
+    pub agent_name: String,
+    /// Per-session token store (None = FileTokenStore fallback).
+    /// When set, MCP credential flows use this instead of file-based storage.
+    pub token_store: Option<Arc<dyn pep::token_store::TokenStore>>,
+
+    // --- Project/Session Identity (backward compatible, all None = old behavior) ---
+    /// Storage partition key (replaces path hash). None = hash(working_dir)
+    pub project_id: Option<String>,
+    /// Human-readable project name. None = directory name
+    pub project_name: Option<String>,
+    /// Storage directory name (replaces timestamp slug). None = auto-generate
+    pub session_id: Option<String>,
+    /// Human-readable session name. None = no description
+    pub session_name: Option<String>,
 }
 
 impl Session {
@@ -91,6 +110,12 @@ impl Session {
             mcp_servers: Vec::new(),
             should_quit: false,
             auto_scroll: true,
+            agent_name: "trustee".to_string(),
+            token_store: None,
+            project_id: None,
+            project_name: None,
+            session_id: None,
+            session_name: None,
         };
         (session, workflow_rx)
     }
@@ -288,6 +313,9 @@ impl Session {
         let build_info = self.build_info.clone();
         let tx = self.workflow_tx.clone();
 
+        let agent_name = self.agent_name.clone();
+        let token_store = self.token_store.clone();
+
         self.backup_resume_info = self.resume_info.clone();
         let resume_info = self.resume_info.take();
 
@@ -311,6 +339,16 @@ impl Session {
                 Arc::new(crate::session::TuiForwardSink::new(tx.clone()));
 
             abk::observability::set_tui_mode(true);
+
+            // Build RunContext from session fields for stateless operation
+            let mut run_ctx = RunContext::new()
+                .with_agent_name(agent_name.clone());
+            #[cfg(feature = "registry-mcp-token")]
+            {
+                if let Some(ref ts) = token_store {
+                    run_ctx = run_ctx.with_token_store(ts.clone());
+                }
+            }
 
             let result = abk::cli::run_task_from_raw_config(
                 &config_toml,
@@ -369,6 +407,10 @@ impl Session {
         let secrets = self.secrets.clone().unwrap_or_default();
         let build_info = self.build_info.clone();
         let tx = self.workflow_tx.clone();
+
+        let agent_name = self.agent_name.clone();
+        let token_store = self.token_store.clone();
+
         let resume_info = self.resume_info.take();
 
         self.workflow_state = WorkflowState::Running;
