@@ -359,6 +359,7 @@ impl Session {
                 resume_info,
                 Some(resume_tx),
                 Some(child_token),
+                Some(&run_ctx),
             )
             .await;
 
@@ -442,6 +443,16 @@ impl Session {
             };
 
             let (dummy_tx, _dummy_rx) = mpsc::unbounded_channel();
+
+            // Build RunContext for stateless operation
+            let run_ctx = RunContext::new()
+                .with_agent_name(agent_name.clone());
+            #[cfg(feature = "registry-mcp-token")]
+            {
+                // Note: token_store not available in handoff — handoffs don't
+                // need MCP credentials, so we skip it here.
+            }
+
             let _res = abk::cli::run_task_from_raw_config(
                 &config_toml,
                 secrets,
@@ -451,6 +462,7 @@ impl Session {
                 resume_info,
                 Some(dummy_tx),
                 Some(child_token),
+                Some(&run_ctx),
             )
             .await;
 

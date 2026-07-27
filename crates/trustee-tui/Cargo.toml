@@ -1,6 +1,6 @@
 [package]
 name = "trustee-tui"
-version = "0.1.56"
+version = "0.1.57"
 edition = "2021"
 description = "TUI interface for Trustee agent"
 license = "MIT OR Apache-2.0"
@@ -23,4 +23,4 @@ arboard = "3"
 # Unicode handling (for word-wrap column counting)
 unicode-width = "0.2"
 # Core shared types and workflow logic (brings in abk transitively)
-trustee-core = { version = "0.2.0", path = "../trustee-core" }
+trustee-core = { version = "0.2.1", path = "../trustee-core" }
