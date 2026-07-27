@@ -226,6 +226,16 @@ impl Session {
                     self.backup_resume_info = None;
                 }
                 // If info is None and we're not cancelling, keep existing resume_info.
+
+                // Capture session_id from resume_info so it persists for the
+                // lifetime of this conversation. This is immutable — once ABK
+                // assigns it, we never change it.
+                if let Some(ref ri) = self.resume_info {
+                    if self.session_id.is_none() {
+                        self.session_id = Some(ri.session_id.clone());
+                    }
+                }
+
                 if self.workflow_state == WorkflowState::Cancelling {
                     self.workflow_state = WorkflowState::Idle;
                     // Release the concurrency permit when the workflow finishes.
