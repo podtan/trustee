@@ -17,16 +17,25 @@ pub use trustee_core::types::BuildInfo;
 
 use std::collections::HashMap;
 
+use abk::cli::ResumeInfo;
+
 /// Run the TUI application with configuration
 ///
 /// Task 50: This function accepts the merged configuration and secrets
 /// and will wire them to ABK's run_from_raw_config for workflow execution.
 ///
 /// This function is async to allow concurrent workflow execution with the TUI event loop.
+///
+/// # Arguments
+/// * `config_toml` - Merged TOML configuration string
+/// * `secrets` - Key-value secrets map
+/// * `build_info` - Build-time metadata
+/// * `resume_info` - Optional checkpoint resume info (from `trustee resume -i`)
 pub async fn run(
     config_toml: String,
     secrets: HashMap<String, String>,
     build_info: BuildInfo,
+    resume_info: Option<ResumeInfo>,
 ) -> anyhow::Result<()> {
     let mut app = App::new();
 
@@ -44,6 +53,9 @@ pub async fn run(
 
     // Parse [tui.auto_handoff] settings from the merged config
     app.parse_auto_handoff_config();
+
+    // Set resume_info if provided (from `trustee resume -i`)
+    app.session.resume_info = resume_info;
 
     app.run().await
 }

@@ -321,7 +321,114 @@ async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Launch the TUI application with config
-    trustee_tui::run(merged_config, secrets, build_info()).await?;
+    trustee_tui::run(merged_config, secrets, build_info(), None).await?;
+    Ok(())
+}
+
+/// Run resume-into-TUI mode: `trustee resume -i` or `trustee resume --session <id>`
+///
+/// Intercepts the resume command before it reaches ABK's CLI. Instead of
+/// restoring + writing a file, it:
+/// 1. Loads config/secrets
+/// 2. Displays sessions (interactive) or resolves by session_id
+/// 3. Resolves the latest checkpoint to ResumeInfo
+/// 4. Launches the TUI with that ResumeInfo pre-loaded
+#[cfg(feature = "tui")]
+async fn run_resume_tui_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use abk::cli::commands::resume::select_session_interactive;
+    use abk::cli::runner::{AbkCheckpointAccess, RawConfigCommandContext};
+    use abk::cli::{CheckpointAccess, CommandContext};
+
+    std::env::set_var("ABK_AGENT_NAME", "trustee");
+    let logger = abk::observability::Logger::new(None, None)?;
+    abk::observability::init_global_logger(logger);
+
+    // Load config (same as run_tui_mode)
+    let agent_name = "trustee";
+    let (config_path, secrets_path, _, _) = get_config_paths(agent_name);
+    let local_secrets = load_env_file(&secrets_path)
+        .map_err(|e| format!("Failed to read secrets from {}: {}", secrets_path.display(), e))?;
+    let (user_config_toml, secrets) = match load_remote_config(&local_secrets).await {
+        Some((remote_config, remote_secrets)) => {
+            let mut merged = local_secrets.clone();
+            merged.extend(remote_secrets);
+            (remote_config, merged)
+        }
+        None => {
+            let config_toml = std::fs::read_to_string(&config_path)
+                .map_err(|e| format!("Failed to read config from {}: {}", config_path.display(), e))?;
+            (config_toml, local_secrets)
+        }
+    };
+    let merged_config = merge_config(&user_config_toml)?;
+
+    // Parse config for ABK
+    let config: abk::config::Configuration = toml::from_str(&merged_config)
+        .map_err(|e| format!("Failed to parse config TOML: {}", e))?;
+    let ctx = RawConfigCommandContext::with_agent_name(config, Some("trustee"))?;
+    let checkpoint_access = AbkCheckpointAccess::with_config(ctx.config());
+
+    // Parse args: look for --session <id> or -s <id>
+    let explicit_session_id: Option<&str> = {
+        let mut iter = args.iter();
+        let mut result = None;
+        while let Some(arg) = iter.next() {
+            if (arg == "--session" || arg == "-s") {
+                if let Some(val) = iter.next() {
+                    result = Some(val.as_str());
+                }
+            }
+        }
+        result
+    };
+
+    // Get session selection
+    let (session_id, project_path) = if let Some(sid) = explicit_session_id {
+        // Direct session_id provided — find it across all projects
+        let projects = checkpoint_access.list_projects().await
+            .map_err(|e| format!("Failed to list projects: {}", e))?;
+        let mut found = None;
+        for project in &projects {
+            let sessions = checkpoint_access.list_sessions(&project.project_path).await
+                .map_err(|e| format!("Failed to list sessions: {}", e))?;
+            if sessions.iter().any(|s| s.session_id == sid) {
+                found = Some((sid.to_string(), project.project_path.clone()));
+                break;
+            }
+        }
+        match found {
+            Some(x) => x,
+            None => {
+                eprintln!("Session '{}' not found in any project.", sid);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Interactive selection
+        match select_session_interactive(&ctx, &checkpoint_access).await? {
+            Some(x) => x,
+            None => return Ok(()), // User cancelled or no sessions
+        }
+    };
+
+    // Resolve latest checkpoint
+    let checkpoints = checkpoint_access.list_checkpoints(&project_path, &session_id).await
+        .map_err(|e| format!("Failed to list checkpoints: {}", e))?;
+    let latest = checkpoints.iter().max_by_key(|cp| cp.created_at)
+        .ok_or_else(|| format!("No checkpoints found in session '{}'", session_id))?;
+
+    eprintln!("🔄 Resuming session: {} (checkpoint: {}, iteration: {})",
+        session_id, latest.checkpoint_id, latest.iteration);
+
+    let resume_info = abk::cli::ResumeInfo {
+        session_id: session_id.clone(),
+        checkpoint_id: latest.checkpoint_id.clone(),
+        iteration: latest.iteration as u32,
+        project_path: Some(project_path),
+    };
+
+    // Launch TUI with resume_info
+    trustee_tui::run(merged_config, secrets, build_info(), Some(resume_info)).await?;
     Ok(())
 }
 
@@ -418,6 +525,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "web")]
     if args.get(1).map(|s| s.as_str()) == Some("web") {
         return run_web_mode(&args[2..]).await;
+    }
+
+    // Intercept "resume -i" / "resume --interactive" — launches TUI with resume_info
+    #[cfg(feature = "tui")]
+    if args.get(1).map(|s| s.as_str()) == Some("resume") {
+        let has_interactive = args.iter().any(|a| a == "-i" || a == "--interactive");
+        let has_session = args.iter().any(|a| a == "--session" || a == "-s");
+        if has_interactive || has_session {
+            return run_resume_tui_mode(&args[2..]).await;
+        }
     }
 
     // Defensive: ensure terminal is not in raw mode from a previous TUI session
