@@ -315,8 +315,25 @@ impl Session {
 
         if !is_continuation {
             self.output_lines.clear();
-            // Auto-derive session_name from the first command if not explicitly set.
-            // Truncate to 80 chars for a reasonable display name.
+            // Auto-derive session_id and session_name from the first command
+            // if not explicitly set. The session_id follows the same pattern
+            // as ABK's CLI (session_YYYY_MM_DD_HH_MM_slug) so sessions created
+            // via TUI/Web are consistent with CLI sessions. The session_name
+            // is a human-readable display name (truncated command text).
+            if self.session_id.is_none() {
+                let timestamp = chrono::Utc::now().format("%Y_%m_%d_%H_%M");
+                let slug = command
+                    .chars()
+                    .take(30)
+                    .filter(|c| c.is_alphanumeric() || *c == ' ')
+                    .collect::<String>()
+                    .split_whitespace()
+                    .take(3)
+                    .collect::<Vec<&str>>()
+                    .join("_")
+                    .to_lowercase();
+                self.session_id = Some(format!("session_{}_{}", timestamp, slug));
+            }
             if self.session_name.is_none() {
                 let derived = if command.len() > 80 {
                     format!("{}...", &command[..77])
