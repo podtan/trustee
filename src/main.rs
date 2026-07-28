@@ -362,8 +362,9 @@ async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Launch the TUI application with config
-    trustee_tui::run(merged_config, secrets, build_info(), None).await?;
+    // Launch the TUI application with config and per-user home_dir
+    let user_home = get_user_home_dir();
+    trustee_tui::run(merged_config, secrets, build_info(), None, user_home).await?;
     Ok(())
 }
 
@@ -407,8 +408,23 @@ async fn run_resume_tui_mode(args: &[String]) -> Result<(), Box<dyn std::error::
     // Parse config for ABK
     let config: abk::config::Configuration = toml::from_str(&merged_config)
         .map_err(|e| format!("Failed to parse config TOML: {}", e))?;
-    let ctx = RawConfigCommandContext::with_agent_name(config, Some("trustee"))?;
-    let checkpoint_access = AbkCheckpointAccess::with_config(ctx.config());
+
+    // Compute per-user home_dir for session discovery
+    let user_home = get_user_home_dir();
+
+    // Build context with RunContext so checkpoint access uses per-user home_dir
+    let run_ctx = abk::context::RunContext::new().with_agent_name("trustee");
+    let run_ctx = if let Some(ref home) = user_home {
+        run_ctx.with_home_dir(home.clone())
+    } else {
+        run_ctx
+    };
+    let ctx = RawConfigCommandContext::with_agent_name(config, Some("trustee"))?
+        .with_run_context(run_ctx);
+    let checkpoint_access = match &user_home {
+        Some(home) => AbkCheckpointAccess::with_config_and_home(ctx.config(), home.clone()),
+        None => AbkCheckpointAccess::with_config(ctx.config()),
+    };
 
     // Parse args: look for --session <id> or -s <id>
     let explicit_session_id: Option<&str> = {
@@ -469,8 +485,9 @@ async fn run_resume_tui_mode(args: &[String]) -> Result<(), Box<dyn std::error::
         project_path: Some(project_path),
     };
 
-    // Launch TUI with resume_info
-    trustee_tui::run(merged_config, secrets, build_info(), Some(resume_info)).await?;
+    // Launch TUI with resume_info and per-user home_dir
+    let user_home = get_user_home_dir();
+    trustee_tui::run(merged_config, secrets, build_info(), Some(resume_info), user_home).await?;
     Ok(())
 }
 
@@ -612,7 +629,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let merged = merge_config(&project_config)?;
         let secrets = HashMap::new();
-        abk::cli::run_from_raw_config(&merged, secrets, Some(build_info())).await
+        // Build RunContext with per-user home_dir
+        let run_ctx = {
+            let mut rc = abk::context::RunContext::new().with_agent_name("trustee");
+            if let Some(ref home) = get_user_home_dir() {
+                rc = rc.with_home_dir(home.clone());
+            }
+            rc
+        };
+        abk::cli::run_from_raw_config(&merged, secrets, Some(build_info()), Some(&run_ctx)).await
     } else {
         // All other commands: load config and secrets, pass to ABK
         let (config_path, secrets_path, _config_filename, _env_filename) = get_config_paths(agent_name);
@@ -656,8 +681,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Merge embedded defaults with user overrides (from local or S3)
         let merged_config = merge_config(&user_config_toml)?;
         
+        // Build RunContext with per-user home_dir
+        let run_ctx = {
+            let mut rc = abk::context::RunContext::new().with_agent_name("trustee");
+            if let Some(ref home) = get_user_home_dir() {
+                rc = rc.with_home_dir(home.clone());
+            }
+            rc
+        };
+        
         // Run with merged config (ABK does NOT read files)
-        abk::cli::run_from_raw_config(&merged_config, secrets, Some(build_info())).await
+        abk::cli::run_from_raw_config(&merged_config, secrets, Some(build_info()), Some(&run_ctx)).await
     }
 }
 

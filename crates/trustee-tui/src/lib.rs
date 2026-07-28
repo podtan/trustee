@@ -36,6 +36,7 @@ pub async fn run(
     secrets: HashMap<String, String>,
     build_info: BuildInfo,
     resume_info: Option<ResumeInfo>,
+    home_dir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     let mut app = App::new();
 
@@ -43,6 +44,9 @@ pub async fn run(
     app.session.config_toml = Some(config_toml.clone());
     app.session.secrets = Some(secrets);
     app.session.build_info = Some(build_info);
+
+    // Set per-user home_dir for checkpoint isolation
+    app.session.home_dir = home_dir;
 
     // Extract agent name from config for stateless operation
     if let Ok(table) = config_toml.parse::<toml::Value>() {
