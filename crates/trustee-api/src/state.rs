@@ -384,11 +384,24 @@ impl<'a> serde::Serialize for SerializableMessage<'a> {
                 s.serialize_field("error", err)?;
                 s.end()
             }
-            TuiMessage::ResumeInfo(_) => {
-                let mut s = serializer.serialize_struct("msg", 2)?;
-                s.serialize_field("type", "ResumeInfo")?;
-                s.serialize_field("state", "Idle")?;
-                s.end()
+            TuiMessage::ResumeInfo(info) => {
+                match info {
+                    Some(ri) => {
+                        let mut s = serializer.serialize_struct("msg", 5)?;
+                        s.serialize_field("type", "ResumeInfo")?;
+                        s.serialize_field("state", "Idle")?;
+                        s.serialize_field("session_id", &ri.session_id)?;
+                        s.serialize_field("checkpoint_id", &ri.checkpoint_id)?;
+                        s.serialize_field("iteration", &ri.iteration)?;
+                        s.end()
+                    }
+                    None => {
+                        let mut s = serializer.serialize_struct("msg", 2)?;
+                        s.serialize_field("type", "ResumeInfo")?;
+                        s.serialize_field("state", "Idle")?;
+                        s.end()
+                    }
+                }
             }
             TuiMessage::TodoUpdate(content) => {
                 let mut s = serializer.serialize_struct("msg", 2)?;
