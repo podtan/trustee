@@ -224,6 +224,12 @@ arg_type = "bool"
 long = "verbose"
 short = "v"
 
+[[cli.commands.run.args]]
+name = "resume"
+help = "Resume from a specific session ID (uses latest checkpoint)"
+arg_type = "string"
+long = "resume"
+
 [cli.commands.init]
 description = "Initialize a new trustee project"
 enabled = true
