@@ -186,8 +186,7 @@ impl ServerState {
         // Isolate checkpoint storage per user by setting a per-user home_dir.
         // Each user gets their own checkpoint directory tree at
         // ~/.trustee/users/{user_hash}/, preventing cross-user access.
-        // The "default" user (no auth) keeps the legacy behavior (no home_dir override).
-        if user_key != "default" {
+        {
             // Compute SHA-256 of the user_key, take first 16 hex chars
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
@@ -200,8 +199,11 @@ impl ServerState {
                 session.home_dir = Some(home.join(".trustee").join("users").join(&user_hash));
             }
 
-            // Use a UUID for project_id (web mode doesn't have a stable working dir)
-            session.project_id = Some(uuid::Uuid::new_v4().to_string());
+            // Stable project_id derived from user identity — NOT from working dir
+            // (web server can be started from any folder) and NOT a random UUID
+            // (must survive server restarts). Uses "web:{user_hash}" so it's
+            // deterministic per user, always the same across restarts.
+            session.project_id = Some(format!("web{}", &user_hash[..16]));
         }
 
         let user_session = UserSession::new(session);
