@@ -138,7 +138,7 @@ pub async fn list_all_sessions(
     for project in &projects {
         // Skip projects whose path can't be resolved (e.g. deleted dirs,
         // permission denied) — don't let one bad project kill the whole list.
-        let project_storage = match manager.get_project_storage(&project.project_path).await {
+        let project_storage = match manager.get_project_storage_with_id(&project.project_path, &project.project_hash).await {
             Ok(ps) => ps,
             Err(e) => {
                 tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
@@ -193,7 +193,7 @@ pub async fn get_session_detail(
         .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
 
     for project in &projects {
-        let project_storage = match manager.get_project_storage(&project.project_path).await {
+        let project_storage = match manager.get_project_storage_with_id(&project.project_path, &project.project_hash).await {
             Ok(ps) => ps,
             Err(e) => {
                 tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
@@ -251,7 +251,7 @@ pub async fn create_resume_info(
         .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
 
     for project in &projects {
-        let project_storage = match manager.get_project_storage(&project.project_path).await {
+        let project_storage = match manager.get_project_storage_with_id(&project.project_path, &project.project_hash).await {
             Ok(ps) => ps,
             Err(e) => {
                 tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
@@ -359,7 +359,7 @@ pub async fn load_session_history(
         .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
 
     for project in &projects {
-        let project_storage = match manager.get_project_storage(&project.project_path).await {
+        let project_storage = match manager.get_project_storage_with_id(&project.project_path, &project.project_hash).await {
             Ok(ps) => ps,
             Err(e) => {
                 tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
