@@ -257,10 +257,12 @@ pub async fn post_command(
             // the latest checkpoint instead of starting fresh.
             if session.resume_info.is_none() {
                 if let Some(ref config_toml) = session.config_toml.clone() {
+                    let home_dir = session.home_dir.as_deref();
                     if let Ok(Some(info)) =
                         trustee_core::sessions::create_resume_info(
                             config_toml,
                             client_session_id,
+                            home_dir,
                         )
                         .await
                     {
@@ -430,7 +432,7 @@ pub async fn list_sessions(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let (config_toml, user_project_id) = {
+    let (config_toml, home_dir) = {
         let user_key = state.resolve_user_key(&headers).await;
         let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
         let session = session_arc.lock().await;
@@ -443,24 +445,16 @@ pub async fn list_sessions(
                 ))
             }
         };
-        (config, session.project_id.clone())
+        (config, session.home_dir.clone())
     };
 
-    let mut sessions = trustee_core::sessions::list_all_sessions(&config_toml)
+    let mut sessions = trustee_core::sessions::list_all_sessions(&config_toml, home_dir.as_deref())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Filter sessions by user namespace (per-user checkpoint isolation).
-    // When auth is disabled (default user), user_project_id is None and we
-    // show all sessions (legacy behavior). When auth is enabled, each user's
-    // checkpoints are in a separate project directory (project_id = "user:{key}"),
-    // so we filter to only show sessions from this user's project.
-    // Note: project_id in SessionSummary is a SHA-256 hash of the identity.
-    // We can't compute the hash here without ABK internals, so for now we
-    // rely on the fact that authenticated users with separate project_ids
-    // will naturally have their checkpoints in separate directories.
-    // TODO: Implement hash-based filtering once ABK exposes ProjectHash::from_identity.
-    let _ = &user_project_id;
+    // Per-user isolation is now handled by home_dir: each user's checkpoints
+    // are stored in a separate directory tree, so list_all_sessions already
+    // returns only this user's sessions.
 
     let resp = Json(SessionListResponse { sessions });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
@@ -476,12 +470,12 @@ pub async fn get_session_detail(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let config_toml = {
+    let (config_toml, home_dir) = {
         let user_key = state.resolve_user_key(&headers).await;
         let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
         let session = session_arc.lock().await;
         match &session.config_toml {
-            Some(c) => c.clone(),
+            Some(c) => (c.clone(), session.home_dir.clone()),
             None => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -491,7 +485,7 @@ pub async fn get_session_detail(
         }
     };
 
-    let detail = trustee_core::sessions::get_session_detail(&config_toml, &session_id)
+    let detail = trustee_core::sessions::get_session_detail(&config_toml, &session_id, home_dir.as_deref())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -521,7 +515,7 @@ pub async fn resume_session(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let config_toml = {
+    let (config_toml, home_dir) = {
         let user_key = state.resolve_user_key(&headers).await;
         let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
         let session = session_arc.lock().await;
@@ -533,7 +527,7 @@ pub async fn resume_session(
             ));
         }
         match &session.config_toml {
-            Some(c) => c.clone(),
+            Some(c) => (c.clone(), session.home_dir.clone()),
             None => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -543,7 +537,7 @@ pub async fn resume_session(
         }
     };
 
-    let resume_info = trustee_core::sessions::create_resume_info(&config_toml, &session_id)
+    let resume_info = trustee_core::sessions::create_resume_info(&config_toml, &session_id, home_dir.as_deref())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -602,7 +596,15 @@ pub async fn get_session_history(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let history = trustee_core::sessions::load_session_history(&session_id)
+    // Extract home_dir from the user's session for per-user checkpoint lookup
+    let home_dir = {
+        let user_key = state.resolve_user_key(&headers).await;
+        let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+        let session = session_arc.lock().await;
+        session.home_dir.clone()
+    };
+
+    let history = trustee_core::sessions::load_session_history(&session_id, home_dir.as_deref())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

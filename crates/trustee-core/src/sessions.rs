@@ -10,6 +10,7 @@ use abk::checkpoint::{
     get_storage_manager,
     models::{CheckpointMetadata, ChatMessage, SessionMetadata as AbkSessionMetadata},
     storage::ProjectMetadata as AbkProjectMetadata,
+    CheckpointStorageManager,
 };
 use abk::cli::ResumeInfo;
 
@@ -92,6 +93,23 @@ fn paths_match(a: &std::path::Path, b: &std::path::Path) -> bool {
     ca == cb
 }
 
+/// Create a storage manager from an optional home_dir override.
+///
+/// When `home_dir` is `Some`, creates a per-user storage manager.
+/// When `None`, falls back to the global `get_storage_manager()`.
+fn make_storage_manager(
+    home_dir: Option<&std::path::Path>,
+    agent_name: &str,
+) -> anyhow::Result<CheckpointStorageManager> {
+    if let Some(dir) = home_dir {
+        CheckpointStorageManager::with_home_dir(dir.to_path_buf(), agent_name)
+            .map_err(|e| anyhow::anyhow!("Failed to create storage manager: {}", e))
+    } else {
+        get_storage_manager()
+            .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e))
+    }
+}
+
 // -----------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------
@@ -100,10 +118,15 @@ fn paths_match(a: &std::path::Path, b: &std::path::Path) -> bool {
 ///
 /// Sessions from the current project (derived from `config_toml`) are listed
 /// first, then everything else sorted by `last_accessed` descending.
-pub async fn list_all_sessions(config_toml: &str) -> anyhow::Result<Vec<SessionSummary>> {
+///
+/// When `home_dir` is `Some`, queries that specific user's checkpoint storage
+/// instead of the global default.
+pub async fn list_all_sessions(
+    config_toml: &str,
+    home_dir: Option<&std::path::Path>,
+) -> anyhow::Result<Vec<SessionSummary>> {
     let current_dir = config_working_dir(config_toml);
-    let manager = get_storage_manager()
-        .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e))?;
+    let manager = make_storage_manager(home_dir, "trustee")?;
 
     let projects = manager
         .list_projects()
@@ -155,12 +178,14 @@ pub async fn list_all_sessions(config_toml: &str) -> anyhow::Result<Vec<SessionS
 ///
 /// Searches all projects for the given `session_id`.
 /// Returns `None` if the session is not found.
+///
+/// When `home_dir` is `Some`, searches that specific user's checkpoint storage.
 pub async fn get_session_detail(
     _config_toml: &str,
     session_id: &str,
+    home_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<Option<(SessionSummary, Vec<CheckpointSummary>)>> {
-    let manager = get_storage_manager()
-        .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e))?;
+    let manager = make_storage_manager(home_dir, "trustee")?;
 
     let projects = manager
         .list_projects()
@@ -211,12 +236,14 @@ pub async fn get_session_detail(
 /// Searches all projects for `session_id`, finds the most recent checkpoint,
 /// and returns a `ResumeInfo` suitable for setting on `Session::resume_info`.
 /// Returns `None` if the session or its checkpoints are not found.
+///
+/// When `home_dir` is `Some`, searches that specific user's checkpoint storage.
 pub async fn create_resume_info(
     _config_toml: &str,
     session_id: &str,
+    home_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<Option<ResumeInfo>> {
-    let manager = get_storage_manager()
-        .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e))?;
+    let manager = make_storage_manager(home_dir, "trustee")?;
 
     let projects = manager
         .list_projects()
@@ -318,11 +345,13 @@ pub struct SessionHistory {
 /// Returns messages suitable for rendering in the Web UI. System messages
 /// are filtered out, tool results are summarized, and reasoning is
 /// preserved separately.
+///
+/// When `home_dir` is `Some`, loads from that specific user's checkpoint storage.
 pub async fn load_session_history(
     session_id: &str,
+    home_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<Option<SessionHistory>> {
-    let manager = get_storage_manager()
-        .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e))?;
+    let manager = make_storage_manager(home_dir, "trustee")?;;
 
     let projects = manager
         .list_projects()

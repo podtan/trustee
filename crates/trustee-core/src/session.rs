@@ -81,6 +81,9 @@ pub struct Session {
     pub session_id: Option<String>,
     /// Human-readable session name. None = no description
     pub session_name: Option<String>,
+    /// Per-user home directory for checkpoint storage. None = default ~/.{agent_name}/
+    /// Set to ~/.trustee/users/{user_hash}/ for per-user isolation in web mode.
+    pub home_dir: Option<std::path::PathBuf>,
 
     /// Concurrency permit — held while a workflow is running.
     /// When the workflow completes (state → Idle), this is dropped,
@@ -122,6 +125,7 @@ impl Session {
             project_name: None,
             session_id: None,
             session_name: None,
+            home_dir: None,
             workflow_permit: None,
         };
         (session, workflow_rx)
@@ -316,23 +320,15 @@ impl Session {
         if !is_continuation {
             self.output_lines.clear();
             // Auto-derive session_id and session_name from the first command
-            // if not explicitly set. The session_id follows the same pattern
-            // as ABK's CLI (session_YYYY_MM_DD_HH_MM_slug) so sessions created
-            // via TUI/Web are consistent with CLI sessions. The session_name
-            // is a human-readable display name (truncated command text).
+            // if not explicitly set. The session_id uses timestamp + UUID suffix
+            // (session_YYYY_MM_DD_HH_MM_{uuid8}) for uniqueness across all
+            // interfaces. The session_name is a human-readable display name
+            // (truncated command text).
             if self.session_id.is_none() {
                 let timestamp = chrono::Utc::now().format("%Y_%m_%d_%H_%M");
-                let slug = command
-                    .chars()
-                    .take(30)
-                    .filter(|c| c.is_alphanumeric() || *c == ' ')
-                    .collect::<String>()
-                    .split_whitespace()
-                    .take(3)
-                    .collect::<Vec<&str>>()
-                    .join("_")
-                    .to_lowercase();
-                self.session_id = Some(format!("session_{}_{}", timestamp, slug));
+                let uuid_suffix = uuid::Uuid::new_v4().simple().to_string();
+                let uuid8 = &uuid_suffix[..8];
+                self.session_id = Some(format!("session_{}_{}", timestamp, uuid8));
             }
             if self.session_name.is_none() {
                 let derived = if command.len() > 80 {
@@ -365,6 +361,7 @@ impl Session {
         let project_name = self.project_name.clone();
         let session_id = self.session_id.clone();
         let session_name = self.session_name.clone();
+        let home_dir = self.home_dir.clone();
 
         self.backup_resume_info = self.resume_info.clone();
         let resume_info = self.resume_info.take();
@@ -391,6 +388,11 @@ impl Session {
             // Build RunContext from session fields for stateless operation
             let mut run_ctx = RunContext::new()
                 .with_agent_name(agent_name.clone());
+
+            // Set home_dir for per-user isolation if provided
+            if let Some(ref dir) = home_dir {
+                run_ctx = run_ctx.with_home_dir(dir.clone());
+            }
 
             // Set project identity if any field is provided
             if project_id.is_some() || project_name.is_some() {

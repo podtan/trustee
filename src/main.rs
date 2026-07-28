@@ -213,18 +213,60 @@ async fn load_remote_config(
     Some((config_toml, remote_secrets))
 }
 
+/// Compute a user hash from the OS username.
+///
+/// Returns SHA-256(username)[:16] as a hex string.
+/// Used for per-user checkpoint isolation: ~/.trustee/users/{user_hash}/
+fn compute_user_hash() -> String {
+    use sha2::{Digest, Sha256};
+    let username = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(username.as_bytes());
+    let result = hasher.finalize();
+    format!("{:016x}", u64::from_be_bytes(result[..8].try_into().unwrap()))
+}
+
+/// Get the per-user home directory for checkpoint storage.
+///
+/// Returns ~/.trustee/users/{user_hash}/
+fn get_user_home_dir() -> Option<std::path::PathBuf> {
+    let user_hash = compute_user_hash();
+    dirs::home_dir().map(|h| h.join(".trustee").join("users").join(&user_hash))
+}
+
 /// Merge embedded defaults with user overrides using figment.
 /// Returns the merged TOML string ready for ABK.
 /// The binary version (from Cargo.toml at compile time) is always injected as the
 /// highest-priority layer so [agent].version never needs to be set manually.
+///
+/// Config layering (lowest to highest priority):
+/// 1. Embedded DEFAULT_CONFIG
+/// 2. Global user config (~/.trustee/config.toml)
+/// 3. Per-user config (~/.trustee/users/{user_hash}/config.toml) — if exists
+/// 4. Binary version override
 fn merge_config(user_config_toml: &str) -> Result<String, Box<dyn std::error::Error>> {
     let version_override = format!(
         "[agent]\nversion = \"{v}\"\n\n[cli]\nversion = \"{v}\"\n",
         v = env!("CARGO_PKG_VERSION")
     );
-    let merged: toml::Table = Figment::new()
+
+    let mut figment = Figment::new()
         .merge(Toml::string(DEFAULT_CONFIG))
-        .merge(Toml::string(user_config_toml))
+        .merge(Toml::string(user_config_toml));
+
+    // Layer per-user config overrides if they exist
+    if let Some(user_home) = get_user_home_dir() {
+        let user_config = user_home.join("config.toml");
+        if user_config.exists() {
+            if let Ok(per_user_toml) = std::fs::read_to_string(&user_config) {
+                figment = figment.merge(Toml::string(&per_user_toml));
+            }
+        }
+    }
+
+    let merged: toml::Table = figment
         .merge(Toml::string(&version_override))
         .extract()
         .map_err(|e| format!("Failed to merge configuration: {}", e))?;

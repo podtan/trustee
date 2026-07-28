@@ -183,13 +183,25 @@ impl ServerState {
         session.secrets = self.secrets.clone();
         session.build_info = self.build_info.clone();
 
-        // Isolate checkpoint storage per user by setting a unique project_id.
-        // The project_id becomes the storage partition key in ABK's checkpoint
-        // system. By prefixing with the user_key, each user's checkpoints are
-        // stored in separate directories, preventing cross-user access.
-        // The "default" user (no auth) keeps the legacy behavior (no project_id).
+        // Isolate checkpoint storage per user by setting a per-user home_dir.
+        // Each user gets their own checkpoint directory tree at
+        // ~/.trustee/users/{user_hash}/, preventing cross-user access.
+        // The "default" user (no auth) keeps the legacy behavior (no home_dir override).
         if user_key != "default" {
-            session.project_id = Some(format!("user:{user_key}"));
+            // Compute SHA-256 of the user_key, take first 16 hex chars
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(user_key.as_bytes());
+            let hash_bytes = hasher.finalize();
+            let user_hash = format!("{:016x}", u64::from_be_bytes(hash_bytes[..8].try_into().unwrap()));
+
+            // Set per-user home_dir for checkpoint isolation
+            if let Some(home) = dirs::home_dir() {
+                session.home_dir = Some(home.join(".trustee").join("users").join(&user_hash));
+            }
+
+            // Use a UUID for project_id (web mode doesn't have a stable working dir)
+            session.project_id = Some(uuid::Uuid::new_v4().to_string());
         }
 
         let user_session = UserSession::new(session);
