@@ -800,6 +800,12 @@ const API = window.location.origin;
 let ws = null;
 let autoScroll = true;
 
+// --- Checkpoint session tracking ---
+// The session_id is assigned by ABK (immutable). The frontend stores it
+// and sends it back on every command so the server knows which checkpoint
+// chain to resume from. Cleared on "New Session".
+let currentSessionId = null;
+
 // --- Output rendering ---
 const outputEl = document.getElementById('output');
 
@@ -977,10 +983,13 @@ function handleMessage(msg) {
       refreshMcpOnly();
       break;
     case 'ResumeInfo':
-      // ResumeInfo is a mid-execution checkpoint, NOT a completion signal.
-      // ABK sends these after each iteration while the workflow is still running.
+      // ResumeInfo carries session_id/checkpoint_id/iteration from ABK.
+      // Capture session_id so subsequent commands continue this checkpoint chain.
       // Do NOT change the UI state — only the final WorkflowCompleted/Error
       // messages signal the actual end.
+      if (msg.session_id) {
+        currentSessionId = msg.session_id;
+      }
       break;
     case 'HandoffReady':
       closeAgentBubble();
@@ -1138,6 +1147,10 @@ async function refreshSession() {
     updateState(data.workflow_state || 'Idle');
     renderTodosRaw(data.todo_lines || []);
     renderMcp(data.mcp_servers || []);
+    // Capture session_id for checkpoint continuity
+    if (data.session_id) {
+      currentSessionId = data.session_id;
+    }
     // If there's existing session content, enable handoff button
     if ((data.output_lines || []).length > 0) {
       window._hasSession = true;
@@ -1217,7 +1230,7 @@ async function sendCommand() {
   await fetch(API + '/api/v1/session/command', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ command: cmd }),
+    body: JSON.stringify({ command: cmd, session_id: currentSessionId }),
   });
   // State change is now broadcast via WebSocket (StateChanged message)
   // so we don't call updateState('Running') here — avoids race conditions
@@ -1582,6 +1595,8 @@ async function startNewSession() {
       return;
     }
 
+    // Clear session tracking for the new chat
+    currentSessionId = null;
     showToast('Started new session', 'success');
     closeSessionsOverlay();
   } catch (e) {
@@ -1602,6 +1617,8 @@ async function saveSessionName(name) {
 }
 
 async function resumeSession(sessionId, checkpointCount) {
+  // Track the resumed session_id so subsequent commands continue it
+  currentSessionId = sessionId;
   try {
     const res = await fetch(API + '/api/v1/sessions/' + encodeURIComponent(sessionId) + '/resume', {
       method: 'POST',

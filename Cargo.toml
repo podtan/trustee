@@ -1,6 +1,6 @@
 [package]
 name = "trustee"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2021"
 description = "A general-purpose agent that can morph into different specialized agents using WASM lifecycle plugins"
 license = "MIT OR Apache-2.0"
@@ -42,7 +42,7 @@ tokio-util = { version = "0.7", optional = true }
 trustee-tui = { version = "0.1.63", path = "crates/trustee-tui", optional = true }
 # Web/API dependencies (optional)
 trustee-core = { version = "0.3.5", path = "crates/trustee-core", optional = true }
-trustee-api = { version = "0.3.6", path = "crates/trustee-api", optional = true }
+trustee-api = { version = "0.3.7", path = "crates/trustee-api", optional = true }
 # Tracing for web server logging (optional, used by trustee-api)
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }
