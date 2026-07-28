@@ -97,16 +97,57 @@ fn paths_match(a: &std::path::Path, b: &std::path::Path) -> bool {
 ///
 /// When `home_dir` is `Some`, creates a per-user storage manager.
 /// When `None`, falls back to the global `get_storage_manager()`.
-fn make_storage_manager(
+///
+/// When `config_toml` contains a `[checkpointing.storage_backend]` section
+/// with a DocumentDB/MongoDB backend, the remote backend is initialized
+/// alongside the per-user home_dir.
+async fn make_storage_manager(
+    config_toml: &str,
     home_dir: Option<&std::path::Path>,
     agent_name: &str,
 ) -> anyhow::Result<CheckpointStorageManager> {
-    if let Some(dir) = home_dir {
-        CheckpointStorageManager::with_home_dir(dir.to_path_buf(), agent_name)
-            .map_err(|e| anyhow::anyhow!("Failed to create storage manager: {}", e))
-    } else {
-        get_storage_manager()
-            .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e))
+    // Try to parse storage_backend config from the TOML
+    let backend_config = parse_storage_backend_config(config_toml);
+
+    match (home_dir, backend_config) {
+        // Per-user home_dir + remote backend → use the merged constructor (async)
+        (Some(dir), Some(backend)) => {
+            CheckpointStorageManager::with_home_dir_and_backend(
+                dir.to_path_buf(),
+                agent_name,
+                backend,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create storage manager with backend: {}", e))
+        }
+        // Per-user home_dir, no remote backend → local-only per-user storage
+        (Some(dir), None) => {
+            CheckpointStorageManager::with_home_dir(dir.to_path_buf(), agent_name)
+                .map_err(|e| anyhow::anyhow!("Failed to create storage manager: {}", e))
+        }
+        // No home_dir, fall back to global
+        (None, _) => {
+            get_storage_manager()
+                .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e))
+        }
+    }
+}
+
+/// Parse `[checkpointing.storage_backend]` from a trustee config TOML string.
+///
+/// Returns `None` if the section doesn't exist or if the backend type is `File`.
+fn parse_storage_backend_config(config_toml: &str) -> Option<abk::checkpoint::StorageBackendConfig> {
+    let value = toml::from_str::<toml::Value>(config_toml).ok()?;
+    let checkpointing = value.get("checkpointing")?;
+    let storage_backend = checkpointing.get("storage_backend")?;
+    let backend: abk::checkpoint::StorageBackendConfig =
+        storage_backend.clone().try_into().ok()?;
+
+    // Only return if it's actually a remote backend
+    match backend.backend_type {
+        abk::checkpoint::StorageBackendType::DocumentDB
+        | abk::checkpoint::StorageBackendType::MongoDB => Some(backend),
+        abk::checkpoint::StorageBackendType::File => None,
     }
 }
 
@@ -126,7 +167,7 @@ pub async fn list_all_sessions(
     home_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<Vec<SessionSummary>> {
     let current_dir = config_working_dir(config_toml);
-    let manager = make_storage_manager(home_dir, "trustee")?;
+    let manager = make_storage_manager(config_toml, home_dir, "trustee").await?;
 
     let projects = manager
         .list_projects()
@@ -185,7 +226,7 @@ pub async fn get_session_detail(
     session_id: &str,
     home_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<Option<(SessionSummary, Vec<CheckpointSummary>)>> {
-    let manager = make_storage_manager(home_dir, "trustee")?;
+    let manager = make_storage_manager(_config_toml, home_dir, "trustee").await?;
 
     let projects = manager
         .list_projects()
@@ -243,7 +284,7 @@ pub async fn create_resume_info(
     session_id: &str,
     home_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<Option<ResumeInfo>> {
-    let manager = make_storage_manager(home_dir, "trustee")?;
+    let manager = make_storage_manager(_config_toml, home_dir, "trustee").await?;
 
     let projects = manager
         .list_projects()
@@ -351,7 +392,7 @@ pub async fn load_session_history(
     session_id: &str,
     home_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<Option<SessionHistory>> {
-    let manager = make_storage_manager(home_dir, "trustee")?;;
+    let manager = make_storage_manager("", home_dir, "trustee").await?;
 
     let projects = manager
         .list_projects()
