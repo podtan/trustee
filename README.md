@@ -169,6 +169,265 @@ OPENAI_API_KEY=sk-your-key-here
 OPENAI_DEFAULT_MODEL=gpt-4o
 ```
 
+## MCP Server Authentication
+
+Trustee connects to MCP (Model Context Protocol) servers for remote tool execution. Each MCP server can use a different authentication strategy, configured in `trustee.toml`.
+
+### Quick Reference
+
+| Auth Type | Config `type` | Best For | Token Source |
+|-----------|---------------|----------|--------------|
+| Static Token | `static` | Simple API keys, dev/testing | Hardcoded or `${ENV_VAR}` |
+| Service Account | `service-account` | Headless servers, CI/CD | Kanidm RFC 8693 token exchange |
+| Interactive (CLI) | `interactive` | CLI/TUI personal use | `trustee mcp auth` browser PKCE flow |
+| Web Session | `web-session` | Trustee-web users (reuse login) | Auto-injected from trustee-web session |
+| Web Interactive | `web-interactive` | Trustee-web per-server login | Browser login via web UI |
+
+### Configuration Overview
+
+MCP auth is defined in two parts under `[mcp]` in `trustee.toml`:
+
+1. **Credentials** (`[mcp.credentials.<name>]`) — reusable auth definitions
+2. **Servers** (`[[mcp.servers]]`) — reference a credential by name
+
+```toml
+[mcp]
+enabled = true
+timeout_seconds = 30
+
+# Define credentials (reusable across servers)
+[mcp.credentials.my_auth]
+type = "..."          # See below
+# ... type-specific fields ...
+
+# Servers reference credentials by name
+[[mcp.servers]]
+name = "pdt"
+url = "https://pdt-aether.tanbal.ir"
+transport = "http"
+auto_init = true
+credentials = "my_auth"    # References [mcp.credentials.my_auth]
+```
+
+### Auth Type 1: Static Token
+
+Simplest method — a plain token string. Supports `${ENV_VAR}` substitution.
+
+```toml
+[mcp.credentials.pdt_static]
+type = "static"
+token = "${PDT_TOKEN}"
+```
+
+### Auth Type 2: Service Account
+
+For headless server-to-server authentication. Uses a long-lived Kanidm service token and automatically exchanges it for short-lived access tokens via RFC 8693 token exchange. Tokens are refreshed automatically.
+
+```toml
+[mcp.credentials.kanidm_pdt]
+type = "service-account"
+service_token = "${KANIDM_SERVICE_TOKEN}"           # Long-lived, never expires
+issuer_url = "https://idm.tanbal.ir/oauth2/openid/pdt-api"
+client_id = "pdt-api"
+audience = "pdt-api"
+scope = "openid profile email groups"
+```
+
+### Auth Type 3: Interactive (CLI Browser Login)
+
+PKCE-based OAuth2 browser login initiated from the CLI. Tokens are stored on disk and automatically refreshed.
+
+**Config:**
+
+```toml
+[mcp.credentials.pdt_interactive]
+type = "interactive"
+issuer_url = "https://idm.tanbal.ir/oauth2/openid/pdt-api"
+client_id = "pdt-api"
+scope = "openid profile email groups"
+redirect_port = 8765            # Local callback port (default: 8765)
+```
+
+**Login flow:**
+
+```bash
+# Authenticate (opens browser for OAuth login)
+trustee mcp auth pdt_interactive
+
+# Check status
+trustee mcp list
+
+# Remove credentials
+trustee mcp logout pdt_interactive
+```
+
+Tokens are stored at `~/.trustee/` (via PEP's `FileTokenStore`). The token provider reads and refreshes them automatically at runtime.
+
+### Auth Type 4: Web Session
+
+For trustee-web deployments — reuses the logged-in user's OIDC session token. Trustee-web automatically pushes the current access token into `FileTokenStore` under the reserved name `__web_session` before each agent command. No separate login needed for MCP servers.
+
+```toml
+[mcp.credentials.pdt_web_session]
+type = "web-session"
+
+# Optional: RFC 8693 token exchange if the MCP server expects
+# a different audience than the trustee-web session token
+[mcp.credentials.pdt_web_session.exchange]
+issuer_url = "https://idm.tanbal.ir/oauth2/openid/pdt-api"
+client_id = "pdt-api"
+audience = "pdt-api"
+```
+
+**How it works:**
+1. User logs into trustee-web via OIDC
+2. Before each agent command, trustee-web writes the session token to `__web_session`
+3. The `InteractiveTokenProvider` reads it on every tool call
+4. If optional `exchange` is configured, the token is exchanged for the target audience
+
+### Auth Type 5: Web Interactive (Per-Server Browser Login from Web UI)
+
+Like `interactive`, but the OAuth login is triggered from the trustee-web UI instead of the CLI. Uses the `/auth/mcp/login` endpoint with PKCE.
+
+```toml
+[mcp.credentials.pdt_login]
+type = "web-interactive"
+issuer_url = "https://idm.tanbal.ir/oauth2/openid/pdt-api"
+client_id = "pdt-api"
+scope = "openid profile email groups"
+```
+
+**Login flow (via trustee-web):**
+1. User clicks "Connect" next to the MCP server in the web UI
+2. Browser redirects to the OIDC provider
+3. After login, tokens are stored via `FileTokenStore`
+4. Tokens auto-refresh transparently
+
+**Web API endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/auth/mcp/login?cred=<name>` | Initiate OAuth PKCE login for a credential |
+| GET | `/auth/mcp/callback` | OIDC callback (handles code exchange + token storage) |
+| GET | `/auth/mcp/status` | List all MCP credentials and their connection status |
+| POST | `/auth/mcp/logout?cred=<name>` | Remove stored tokens for a credential |
+
+### MCP CLI Commands
+
+```bash
+# List all configured MCP servers and auth status
+trustee mcp list
+
+# Register a new MCP server (interactive prompts)
+trustee mcp add <name> --url <url> --auth-mode <static|service-account|interactive>
+
+# Authenticate via browser login (interactive credentials only)
+trustee mcp auth <credential_name>
+
+# Remove stored OAuth credentials
+trustee mcp logout <credential_name>
+
+# Diagnose connection and auth for a specific server
+trustee mcp debug <server_name>
+```
+
+### Environment Variable Substitution
+
+All credential string fields support `${VAR_NAME}` syntax. The variable is resolved at startup from the environment or `~/.trustee/.env`:
+
+```toml
+[mcp.credentials.kanidm_pdt]
+type = "service-account"
+service_token = "${KANIDM_SERVICE_TOKEN}"     # Resolved from env
+issuer_url = "https://idm.tanbal.ir/oauth2/openid/pdt-api"
+client_id = "pdt-api"
+audience = "pdt-api"
+```
+
+### Example: Full Configuration
+
+```toml
+[mcp]
+enabled = true
+timeout_seconds = 30
+
+# --- Credentials ---
+
+# Service account for headless auth (CI/CD, servers)
+[mcp.credentials.kanidm_svc]
+type = "service-account"
+service_token = "${KANIDM_SERVICE_TOKEN}"
+issuer_url = "https://idm.tanbal.ir/oauth2/openid/pdt-api"
+client_id = "pdt-api"
+audience = "pdt-api"
+scope = "openid profile email groups"
+
+# Interactive login for CLI/TUI personal use
+[mcp.credentials.pdt_personal]
+type = "interactive"
+issuer_url = "https://idm.tanbal.ir/oauth2/openid/pdt-api"
+client_id = "pdt-api"
+scope = "openid profile email groups"
+redirect_port = 8765
+
+# Web session reuse for trustee-web
+[mcp.credentials.web_auth]
+type = "web-session"
+
+# --- Servers ---
+
+[[mcp.servers]]
+name = "pdt"
+url = "https://pdt-aether.tanbal.ir"
+transport = "http"
+auto_init = true
+credentials = "kanidm_svc"
+
+[[mcp.servers]]
+name = "nghr"
+url = "https://nghr-aether.tanbal.ir"
+transport = "http"
+auto_init = true
+credentials = "kanidm_svc"
+
+[[mcp.servers]]
+name = "trp"
+url = "https://trp-aether.tanbal.ir"
+transport = "http"
+auto_init = true
+credentials = "kanidm_svc"
+```
+
+### Build Requirements
+
+MCP authentication requires the `registry-mcp` feature, and token-based auth types (`interactive`, `web-session`, `web-interactive`, `service-account`) additionally require `registry-mcp-token`:
+
+```bash
+# MCP without token providers (static auth only)
+cargo build --features registry-mcp
+
+# Full MCP auth support (all credential types)
+cargo build --features "registry-mcp,registry-mcp-token"
+
+# Typical trustee build with TUI + web + full MCP
+cargo build --features "tui,web,registry-mcp,registry-mcp-token"
+```
+
+### Token Storage
+
+Tokens are stored by PEP (`FileTokenStore`) at:
+
+```
+~/.trustee/                    # or per-user home_dir
+  tokens/
+    <credential_name>.json     # StoredToken (access + refresh + expiry)
+```
+
+The `InteractiveTokenProvider` automatically:
+- Loads tokens before each tool call
+- Checks expiry and refreshes if a refresh token is available
+- Returns an error if the token is expired and cannot be refreshed
+
 ## Lifecycle Plugins
 
 Trustee's morphing capability comes from WASM lifecycle plugins that define different agent types:
