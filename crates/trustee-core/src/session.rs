@@ -291,6 +291,10 @@ impl Session {
             TuiMessage::HandoffReady(briefing) => {
                 self.workflow_state = WorkflowState::Idle;
                 self.resume_info = None;
+                // Clear session identity so execute_command generates fresh
+                // session_id/session_name for the new post-handoff session.
+                self.session_id = None;
+                self.session_name = None;
                 self.input = briefing;
                 self.execute_command();
             }
@@ -482,6 +486,11 @@ impl Session {
 
         let agent_name = self.agent_name.clone();
         let token_store = self.token_store.clone();
+        let project_id = self.project_id.clone();
+        let project_name = self.project_name.clone();
+        let session_id = self.session_id.clone();
+        let session_name = self.session_name.clone();
+        let home_dir = self.home_dir.clone();
 
         let resume_info = self.resume_info.take();
 
@@ -513,9 +522,30 @@ impl Session {
 
             let (dummy_tx, _dummy_rx) = mpsc::unbounded_channel();
 
-            // Build RunContext for stateless operation
-            let run_ctx = RunContext::new()
+            // Build RunContext for stateless operation — same fields as execute_command
+            let mut run_ctx = RunContext::new()
                 .with_agent_name(agent_name.clone());
+
+            // Set home_dir for per-user isolation
+            if let Some(ref dir) = home_dir {
+                run_ctx = run_ctx.with_home_dir(dir.clone());
+            }
+
+            // Set project identity if any field is provided
+            if project_id.is_some() || project_name.is_some() {
+                run_ctx = run_ctx.with_project(abk::context::ProjectIdentity {
+                    id: project_id.unwrap_or_else(|| "default".to_string()),
+                    name: project_name,
+                });
+            }
+
+            // Set session identity if any field is provided
+            if session_id.is_some() || session_name.is_some() {
+                run_ctx = run_ctx.with_session(abk::context::SessionIdentity {
+                    id: session_id.unwrap_or_else(|| "default".to_string()),
+                    name: session_name,
+                });
+            }
             #[cfg(feature = "registry-mcp-token")]
             {
                 // Note: token_store not available in handoff — handoffs don't
