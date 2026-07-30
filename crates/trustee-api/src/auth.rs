@@ -1001,7 +1001,7 @@ async fn mcp_callback_handler(
 
     let agent_name = {
         let user_key = state.resolve_user_key(&headers).await;
-        let (session_arc, _, _) = state.ensure_user_session(&user_key).await;
+        let (_sid, session_arc, _, _) = state.ensure_active_session(&user_key).await;
         let session = session_arc.lock().await;
         session.agent_name.clone()
     };
@@ -1043,7 +1043,7 @@ async fn mcp_status_handler(
     // Parse MCP config from session
     let config_toml = {
         let user_key = state.resolve_user_key(&headers).await;
-        let (session_arc, _, _) = state.ensure_user_session(&user_key).await;
+        let (_sid, session_arc, _, _) = state.ensure_active_session(&user_key).await;
         let session = session_arc.lock().await;
         match &session.config_toml {
             Some(t) => t.clone(),
@@ -1058,7 +1058,7 @@ async fn mcp_status_handler(
 
     let agent_name = {
         let user_key = state.resolve_user_key(&headers).await;
-        let (session_arc, _, _) = state.ensure_user_session(&user_key).await;
+        let (_sid, session_arc, _, _) = state.ensure_active_session(&user_key).await;
         let session = session_arc.lock().await;
         session.agent_name.clone()
     };
@@ -1147,7 +1147,7 @@ async fn mcp_logout_handler(
 
     let agent_name = {
         let user_key = state.resolve_user_key(&headers).await;
-        let (session_arc, _, _) = state.ensure_user_session(&user_key).await;
+        let (_sid, session_arc, _, _) = state.ensure_active_session(&user_key).await;
         let session = session_arc.lock().await;
         session.agent_name.clone()
     };

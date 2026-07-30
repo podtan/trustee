@@ -78,10 +78,25 @@ pub async fn run(
     let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(256);
 
     // Wrap session in shared state (with shared config/secrets/build_info for per-user sessions)
+    // Parse max_sessions_per_user from [web] section
+    let max_sessions: usize = {
+        let config_str: &str = &config_toml_for_state;
+        match toml::from_str::<toml::Value>(config_str) {
+            Ok(v) => v
+                .get("web")
+                .and_then(|w| w.as_table())
+                .and_then(|w| w.get("max_sessions_per_user").and_then(|v| v.as_integer()))
+                .map(|v| v as usize)
+                .unwrap_or(4),
+            Err(_) => 4,
+        }
+    };
+
     let state = ServerState::new(session, ws_tx, auth_state)
         .with_config_toml(config_toml_for_state)
         .with_secrets(secrets_for_state)
-        .with_build_info(build_info_for_state);
+        .with_build_info(build_info_for_state)
+        .with_max_sessions_per_user(max_sessions);
 
     // Start background message drain task (owns workflow_rx directly — no deadlock)
     state.clone().spawn_drain_task(workflow_rx);
@@ -115,10 +130,18 @@ pub async fn run(
         .route("/api/v1/session/new", post(routes::new_session))
         .route("/api/v1/project/name", post(routes::set_project_name))
         // Session discovery & resume
-        .route("/api/v1/sessions", get(routes::list_sessions))
-        .route("/api/v1/sessions/{id}", get(routes::get_session_detail))
+        // Session discovery & resume (checkpoint-based, existing)
+        .route("/api/v1/sessions", get(routes::list_sessions).post(routes::create_session))
+        .route("/api/v1/sessions/{id}", get(routes::get_session_detail).delete(routes::destroy_session))
+        .route("/api/v1/sessions/{id}/live", get(routes::get_live_session))
         .route("/api/v1/sessions/{id}/resume", post(routes::resume_session))
         .route("/api/v1/sessions/{id}/history", get(routes::get_session_history))
+        // MSU: session-scoped live routes
+        .route("/api/v1/sessions/{id}/command", post(routes::post_command_session))
+        .route("/api/v1/sessions/{id}/cancel", post(routes::post_cancel_session))
+        .route("/api/v1/sessions/{id}/handoff", post(routes::post_handoff_session))
+        .route("/api/v1/sessions/{id}/name", post(routes::set_session_name_session))
+        .route("/api/v1/sessions/{id}/stream", get(routes::ws_session_handler))
         // Static files from trustee-web
         .route("/", get(routes::serve_index))
         .route("/{file}", get(routes::serve_static))

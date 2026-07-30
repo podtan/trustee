@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::ServerState;
+use crate::state::SessionError;
 
 /// Attach a `Set-Cookie` header to a response if the cookie value is present.
-/// Used for rolling session cookies from `check_auth`.
 fn with_rolling_cookie(mut response: Response, cookie: Option<String>) -> Response {
     if let Some(cookie_str) = cookie {
         if let Ok(value) = cookie_str.parse() {
@@ -41,9 +41,6 @@ pub struct SessionResponse {
     pub resume_info_present: bool,
     pub session_name: Option<String>,
     pub project_name: Option<String>,
-    /// Current checkpoint session_id, if one has been assigned by ABK.
-    /// The client must send this back on subsequent commands to maintain
-    /// checkpoint continuity.
     pub session_id: Option<String>,
 }
 
@@ -58,19 +55,6 @@ pub struct McpServerJson {
 #[derive(Debug, Deserialize)]
 pub struct CommandRequest {
     pub command: String,
-    /// The checkpoint session_id this command belongs to.
-    ///
-    /// When provided, the server resumes from the latest checkpoint in
-    /// that session before executing the command. When None, a new
-    /// session is created.
-    ///
-    /// # Immutability
-    ///
-    /// Once ABK assigns a session_id, it is immutable for the lifetime
-    /// of that checkpoint chain. The client must send back the exact
-    /// same session_id on every subsequent command for that
-    /// conversation. The server never allows overwriting an existing
-    /// session's id.
     pub session_id: Option<String>,
 }
 
@@ -86,7 +70,7 @@ pub struct HealthResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Session discovery DTOs
+// Session discovery DTOs (checkpoint-based, legacy)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
@@ -110,8 +94,6 @@ pub struct ResumeResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct ResumeRequestBody {
-    /// Optional specific checkpoint ID to resume from.
-    /// If omitted, resumes from the latest checkpoint.
     pub checkpoint_id: Option<String>,
 }
 
@@ -126,6 +108,24 @@ pub struct SessionHistoryResponse {
 }
 
 // ---------------------------------------------------------------------------
+// MSU new-session DTOs
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSessionRequest {
+    #[serde(default)]
+    pub session_name: Option<String>,
+    #[serde(default)]
+    pub resume_from: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateSessionResponse {
+    pub session_id: String,
+    pub accepted: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Naming DTOs
 // ---------------------------------------------------------------------------
 
@@ -137,9 +137,6 @@ pub struct SetNameRequest {
 #[derive(Debug, Deserialize)]
 pub struct NewSessionRequest {
     pub session_name: Option<String>,
-    // session_id is NOT settable on new-session creation — ABK auto-generates it.
-    // Clients send session_id via CommandRequest to continue an existing session.
-    // See NGHR issue bcb101fe for the original session_id corruption bug.
 }
 
 #[derive(Debug, Serialize)]
@@ -154,27 +151,11 @@ pub struct NewSessionResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Handlers
+// Shared helpers
 // ---------------------------------------------------------------------------
 
-/// GET /api/v1/health
-pub async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    })
-}
-
-/// GET /api/v1/session — return current session state.
-pub async fn get_session(
-    State(state): State<ServerState>,
-    headers: axum::http::HeaderMap,
-) -> Result<Response, StatusCode> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
-    let user_key = state.resolve_user_key(&headers).await;
-    let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
-    let session = session_arc.lock().await;
-
+/// Build a SessionResponse from a locked session.
+fn session_to_response(session: &trustee_core::session::Session) -> SessionResponse {
     let workflow_state = match session.workflow_state {
         trustee_core::types::WorkflowState::Idle => "Idle",
         trustee_core::types::WorkflowState::Running => "Running",
@@ -192,7 +173,7 @@ pub async fn get_session(
         })
         .collect();
 
-    let resp = Json(SessionResponse {
+    SessionResponse {
         workflow_state: workflow_state.to_string(),
         output_lines: session.output_lines.clone(),
         todo_lines: session.todo_lines.clone(),
@@ -203,11 +184,35 @@ pub async fn get_session(
         session_name: session.session_name.clone(),
         project_name: session.project_name.clone(),
         session_id: session.session_id.clone(),
-    });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/health
+pub async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
+
+/// GET /api/v1/session — return active session state (legacy).
+pub async fn get_session(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, StatusCode> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
+    let user_key = state.resolve_user_key(&headers).await;
+    let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
+    let session = session_arc.lock().await;
+    let resp = Json(session_to_response(&session));
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
-/// POST /api/v1/session/command — submit a command for execution.
+/// POST /api/v1/session/command ��� submit a command to the active session (legacy).
 pub async fn post_command(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
@@ -218,104 +223,32 @@ pub async fn post_command(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let user_key = state.resolve_user_key(&headers).await;
-    let (session_arc, ws_tx, token_store) = state.ensure_user_session(&user_key).await;
+    let (_sid, session_arc, ws_tx, token_store) = state.ensure_active_session(&user_key).await;
 
-    // C1: If auth is configured, push the current session token into
-    // the per-user MemoryTokenStore so that MCP servers using `type = "web-session"`
-    // credentials can pick it up via InteractiveTokenProvider.
-    // This replaces the insecure FileTokenStore that caused cross-user token leakage.
-    let agent_name = {
-        let session = session_arc.lock().await;
-        session.agent_name.clone()
-    };
-    inject_session_token(&state.auth, &headers, &agent_name, &token_store).await;
-
-    {
-        let mut session = session_arc.lock().await;
-
-        if session.workflow_state != trustee_core::types::WorkflowState::Idle {
-            return Err((
-                StatusCode::CONFLICT,
-                "Workflow is running or cancelling".to_string(),
-            ));
-        }
-
-        // If the client provided a session_id, ensure we're resuming the
-        // correct checkpoint chain. This is immutable — once ABK assigns
-        // a session_id, the client must send back the same value on every
-        // subsequent command. We never allow overwriting an existing
-        // session's id.
-        if let Some(ref client_session_id) = req.session_id {
-            // Set the session_id field if not already set (first command).
-            // If already set, it must match — never overwrite.
-            if session.session_id.is_none() {
-                session.session_id = Some(client_session_id.clone());
-            }
-
-            // Auto-resume: if no resume_info is loaded yet, create it
-            // from the client-provided session_id so ABK resumes from
-            // the latest checkpoint instead of starting fresh.
-            if session.resume_info.is_none() {
-                if let Some(ref config_toml) = session.config_toml.clone() {
-                    let home_dir = session.home_dir.as_deref();
-                    if let Ok(Some(info)) =
-                        trustee_core::sessions::create_resume_info(
-                            config_toml,
-                            client_session_id,
-                            home_dir,
-                        )
-                        .await
-                    {
-                        session.resume_info = Some(info);
-                    }
-                }
-            }
-        }
-
-        // Check global concurrency limit (across all users)
-        let permit = state.workflow_semaphore.clone().acquire_owned().await
-            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".to_string()))?;
-
-        // Wire the per-user token store into the session so it flows
-        // through RunContext to ABK's MCP credential initialization.
-        session.token_store = Some(token_store);
-
-        // Store the concurrency permit — it will be dropped when the
-        // workflow completes and state transitions back to Idle.
-        session.workflow_permit = Some(permit);
-
-        session.input = req.command;
-        session.execute_command();
-    }
-
-    // Broadcast state change so all WebSocket clients know the workflow started.
-    let state_msg = serde_json::json!({"type": "StateChanged", "state": "Running"});
-    let _ = ws_tx.send(state_msg.to_string());
+    execute_command_inner(&state, &headers, &session_arc, &ws_tx, &token_store, req).await?;
 
     let resp = Json(CommandResponse { accepted: true });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
-/// POST /api/v1/session/cancel — cancel the running workflow.
+/// POST /api/v1/session/cancel — cancel the running workflow on active session (legacy).
 pub async fn post_cancel(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, StatusCode> {
     let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
     let user_key = state.resolve_user_key(&headers).await;
-    let (session_arc, ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+    let (_sid, session_arc, ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
 
-    let cancelled;
-    {
+    let cancelled = {
         let session = session_arc.lock().await;
-
-        cancelled = session.workflow_state == trustee_core::types::WorkflowState::Running;
-        if cancelled {
+        let c = session.workflow_state == trustee_core::types::WorkflowState::Running;
+        if c {
             session.cancel_token.cancel();
         }
-    }
+        c
+    };
 
-    // Broadcast state change so all WebSocket clients know the workflow is cancelling.
     if cancelled {
         let state_msg = serde_json::json!({"type": "StateChanged", "state": "Cancelling"});
         let _ = ws_tx.send(state_msg.to_string());
@@ -325,14 +258,14 @@ pub async fn post_cancel(
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
-/// POST /api/v1/session/handoff — trigger session handoff.
+/// POST /api/v1/session/handoff — trigger handoff on active session (legacy).
 pub async fn post_handoff(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, StatusCode> {
     let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
     let user_key = state.resolve_user_key(&headers).await;
-    let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+    let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
     let mut session = session_arc.lock().await;
     session.trigger_handoff(String::new());
 
@@ -340,7 +273,7 @@ pub async fn post_handoff(
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
-/// GET /api/v1/session/stream — WebSocket for live message streaming.
+/// GET /api/v1/session/stream — WebSocket for active session (legacy).
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<ServerState>,
@@ -348,7 +281,7 @@ pub async fn ws_handler(
 ) -> Result<Response, StatusCode> {
     let _cookie = crate::auth::check_auth(&state.auth, &headers).await?;
     let user_key = state.resolve_user_key(&headers).await;
-    let (session_arc, ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+    let (_sid, session_arc, ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
     Ok(ws.on_upgrade(move |socket| handle_ws(socket, session_arc, ws_tx)))
 }
 
@@ -364,36 +297,14 @@ async fn handle_ws(
     // Send current session state as the first message
     {
         let session = session_arc.lock().await;
-        let snapshot = SessionResponse {
-            workflow_state: format!("{:?}", session.workflow_state),
-            output_lines: session.output_lines.clone(),
-            todo_lines: session.todo_lines.clone(),
-            mcp_servers: session
-                .mcp_servers
-                .iter()
-                .map(|s| McpServerJson {
-                    name: s.name.clone(),
-                    connected: s.status == trustee_core::types::McpServerStatus::Connected,
-                    tool_count: s.tool_count,
-                    error: s.error.clone(),
-                })
-                .collect(),
-            context_tokens: session.current_context_tokens,
-            input: session.input.clone(),
-            resume_info_present: session.resume_info.is_some(),
-            session_name: session.session_name.clone(),
-            project_name: session.project_name.clone(),
-            session_id: session.session_id.clone(),
-        };
+        let snapshot = session_to_response(&session);
         if let Ok(json) = serde_json::to_string(&snapshot) {
             let _ = sender.send(Message::Text(json.into())).await;
         }
     }
 
-    // Fan-out loop: broadcast messages to this client
     loop {
         tokio::select! {
-            // Receive broadcast messages and forward to client
             msg = ws_rx.recv() => {
                 match msg {
                     Ok(text) => {
@@ -408,7 +319,6 @@ async fn handle_ws(
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
-            // Receive messages from client (we mostly ignore, but need to detect close)
             msg = receiver.next() => {
                 match msg {
                     Some(Ok(Message::Close(_))) | None => break,
@@ -420,10 +330,10 @@ async fn handle_ws(
 }
 
 // ---------------------------------------------------------------------------
-// Session discovery handlers
+// Session discovery handlers (checkpoint-based — existing, migrated)
 // ---------------------------------------------------------------------------
 
-/// GET /api/v1/sessions — list all sessions with checkpoints available for resume.
+/// GET /api/v1/sessions — list all checkpoint sessions available for resume.
 pub async fn list_sessions(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
@@ -434,7 +344,7 @@ pub async fn list_sessions(
 
     let (config_toml, home_dir) = {
         let user_key = state.resolve_user_key(&headers).await;
-        let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+        let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
         let session = session_arc.lock().await;
         let config = match &session.config_toml {
             Some(c) => c.clone(),
@@ -448,19 +358,15 @@ pub async fn list_sessions(
         (config, session.home_dir.clone())
     };
 
-    let mut sessions = trustee_core::sessions::list_all_sessions(&config_toml, home_dir.as_deref())
+    let sessions = trustee_core::sessions::list_all_sessions(&config_toml, home_dir.as_deref())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // Per-user isolation is now handled by home_dir: each user's checkpoints
-    // are stored in a separate directory tree, so list_all_sessions already
-    // returns only this user's sessions.
 
     let resp = Json(SessionListResponse { sessions });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
-/// GET /api/v1/sessions/{id} — get session detail with checkpoints.
+/// GET /api/v1/sessions/{id} — get checkpoint session detail.
 pub async fn get_session_detail(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
@@ -472,7 +378,7 @@ pub async fn get_session_detail(
 
     let (config_toml, home_dir) = {
         let user_key = state.resolve_user_key(&headers).await;
-        let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+        let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
         let session = session_arc.lock().await;
         match &session.config_toml {
             Some(c) => (c.clone(), session.home_dir.clone()),
@@ -491,20 +397,14 @@ pub async fn get_session_detail(
 
     match detail {
         Some((session, checkpoints)) => {
-            let resp = Json(SessionDetailResponse {
-                session,
-                checkpoints,
-            });
+            let resp = Json(SessionDetailResponse { session, checkpoints });
             Ok(with_rolling_cookie(resp.into_response(), cookie))
         }
         None => Err((StatusCode::NOT_FOUND, "Session not found".to_string())),
     }
 }
 
-/// POST /api/v1/sessions/{id}/resume — resume from the latest checkpoint.
-///
-/// Sets `session.resume_info` so the next `/session/command` continues
-/// from the restored checkpoint.
+/// POST /api/v1/sessions/{id}/resume — resume from checkpoint (legacy path).
 pub async fn resume_session(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
@@ -517,9 +417,8 @@ pub async fn resume_session(
 
     let (config_toml, home_dir) = {
         let user_key = state.resolve_user_key(&headers).await;
-        let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+        let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
         let session = session_arc.lock().await;
-        // Reject if workflow is running
         if session.workflow_state != trustee_core::types::WorkflowState::Idle {
             return Err((
                 StatusCode::CONFLICT,
@@ -551,29 +450,24 @@ pub async fn resume_session(
         }
     };
 
-    // If the caller specified a specific checkpoint_id, validate it belongs to the session
-    // For now we always use the latest checkpoint from create_resume_info.
-    // Future: accept optional checkpoint_id in the body to resume from a specific one.
     let checkpoint_id = resume_info.checkpoint_id.clone();
     let iteration = resume_info.iteration;
 
     {
         let user_key = state.resolve_user_key(&headers).await;
-        let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+        let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
         let mut session = session_arc.lock().await;
         session.resume_info = Some(resume_info);
-        // Clear output so the user sees a fresh context when they resume
         session.output_lines.clear();
     }
 
-    // Broadcast state so clients know resume info is loaded
     let msg = serde_json::json!({
         "type": "SessionResumed",
         "session_id": session_id,
         "checkpoint_id": checkpoint_id,
     });
     let user_key = state.resolve_user_key(&headers).await;
-    let (_, ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+    let (_, _sid, ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
     let _ = ws_tx.send(msg.to_string());
 
     let resp = Json(ResumeResponse {
@@ -585,8 +479,7 @@ pub async fn resume_session(
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
-/// GET /api/v1/sessions/{id}/history — load conversation history from
-/// the latest checkpoint for display in the Web UI.
+/// GET /api/v1/sessions/{id}/history — load conversation history from checkpoint.
 pub async fn get_session_history(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
@@ -596,10 +489,9 @@ pub async fn get_session_history(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    // Extract home_dir from the user's session for per-user checkpoint lookup
     let home_dir = {
         let user_key = state.resolve_user_key(&headers).await;
-        let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+        let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
         let session = session_arc.lock().await;
         session.home_dir.clone()
     };
@@ -625,13 +517,10 @@ pub async fn get_session_history(
 }
 
 // ---------------------------------------------------------------------------
-// Session/project naming handlers
+// Session/project naming handlers (legacy, migrated)
 // ---------------------------------------------------------------------------
 
-/// POST /api/v1/session/name — set the display name for the current session.
-///
-/// This name flows through RunContext on the next `execute_command()`,
-/// becoming `SessionMetadata.description` in checkpoint storage.
+/// POST /api/v1/session/name — set the display name for the active session.
 pub async fn set_session_name(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
@@ -642,24 +531,18 @@ pub async fn set_session_name(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let user_key = state.resolve_user_key(&headers).await;
-    let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+    let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
 
     {
         let mut session = session_arc.lock().await;
         session.session_name = Some(req.name.clone());
     }
 
-    let resp = Json(SetNameResponse {
-        accepted: true,
-        name: req.name,
-    });
+    let resp = Json(SetNameResponse { accepted: true, name: req.name });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
 /// POST /api/v1/project/name — set the display name for the current project.
-///
-/// This name flows through RunContext on the next `execute_command()`,
-/// becoming `ProjectMetadata.name` in checkpoint storage.
 pub async fn set_project_name(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
@@ -670,24 +553,20 @@ pub async fn set_project_name(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let user_key = state.resolve_user_key(&headers).await;
-    let (session_arc, _ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
+    let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
 
     {
         let mut session = session_arc.lock().await;
         session.project_name = Some(req.name.clone());
     }
 
-    let resp = Json(SetNameResponse {
-        accepted: true,
-        name: req.name,
-    });
+    let resp = Json(SetNameResponse { accepted: true, name: req.name });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
-/// POST /api/v1/session/new — start a fresh session.
+/// POST /api/v1/session/new — start a fresh session (legacy).
 ///
-/// Clears `resume_info` (severing connection to the previous checkpoint)
-/// and optionally sets session identity fields for the next workflow.
+/// Creates a new MSU session via create_session() and makes it active.
 pub async fn new_session(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
@@ -698,29 +577,259 @@ pub async fn new_session(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let user_key = state.resolve_user_key(&headers).await;
-    let (session_arc, ws_tx, _token_store) = state.ensure_user_session(&user_key).await;
 
-    {
-        let mut session = session_arc.lock().await;
-        if session.workflow_state != trustee_core::types::WorkflowState::Idle {
-            return Err((
-                StatusCode::CONFLICT,
-                "Workflow is running or cancelling".to_string(),
-            ));
-        }
-        session.resume_info = None;
-        session.backup_resume_info = None;
-        session.output_lines.clear();
-        session.session_name = req.session_name;
-        session.session_id = None; // Clear so next command starts a new checkpoint chain.
-    }
+    let session_id = state
+        .create_session(&user_key, req.session_name)
+        .await
+        .map_err(|e| match e {
+            SessionError::MaxSessionsReached(n) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("Max {} sessions per user", n),
+            ),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
 
     // Broadcast so WebSocket clients know to reset their view
-    let msg = serde_json::json!({ "type": "NewSession" });
+    let (_, _ws_tx, ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
+    let msg = serde_json::json!({ "type": "NewSession", "session_id": session_id });
     let _ = ws_tx.send(msg.to_string());
 
     let resp = Json(NewSessionResponse { accepted: true });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
+// ---------------------------------------------------------------------------
+// MSU: New session-scoped route handlers (/api/v1/sessions/*)
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/sessions — create a new live session.
+pub async fn create_session(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<CreateSessionRequest>,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let user_key = state.resolve_user_key(&headers).await;
+
+    let session_id = state
+        .create_session(&user_key, req.session_name)
+        .await
+        .map_err(|e| match e {
+            SessionError::MaxSessionsReached(n) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("Max {} sessions per user", n),
+            ),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+
+    // If resume_from is provided, set resume_info on the new session
+    if let Some(resume_from) = req.resume_from {
+        if let Some((session_arc, _)) = state.get_session(&user_key, &session_id).await {
+            let mut session = session_arc.lock().await;
+            if let Some(ref config_toml) = session.config_toml.clone() {
+                let home_dir = session.home_dir.as_deref();
+                if let Ok(Some(info)) =
+                    trustee_core::sessions::create_resume_info(config_toml, &resume_from, home_dir)
+                        .await
+                {
+                    session.resume_info = Some(info);
+                }
+            }
+        }
+    }
+
+    let resp = Json(CreateSessionResponse { session_id, accepted: true });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
+/// GET /api/v1/sessions/{id}/live — get live session state by ID.
+///
+/// NOTE: This uses /live suffix to avoid conflict with the existing
+/// GET /api/v1/sessions/{id} checkpoint detail route.
+pub async fn get_live_session(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Path(session_id): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let user_key = state.resolve_user_key(&headers).await;
+
+    let (session_arc, _ws_tx) = state
+        .get_session(&user_key, &session_id)
+        .await
+        .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
+
+    let session = session_arc.lock().await;
+    let resp = Json(session_to_response(&session));
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
+/// POST /api/v1/sessions/{id}/command — submit command to a specific session.
+pub async fn post_command_session(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Path(session_id): Path<String>,
+    Json(req): Json<CommandRequest>,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let user_key = state.resolve_user_key(&headers).await;
+
+    let (session_arc, ws_tx) = state
+        .get_session(&user_key, &session_id)
+        .await
+        .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
+
+    // Get token_store from user's session collection
+    let token_store = {
+        let user_sessions = state.sessions.get(&user_key).unwrap();
+        user_sessions.token_store.clone()
+    };
+
+    execute_command_inner(&state, &headers, &session_arc, &ws_tx, &token_store, req).await?;
+
+    // Set this session as active (most recently used)
+    state.set_active_session(&user_key, &session_id).await;
+
+    let resp = Json(CommandResponse { accepted: true });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
+/// POST /api/v1/sessions/{id}/cancel — cancel workflow on a specific session.
+pub async fn post_cancel_session(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Path(session_id): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let user_key = state.resolve_user_key(&headers).await;
+
+    let (session_arc, ws_tx) = state
+        .get_session(&user_key, &session_id)
+        .await
+        .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
+
+    let cancelled = {
+        let session = session_arc.lock().await;
+        let c = session.workflow_state == trustee_core::types::WorkflowState::Running;
+        if c {
+            session.cancel_token.cancel();
+        }
+        c
+    };
+
+    if cancelled {
+        let state_msg = serde_json::json!({"type": "StateChanged", "state": "Cancelling"});
+        let _ = ws_tx.send(state_msg.to_string());
+    }
+
+    let resp = Json(CommandResponse { accepted: true });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
+/// POST /api/v1/sessions/{id}/handoff — trigger handoff on a specific session.
+pub async fn post_handoff_session(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Path(session_id): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let user_key = state.resolve_user_key(&headers).await;
+
+    let (session_arc, _ws_tx) = state
+        .get_session(&user_key, &session_id)
+        .await
+        .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
+
+    let mut session = session_arc.lock().await;
+    session.trigger_handoff(String::new());
+
+    let resp = Json(CommandResponse { accepted: true });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
+/// POST /api/v1/sessions/{id}/name — set name on a specific session.
+pub async fn set_session_name_session(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Path(session_id): Path<String>,
+    Json(req): Json<SetNameRequest>,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let user_key = state.resolve_user_key(&headers).await;
+
+    let (session_arc, _ws_tx) = state
+        .get_session(&user_key, &session_id)
+        .await
+        .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
+
+    {
+        let mut session = session_arc.lock().await;
+        session.session_name = Some(req.name.clone());
+    }
+
+    let resp = Json(SetNameResponse { accepted: true, name: req.name });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
+/// DELETE /api/v1/sessions/{id} — destroy a live session.
+pub async fn destroy_session(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Path(session_id): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let user_key = state.resolve_user_key(&headers).await;
+
+    state
+        .destroy_session(&user_key, &session_id)
+        .await
+        .map_err(|e| match e {
+            SessionError::NotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
+            SessionError::NotIdle(_) => (StatusCode::CONFLICT, e.to_string()),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        })?;
+
+    Ok(with_rolling_cookie(
+        StatusCode::NO_CONTENT.into_response(),
+        cookie,
+    ))
+}
+
+/// GET /api/v1/sessions/{id}/stream — WebSocket for a specific session.
+pub async fn ws_session_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+    Path(session_id): Path<String>,
+) -> Result<Response, StatusCode> {
+    let _cookie = crate::auth::check_auth(&state.auth, &headers).await?;
+    let user_key = state.resolve_user_key(&headers).await;
+    let (session_arc, ws_tx) = state
+        .get_session(&user_key, &session_id)
+        .await
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(ws.on_upgrade(move |socket| handle_ws(socket, session_arc, ws_tx)))
 }
 
 // ---------------------------------------------------------------------------
@@ -767,22 +876,87 @@ pub async fn serve_static(Path(file): Path<String>) -> Response {
 }
 
 // ---------------------------------------------------------------------------
+// Command execution helper (shared between legacy and session-scoped routes)
+// ---------------------------------------------------------------------------
+
+/// Execute a command on a session. Shared between `post_command` (legacy)
+/// and `post_command_session` (session-scoped).
+///
+/// Handles token injection, workflow state check, session_id/resume_info
+/// setup, concurrency permit, and execution trigger.
+#[allow(clippy::too_many_arguments)]
+async fn execute_command_inner(
+    state: &ServerState,
+    headers: &axum::http::HeaderMap,
+    session_arc: &std::sync::Arc<tokio::sync::Mutex<trustee_core::session::Session>>,
+    ws_tx: &broadcast::Sender<String>,
+    token_store: &Arc<pep::MemoryTokenStore>,
+    req: CommandRequest,
+) -> Result<(), (StatusCode, String)> {
+    let agent_name = {
+        let session = session_arc.lock().await;
+        session.agent_name.clone()
+    };
+    inject_session_token(&state.auth, headers, &agent_name, token_store).await;
+
+    {
+        let mut session = session_arc.lock().await;
+
+        if session.workflow_state != trustee_core::types::WorkflowState::Idle {
+            return Err((
+                StatusCode::CONFLICT,
+                "Workflow is running or cancelling".to_string(),
+            ));
+        }
+
+        // Handle session_id / resume_info (same as original post_command)
+        if let Some(ref client_session_id) = req.session_id {
+            if session.session_id.is_none() {
+                session.session_id = Some(client_session_id.clone());
+            }
+
+            if session.resume_info.is_none() {
+                if let Some(ref config_toml) = session.config_toml.clone() {
+                    let home_dir = session.home_dir.as_deref();
+                    if let Ok(Some(info)) =
+                        trustee_core::sessions::create_resume_info(
+                            config_toml,
+                            client_session_id,
+                            home_dir,
+                        )
+                        .await
+                    {
+                        session.resume_info = Some(info);
+                    }
+                }
+            }
+        }
+
+        let permit = state
+            .workflow_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".to_string()))?;
+
+        session.token_store = Some(token_store.clone());
+        session.workflow_permit = Some(permit);
+        session.input = req.command;
+        session.execute_command();
+    }
+
+    let state_msg = serde_json::json!({"type": "StateChanged", "state": "Running"});
+    let _ = ws_tx.send(state_msg.to_string());
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // MCP session token injection (C1 — web-session credentials)
 // ---------------------------------------------------------------------------
 
-/// Reserved credential name for web session tokens.
-/// ABK's `WebSession` credential type reads from this name.
 const WEB_SESSION_CRED_NAME: &str = "__web_session";
 
-/// Push the current user's access token into the per-user `MemoryTokenStore`
-/// so that MCP servers with `type = "web-session"` credentials can read it.
-///
-/// This replaces the insecure `FileTokenStore` that wrote to a shared
-/// `__web_session.json` file, causing cross-user token leakage when
-/// multiple users ran workflows concurrently.
-///
-/// Called before each agent command execution. If no auth is configured
-/// or the token cannot be resolved, this is a no-op.
 async fn inject_session_token(
     auth: &Option<Arc<crate::auth::AuthState>>,
     headers: &axum::http::HeaderMap,
@@ -792,10 +966,9 @@ async fn inject_session_token(
     use pep::{StoredToken, TokenStore};
 
     let Some(auth_state) = auth.as_ref() else {
-        return; // No auth configured — nothing to inject
+        return;
     };
 
-    // Resolve the current access token
     let access_token = match resolve_access_token_for_mcp(auth_state, headers).await {
         Ok(token) => token,
         Err(e) => {
@@ -804,38 +977,30 @@ async fn inject_session_token(
         }
     };
 
-    // Compute expiry from JWT exp claim, or default to 15 min
     let expires_at = jwt_expiry(&access_token).unwrap_or_else(|| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        // Default: 15 minutes from now (conservative Kanidm TTL)
         compute_rfc3339(now + 900)
     });
 
-    let stored = StoredToken::new(
-        &access_token,
-        None,           // No separate refresh token — session manager owns refresh
-        "Bearer",
-        &expires_at,
-        None,
-    );
+    let stored = StoredToken::new(&access_token, None, "Bearer", &expires_at, None);
 
-    // Store in per-user MemoryTokenStore (in-memory, isolated per user)
     if let Err(e) = token_store.save(WEB_SESSION_CRED_NAME, &stored) {
         tracing::warn!("Failed to write session token to MemoryTokenStore: {}", e);
     } else {
-        tracing::debug!("Injected session token for web-session MCP credentials (expires {})", expires_at);
+        tracing::debug!(
+            "Injected session token for web-session MCP credentials (expires {})",
+            expires_at
+        );
     }
 }
 
-/// Resolve the current user's access token from Bearer header or session cookie.
 async fn resolve_access_token_for_mcp(
     auth: &crate::auth::AuthState,
     headers: &axum::http::HeaderMap,
 ) -> Result<String, String> {
-    // Bearer header — return as-is
     if let Some(token) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -848,7 +1013,6 @@ async fn resolve_access_token_for_mcp(
         return Ok(token);
     }
 
-    // Cookie → session_id → WebSessionManager → access token
     let session_id = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
@@ -856,8 +1020,7 @@ async fn resolve_access_token_for_mcp(
             cookies
                 .split(';')
                 .map(|c| c.trim())
-                .find_map(|c| c.strip_prefix(&format!("{}=", auth.config.cookie_name)))
-                .map(|s| s.to_string())
+                .find_map(|c| c.strip_prefix(&format!("{}=", auth.config.cookie_name)).map(|s| s.to_string()))
         })
         .ok_or("no session cookie")?;
 
@@ -871,14 +1034,12 @@ async fn resolve_access_token_for_mcp(
         .map_err(|e| format!("session lookup: {e}"))
 }
 
-/// Extract `exp` claim from a JWT and format as RFC-3339.
 fn jwt_expiry(token: &str) -> Option<String> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() < 2 {
         return None;
     }
 
-    // JWT payload is base64url (no padding)
     use base64::Engine;
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(parts[1])
@@ -891,7 +1052,6 @@ fn jwt_expiry(token: &str) -> Option<String> {
     Some(compute_rfc3339(exp))
 }
 
-/// Convert epoch seconds to RFC-3339 UTC timestamp.
 fn compute_rfc3339(epoch_secs: u64) -> String {
     let days = epoch_secs / 86400;
     let rem = epoch_secs % 86400;
