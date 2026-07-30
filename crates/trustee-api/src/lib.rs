@@ -132,6 +132,7 @@ pub async fn run(
         // Session discovery & resume
         // Session discovery & resume (checkpoint-based, existing)
         .route("/api/v1/sessions", get(routes::list_sessions).post(routes::create_session))
+        .route("/api/v1/sessions/live", get(routes::list_live_sessions))
         .route("/api/v1/sessions/{id}", get(routes::get_session_detail).delete(routes::destroy_session))
         .route("/api/v1/sessions/{id}/live", get(routes::get_live_session))
         .route("/api/v1/sessions/{id}/resume", post(routes::resume_session))

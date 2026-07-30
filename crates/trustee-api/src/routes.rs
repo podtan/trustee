@@ -366,6 +366,22 @@ pub async fn list_sessions(
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
+/// GET /api/v1/sessions/live — list only in-memory (active) MSU sessions.
+pub async fn list_live_sessions(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let cookie = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let user_key = state.resolve_user_key(&headers).await;
+    let items = state.list_sessions(&user_key).await;
+
+    let resp = Json(serde_json::json!({ "sessions": items }));
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
 /// GET /api/v1/sessions/{id} — get checkpoint session detail.
 pub async fn get_session_detail(
     State(state): State<ServerState>,
