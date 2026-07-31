@@ -497,7 +497,27 @@ pub async fn resume_session(
         let mut session = session_arc.lock().await;
         session.resume_info = Some(resume_info);
         session.session_id = Some(checkpoint_session_id.clone());
-        session.output_lines.clear();
+
+        // Load conversation history into output_lines so the WS snapshot
+        // includes them. Without this, the resumed session shows blank
+        // until the user sends a new command.
+        if let Some(history) = trustee_core::sessions::load_session_history(
+            &checkpoint_session_id,
+            home_dir.as_deref(),
+        )
+        .await
+        .ok()
+        .flatten()
+        {
+            session.output_lines.clear();
+            for msg in &history.messages {
+                if msg.role == "user" {
+                    session.output_lines.push(format!("> {}", msg.content));
+                } else if !msg.content.is_empty() {
+                    session.output_lines.push(msg.content.clone());
+                }
+            }
+        }
     }
 
     // 5. Broadcast resume event on the new session's WS
