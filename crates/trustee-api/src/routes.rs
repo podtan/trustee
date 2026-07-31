@@ -344,18 +344,16 @@ pub async fn list_sessions(
 
     let (config_toml, home_dir) = {
         let user_key = state.resolve_user_key(&headers).await;
-        let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
-        let session = session_arc.lock().await;
-        let config = match &session.config_toml {
-            Some(c) => c.clone(),
+        let (config, home) = state.get_user_config_and_home(&user_key);
+        match config {
+            Some(c) => (c, home),
             None => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Configuration not loaded".to_string(),
                 ))
             }
-        };
-        (config, session.home_dir.clone())
+        }
     };
 
     let sessions = trustee_core::sessions::list_all_sessions(&config_toml, home_dir.as_deref())
@@ -394,10 +392,9 @@ pub async fn get_session_detail(
 
     let (config_toml, home_dir) = {
         let user_key = state.resolve_user_key(&headers).await;
-        let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
-        let session = session_arc.lock().await;
-        match &session.config_toml {
-            Some(c) => (c.clone(), session.home_dir.clone()),
+        let (config, home) = state.get_user_config_and_home(&user_key);
+        match config {
+            Some(c) => (c, home),
             None => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -505,12 +502,7 @@ pub async fn get_session_history(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let home_dir = {
-        let user_key = state.resolve_user_key(&headers).await;
-        let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
-        let session = session_arc.lock().await;
-        session.home_dir.clone()
-    };
+    let home_dir = state.get_user_home_dir(&state.resolve_user_key(&headers).await);
 
     let history = trustee_core::sessions::load_session_history(&session_id, home_dir.as_deref())
         .await

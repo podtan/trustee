@@ -478,6 +478,36 @@ impl ServerState {
     }
 
     // -----------------------------------------------------------------------
+    // Read-only helpers (no session creation side effects)
+    // -----------------------------------------------------------------------
+
+    /// Resolve a user's home_dir without creating an in-memory session.
+    ///
+    /// This is the read-only equivalent of the isolation logic in
+    /// `apply_user_isolation`. Used by endpoints that only need to read
+    /// checkpoint data from disk (history, session list, session detail)
+    /// and must NOT create ghost sessions as a side effect.
+    pub fn get_user_home_dir(&self, user_key: &str) -> Option<std::path::PathBuf> {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(user_key.as_bytes());
+        let hash_bytes = hasher.finalize();
+        let user_hash = format!(
+            "{:016x}",
+            u64::from_be_bytes(hash_bytes[..8].try_into().unwrap())
+        );
+        dirs::home_dir().map(|home| home.join(".trustee").join("users").join(&user_hash))
+    }
+
+    /// Resolve config_toml and home_dir without creating an in-memory session.
+    ///
+    /// Returns `(config_toml, home_dir)`. If config is not loaded,
+    /// config_toml will be None.
+    pub fn get_user_config_and_home(&self, user_key: &str) -> (Option<String>, Option<std::path::PathBuf>) {
+        (self.config_toml.clone(), self.get_user_home_dir(user_key))
+    }
+
+    // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 
