@@ -417,10 +417,14 @@ pub async fn get_session_detail(
     }
 }
 
-/// POST /api/v1/sessions/{id}/resume — resume from checkpoint (legacy path).
+/// POST /api/v1/sessions/{id}/resume — resume from checkpoint.
+///
+/// Creates a NEW in-memory MSU session and loads the checkpoint data
+/// from disk into it. Returns the NEW session ID (not the checkpoint
+/// session ID) so the frontend can connect WS to the right session.
 pub async fn resume_session(
     State(state): State<ServerState>,
-    Path(session_id): Path<String>,
+    Path(checkpoint_session_id): Path<String>,
     headers: axum::http::HeaderMap,
     _body: Option<Json<ResumeRequestBody>>,
 ) -> Result<Response, (StatusCode, String)> {
@@ -428,18 +432,13 @@ pub async fn resume_session(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
+    let user_key = state.resolve_user_key(&headers).await;
+
+    // 1. Get config + home_dir without creating a session (read-only)
     let (config_toml, home_dir) = {
-        let user_key = state.resolve_user_key(&headers).await;
-        let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
-        let session = session_arc.lock().await;
-        if session.workflow_state != trustee_core::types::WorkflowState::Idle {
-            return Err((
-                StatusCode::CONFLICT,
-                "Workflow is running or cancelling".to_string(),
-            ));
-        }
-        match &session.config_toml {
-            Some(c) => (c.clone(), session.home_dir.clone()),
+        let (config, home) = state.get_user_config_and_home(&user_key);
+        match config {
+            Some(c) => (c, home),
             None => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -449,9 +448,14 @@ pub async fn resume_session(
         }
     };
 
-    let resume_info = trustee_core::sessions::create_resume_info(&config_toml, &session_id, home_dir.as_deref())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // 2. Load checkpoint data from disk
+    let resume_info = trustee_core::sessions::create_resume_info(
+        &config_toml,
+        &checkpoint_session_id,
+        home_dir.as_deref(),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let resume_info = match resume_info {
         Some(info) => info,
@@ -466,26 +470,51 @@ pub async fn resume_session(
     let checkpoint_id = resume_info.checkpoint_id.clone();
     let iteration = resume_info.iteration;
 
+    // 3. Create a NEW MSU session for this resume
+    let session_name = format!("Resumed: {}", checkpoint_session_id);
+    let new_sid = state
+        .create_session(&user_key, Some(session_name))
+        .await
+        .map_err(|e| match e {
+            crate::state::SessionError::MaxSessionsReached(n) => {
+                (StatusCode::TOO_MANY_REQUESTS, format!("Max {} sessions reached", n))
+            }
+            crate::state::SessionError::NotFound(_) => {
+                (StatusCode::NOT_FOUND, "Session not found".to_string())
+            }
+            crate::state::SessionError::NotIdle(_) => {
+                (StatusCode::CONFLICT, "Session is busy".to_string())
+            }
+        })?;
+
+    // 4. Load checkpoint data into the new session
     {
-        let user_key = state.resolve_user_key(&headers).await;
-        let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
+        let (session_arc, _ws_tx) = state
+            .get_session(&user_key, &new_sid)
+            .await
+            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Failed to get new session".to_string()))?;
+
         let mut session = session_arc.lock().await;
         session.resume_info = Some(resume_info);
+        session.session_id = Some(checkpoint_session_id.clone());
         session.output_lines.clear();
     }
 
+    // 5. Broadcast resume event on the new session's WS
+    let (_, ws_tx) = state
+        .get_session(&user_key, &new_sid)
+        .await
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Failed to get session WS".to_string()))?;
     let msg = serde_json::json!({
         "type": "SessionResumed",
-        "session_id": session_id,
+        "session_id": checkpoint_session_id,
         "checkpoint_id": checkpoint_id,
     });
-    let user_key = state.resolve_user_key(&headers).await;
-    let (_, _sid, ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
     let _ = ws_tx.send(msg.to_string());
 
     let resp = Json(ResumeResponse {
         accepted: true,
-        session_id: session_id.clone(),
+        session_id: new_sid.clone(),
         checkpoint_id,
         iteration,
     });
