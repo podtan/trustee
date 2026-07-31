@@ -995,6 +995,13 @@ function handleMessage(msg) {
       closeAgentBubble();
       updateState('Idle');
       break;
+    case 'NewSession':
+      // Server confirmed new session — clear output and reset state
+      currentSessionId = msg.session_id || null;
+      window._hasSession = true;
+      outputEl.innerHTML = '';
+      updateState('Idle');
+      break;
     case 'WorkflowStarted':
     case 'StateChanged':
       if (msg.state) updateState(msg.state);
@@ -1574,16 +1581,11 @@ function renderSessionCards(sessions) {
 }
 
 async function startNewSession() {
-  const name = prompt('Session name (optional — leave blank to auto-derive):');
-  if (name === null) return; // user cancelled
-
   try {
     const res = await fetch(API + '/api/v1/session/new', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_name: name || null,
-      }),
+      body: JSON.stringify({}),
     });
 
     if (res.status === 409) {
@@ -1595,9 +1597,11 @@ async function startNewSession() {
       return;
     }
 
-    // Clear session tracking for the new chat
+    // Clear output immediately for the new session
     currentSessionId = null;
-    showToast('Started new session', 'success');
+    window._hasSession = true;
+    outputEl.innerHTML = '';
+    updateState('Idle');
     closeSessionsOverlay();
   } catch (e) {
     showToast('Failed to start new session.', 'error');
