@@ -48,6 +48,15 @@ open_file_window_size = 1000
 max_tool_result_size_bytes = 256000
 truncate_large_results = true
 pagination_size = 50
+# Tool filtering (per-user configurable via trustee-web config injection).
+# enabled_tools: Allowlist of tool names. Absent/None = ALL tools (backward compatible).
+#   Set to an empty array [] to lock down all tools.
+#   Example: enabled_tools = ["read", "grep", "list", "glob"]
+# disabled_tools: Denylist. Takes precedence over enabled_tools.
+#   Example: disabled_tools = ["bash"]
+# Available CATS tools: bash, read, write, edit, glob, grep, list, multiedit, webfetch, websearch, todowrite, todoread
+# enabled_tools = ["read", "grep", "list", "glob"]
+# disabled_tools = ["bash"]
 
 # Search filtering configuration
 [search_filtering]
