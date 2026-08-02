@@ -522,10 +522,92 @@ impl ServerState {
             u64::from_be_bytes(hash_bytes[..8].try_into().unwrap())
         );
 
-        if let Some(home) = dirs::home_dir() {
-            session.home_dir = Some(home.join(".trustee").join("users").join(&user_hash));
-        }
+        // Set per-user home directory for checkpoint isolation
+        let user_home = if let Some(home) = dirs::home_dir() {
+            let user_home = home.join(".trustee").join("users").join(&user_hash);
+            session.home_dir = Some(user_home.clone());
+            Some(user_home)
+        } else {
+            None
+        };
+
         session.project_id = Some(format!("web{}", &user_hash[..16]));
+
+        // ── Per-user .env (Task 2) ──────────────────────────────────────
+        //
+        // Load per-user secrets from ~/.trustee/users/{hash}/.env
+        // These are merged on top of shared secrets (per-user wins).
+        // They are NEVER set as process env vars — used only for ${VAR}
+        // substitution in the config TOML below.
+        let shared_secrets = session.secrets.clone().unwrap_or_default();
+        let mut merged_secrets = shared_secrets.clone();
+
+        if let Some(ref user_home) = user_home {
+            let user_env_path = user_home.join(".env");
+            if user_env_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&user_env_path) {
+                    for line in content.lines() {
+                        let line = line.trim();
+                        if line.is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        if let Some((key, value)) = line.split_once('=') {
+                            let key = key.trim().to_string();
+                            let value = value.trim()
+                                .trim_matches('"')
+                                .trim_matches('\'')
+                                .to_string();
+                            merged_secrets.insert(key, value);
+                        }
+                    }
+                    tracing::debug!(
+                        "Loaded {} per-user secrets from {}",
+                        merged_secrets.len() - shared_secrets.len(),
+                        user_env_path.display()
+                    );
+                }
+            }
+        }
+
+        // ── Per-user config overlay (Task 3) ────────────────────────────
+        //
+        // Load per-user config from ~/.trustee/users/{hash}/config/trustee.toml
+        // and deep-merge it on top of the shared config. Per-user keys
+        // override shared keys; missing keys inherit from shared.
+        if let Some(ref user_home) = user_home {
+            let user_config_path = user_home.join("config").join("trustee.toml");
+            if user_config_path.exists() {
+                if let Ok(user_config_toml) = std::fs::read_to_string(&user_config_path) {
+                    if let (Ok(mut shared), Ok(overlay)) = (
+                        session.config_toml.as_ref()
+                            .unwrap_or(&String::new())
+                            .parse::<toml::Value>(),
+                        user_config_toml.parse::<toml::Value>(),
+                    ) {
+                        deep_merge_toml(&mut shared, &overlay);
+                        session.config_toml = toml::to_string(&shared).ok();
+                        tracing::debug!("Merged per-user config from {}", user_config_path.display());
+                    }
+                }
+            }
+        }
+
+        // ── ${VAR} substitution (Task 4) ────────────────────────────────
+        //
+        // Replace ${VAR_NAME} in the config TOML with values from the
+        // merged secrets HashMap. Falls back to process env if not in
+        // the HashMap. This replaces the need for std::env::set_var.
+        if let Some(ref mut config_toml) = session.config_toml {
+            substitute_env_vars(config_toml, &merged_secrets);
+        }
+
+        // ── Strip per-user secrets (Task 5) ────────────────────────────
+        //
+        // Keep only shared secrets on session.secrets. When abk's
+        // run_task_from_raw_config() processes the session, its set_var
+        // loop only sees shared secrets (identical for all users → no race).
+        // Per-user secrets were already substituted into config_toml above.
+        session.secrets = Some(shared_secrets);
     }
 
     /// Spawn a background drain task for a specific session's workflow receiver.
@@ -788,4 +870,76 @@ impl<'a> serde::Serialize for SerializableMessage<'a> {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-user config helpers
+// ---------------------------------------------------------------------------
+
+/// Deep-merge a TOML overlay on top of a base value (in-place).
+///
+/// - Tables: recursively merge key-by-key (overlay wins on conflict).
+/// - Arrays: overlay replaces base entirely (no merging).
+/// - Scalars: overlay replaces base.
+/// - If a key exists in overlay but not base, it's added.
+fn deep_merge_toml(base: &mut toml::Value, overlay: &toml::Value) {
+    match (base, overlay) {
+        (toml::Value::Table(base_table), toml::Value::Table(overlay_table)) => {
+            for (key, overlay_val) in overlay_table {
+                match base_table.get_mut(key) {
+                    Some(base_val) => {
+                        // Both exist — recurse if both are tables, else replace
+                        deep_merge_toml(base_val, overlay_val);
+                    }
+                    None => {
+                        // Key only in overlay — insert
+                        base_table.insert(key.clone(), overlay_val.clone());
+                    }
+                }
+            }
+        }
+        // Non-table: overlay replaces base
+        (base, overlay) => {
+            *base = overlay.clone();
+        }
+    }
+}
+
+/// Replace `${VAR_NAME}` references in a string with values from a secrets map.
+///
+/// Falls back to process environment if the variable is not in the map.
+/// Variables not found in either are left as-is.
+fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<String, String>) {
+    // Simple state machine: scan for ${, read until }, replace.
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
+            // Find closing }
+            if let Some(end) = s[i + 2..].find('}') {
+                let var_name = &s[i + 2..i + 2 + end];
+                // Look up in per-user secrets first, then process env
+                if let Some(value) = secrets.get(var_name) {
+                    result.push_str(value);
+                } else if let Ok(value) = std::env::var(var_name) {
+                    result.push_str(&value);
+                } else {
+                    // Not found — leave as-is
+                    result.push_str(&s[i..i + 2 + end + 1]);
+                }
+                i = i + 2 + end + 1;
+            } else {
+                // No closing } — copy as-is
+                result.push('$');
+                i += 1;
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    *s = result;
 }

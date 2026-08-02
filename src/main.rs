@@ -48,6 +48,22 @@ fn load_env_file(path: &PathBuf) -> Result<HashMap<String, String>, Box<dyn std:
     Ok(secrets)
 }
 
+/// Inject secrets into the process environment at startup.
+///
+/// This is called single-threaded before any concurrent access (web server,
+/// TUI, CLI). It makes `${VAR}` references in config TOML resolvable.
+/// Existing env vars take precedence (are NOT overwritten).
+///
+/// In web mode, per-user secrets are handled separately in
+/// `apply_user_isolation()` — they never touch the process env.
+fn inject_secrets_into_env(secrets: &HashMap<String, String>) {
+    for (key, value) in secrets {
+        if std::env::var(key).is_err() {
+            std::env::set_var(key, value);
+        }
+    }
+}
+
 /// Parse .env content into a HashMap (reusable for both local and remote .env files)
 fn parse_env_content(content: &str, secrets: &mut HashMap<String, String>) {
     for line in content.lines() {
@@ -350,6 +366,10 @@ async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
     // Merge embedded defaults with user overrides
     let merged_config = merge_config(&user_config_toml)?;
 
+    // Inject secrets into process env for ${VAR} substitution in config.
+    // Safe: single-threaded, before any concurrent access.
+    inject_secrets_into_env(&secrets);
+
     // Restore terminal cleanly on SIGTERM (e.g. `kill <pid>` from another terminal)
     #[cfg(unix)]
     tokio::spawn(async {
@@ -404,6 +424,9 @@ async fn run_resume_tui_mode(args: &[String]) -> Result<(), Box<dyn std::error::
         }
     };
     let merged_config = merge_config(&user_config_toml)?;
+
+    // Inject secrets into process env for ${VAR} substitution in config.
+    inject_secrets_into_env(&secrets);
 
     // Parse config for ABK
     let config: abk::config::Configuration = toml::from_str(&merged_config)
@@ -558,6 +581,11 @@ async fn run_web_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     let merged_config = merge_config(&user_config_toml)?;
 
+    // Inject shared secrets into process env for ${VAR} substitution in config.
+    // Safe: single-threaded, before web server starts accepting connections.
+    // Per-user secrets are handled separately in apply_user_isolation().
+    inject_secrets_into_env(&secrets);
+
     let scheme = if no_tls { "http" } else { "https" };
     eprintln!("🌐 Starting Trustee Web on {}://{}", scheme, addr);
 
@@ -681,6 +709,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Merge embedded defaults with user overrides (from local or S3)
         let merged_config = merge_config(&user_config_toml)?;
         
+        // Inject secrets into process env for ${VAR} substitution in config.
+        // Safe: single-threaded CLI process.
+        inject_secrets_into_env(&secrets);
+
         // Build RunContext with per-user home_dir
         let run_ctx = {
             let mut rc = abk::context::RunContext::new().with_agent_name("trustee");
