@@ -116,7 +116,7 @@ timeout_seconds = 30
 # Checkpoint and Session Management Configuration
 [checkpointing]
 enabled = true
-auto_checkpoint_interval = 1
+auto_checkpoint_interval = 3
 max_checkpoints_per_session = 50
 compression_enabled = true
 [checkpointing.retention]
