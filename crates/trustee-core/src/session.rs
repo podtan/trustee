@@ -421,21 +421,33 @@ impl Session {
                 }
             }
 
-            // Run the entire workflow inside a TUI-mode scope.
-            // This replaces the old set_tui_mode(true)/set_tui_mode(false)
-            // process-global mutations with a task-local scope.
-            let result = abk::observability::with_tui_mode(true, async {
-                abk::cli::run_task_from_raw_config(
-                    &config_toml,
-                    secrets,
-                    build_info,
-                    &command,
-                    Some(tui_sink),
-                    resume_info,
-                    Some(resume_tx),
-                    Some(child_token),
-                    Some(&run_ctx),
-                )
+            // Run the entire workflow inside a TUI-mode scope and a
+            // per-task logger scope. This replaces the old process-global
+            // set_tui_mode()/init_global_logger() mutations with task-local
+            // scopes, enabling safe concurrent multi-user operation.
+            let scope_logger = {
+                abk::observability::Logger::with_agent_name(
+                    None::<&std::path::Path>,
+                    Some("INFO"),
+                    Some(&agent_name),
+                ).unwrap_or_else(|_| abk::observability::Logger::new(None, Some("INFO")).unwrap())
+            };
+
+            let result = abk::observability::with_logger(scope_logger, async {
+                abk::observability::with_tui_mode(true, async {
+                    abk::cli::run_task_from_raw_config(
+                        &config_toml,
+                        secrets,
+                        build_info,
+                        &command,
+                        Some(tui_sink),
+                        resume_info,
+                        Some(resume_tx),
+                        Some(child_token),
+                        Some(&run_ctx),
+                    )
+                    .await
+                })
                 .await
             })
             .await;
@@ -552,19 +564,28 @@ impl Session {
                 // need MCP credentials, so we skip it here.
             }
 
-            // Run inside TUI-mode scope (task-local, not process-global)
-            let _res = abk::observability::with_tui_mode(true, async {
-                abk::cli::run_task_from_raw_config(
-                    &config_toml,
-                    secrets,
-                    build_info,
-                    &prompt,
-                    Some(cap_sink),
-                    resume_info,
-                    Some(dummy_tx),
-                    Some(child_token),
-                    Some(&run_ctx),
-                )
+            // Run inside per-task logger + TUI-mode scope (task-local, not process-global)
+            let scope_logger = abk::observability::Logger::with_agent_name(
+                None,
+                Some("INFO"),
+                Some(&agent_name),
+            ).unwrap_or_else(|_| abk::observability::Logger::new(None, Some("INFO")).unwrap());
+
+            let _res = abk::observability::with_logger(scope_logger, async {
+                abk::observability::with_tui_mode(true, async {
+                    abk::cli::run_task_from_raw_config(
+                        &config_toml,
+                        secrets,
+                        build_info,
+                        &prompt,
+                        Some(cap_sink),
+                        resume_info,
+                        Some(dummy_tx),
+                        Some(child_token),
+                        Some(&run_ctx),
+                    )
+                    .await
+                })
                 .await
             })
             .await;
