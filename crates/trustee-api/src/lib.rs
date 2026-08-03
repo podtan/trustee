@@ -13,6 +13,10 @@ mod routes;
 mod state;
 mod thq_register;
 
+// Embedded Cedar policy defaults (compiled into binary)
+const EMBEDDED_CEDAR_POLICY: &str = include_str!("../policies/trustee_default.cedar");
+const EMBEDDED_CEDAR_SCHEMA: &str = include_str!("../policies/trustee_schema.cedarschema");
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -42,15 +46,21 @@ pub async fn run(
     use_tls: bool,
 ) -> Result<()> {
     // Parse auth config from TOML (returns None if no [oidc] or [dev] sections)
-    let auth_state = AuthConfig::from_toml(&config_toml).map(|cfg| {
+    let auth_state = if let Some(cfg) = AuthConfig::from_toml(&config_toml) {
         let is_dev = cfg.dev_config.local_dev_mode;
         tracing::info!(
             "Auth enabled: {} mode, issuer={}",
             if is_dev { "development" } else { "production" },
             cfg.issuer_url
         );
-        Arc::new(AuthState::new(cfg))
-    });
+
+        // Parse optional Cedar authorization config
+        let cedar_authorizer = parse_cedar_config(&config_toml).await;
+
+        Some(Arc::new(AuthState::with_cedar(cfg, cedar_authorizer)))
+    } else {
+        None
+    };
 
     // Parse THQ registration config before config_toml is moved into session
     let thq_config = thq_register::ThqConfig::from_toml(&config_toml);
@@ -207,4 +217,78 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Parse [cedar] section from config TOML and create a CedarAuthorizer if enabled.
+///
+/// Configuration:
+/// - `[cedar] enabled = true/false` (default: false)
+/// - `[cedar] policy_path = "/path/to/policies.cedar"` (filesystem override)
+/// - `[cedar] schema_path = "/path/to/schema.cedarschema"` (filesystem override)
+/// - `[cedar] policy_store_url = "https://..."` (remote policy store)
+///
+/// When enabled without filesystem paths, uses embedded defaults.
+async fn parse_cedar_config(config_toml: &str) -> Option<Arc<pep::cedar::CedarAuthorizer>> {
+    let table: toml::Table = match toml::from_str(config_toml) {
+        Ok(t) => t,
+        Err(_) => return None,
+    };
+
+    let cedar_section = table.get("cedar")?.as_table()?;
+    let enabled = cedar_section
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if !enabled {
+        tracing::debug!("Cedar authorization disabled (default)");
+        return None;
+    }
+
+    tracing::info!("Cedar authorization enabled — initializing authorizer");
+
+    let policy_path = cedar_section
+        .get("policy_path")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent"));
+
+    let schema_path = cedar_section
+        .get("schema_path")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from);
+
+    let policy_store_url = cedar_section
+        .get("policy_store_url")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let policy_store_token = cedar_section
+        .get("policy_store_token")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let cedar_config = pep::cedar::CedarConfig {
+        policy_path,
+        schema_path,
+        entities_path: None,
+        default_decision: pep::cedar::DefaultDecision::Deny,
+        validate_on_load: true,
+        policy_store_url,
+        policy_store_token,
+        embedded_policy: Some(EMBEDDED_CEDAR_POLICY),
+        embedded_schema: Some(EMBEDDED_CEDAR_SCHEMA),
+    };
+
+    match pep::cedar::CedarAuthorizer::new_with_policy_store(cedar_config).await {
+        Ok(auth) => {
+            tracing::info!("Cedar authorizer initialized successfully");
+            Some(Arc::new(auth))
+        }
+        Err(e) => {
+            tracing::error!("Failed to initialize Cedar authorizer: {}", e);
+            tracing::warn!("Cedar was enabled but initialization failed — auth will proceed WITHOUT Cedar");
+            None
+        }
+    }
 }

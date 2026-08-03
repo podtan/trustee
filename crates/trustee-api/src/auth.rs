@@ -30,6 +30,9 @@ use pep::{DevConfig, JwtClaims, JwtValidationOptions, OidcClientConfig};
 use serde::Deserialize;
 use time::Duration as TimeDuration;
 
+use cedar_policy::{Context, Entities, EntityUid, Request};
+use std::str::FromStr;
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -181,11 +184,18 @@ pub struct AuthState {
     pub pkce_manager: PkceCookieManager,
     /// Web session manager (cookie session_id → server-side token with auto-refresh)
     pub session_manager: Arc<WebSessionManager>,
+    /// Cedar authorizer for ABAC authorization (None = Cedar disabled)
+    pub cedar_authorizer: Option<Arc<pep::cedar::CedarAuthorizer>>,
 }
 
 impl AuthState {
     /// Create new auth state from configuration.
     pub fn new(config: AuthConfig) -> Self {
+        Self::with_cedar(config, None)
+    }
+
+    /// Create new auth state with optional Cedar authorizer.
+    pub fn with_cedar(config: AuthConfig, cedar_authorizer: Option<Arc<pep::cedar::CedarAuthorizer>>) -> Self {
         let pkce_manager = PkceCookieManager::new(
             config.pkce_cookie_secret.as_bytes(),
             "trustee_pkce_state",
@@ -207,6 +217,7 @@ impl AuthState {
             pkce_manager,
             session_manager,
             config,
+            cedar_authorizer,
         }
     }
 
@@ -291,6 +302,110 @@ impl AuthState {
             }
         }
     }
+
+    /// Check Cedar authorization for the authenticated user.
+    ///
+    /// Returns Ok(()) if allowed (or if Cedar is not configured).
+    /// Returns Err(()) if denied — caller should return 403 Forbidden.
+    fn check_cedar_authorized(&self, claims: &JwtClaims) -> Result<(), ()> {
+        let Some(ref authorizer) = self.cedar_authorizer else {
+            return Ok(()); // Cedar not configured — allow
+        };
+
+        // Build principal entity from JWT claims
+        let principal_entity = match pep::cedar::build_principal_entity(claims) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("Cedar: failed to build principal entity: {}", e);
+                return Err(());
+            }
+        };
+
+        // Build entities set with principal + TrusteeApp resource
+        let mut entities_vec = vec![principal_entity];
+
+        // Add a TrusteeApp entity as the resource
+        let app_uid = match EntityUid::from_str(r#"TrusteeApp::"default""#) {
+            Ok(uid) => uid,
+            Err(e) => {
+                tracing::error!("Cedar: failed to build TrusteeApp uid: {}", e);
+                return Err(());
+            }
+        };
+        let app_entity = match cedar_policy::Entity::new(
+            app_uid,
+            std::collections::HashMap::new(),
+            std::collections::HashSet::new(),
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("Cedar: failed to build TrusteeApp entity: {}", e);
+                return Err(());
+            }
+        };
+        entities_vec.push(app_entity);
+
+        let entities = match Entities::from_entities(entities_vec, None) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("Cedar: failed to build entities set: {}", e);
+                return Err(());
+            }
+        };
+
+        // Build the Cedar authorization request
+        let principal_uid = match pep::cedar::build_principal_uid(claims) {
+            Ok(uid) => uid,
+            Err(e) => {
+                tracing::error!("Cedar: failed to build principal uid: {}", e);
+                return Err(());
+            }
+        };
+
+        let action_uid = match EntityUid::from_str(r#"Action::"Access""#) {
+            Ok(uid) => uid,
+            Err(e) => {
+                tracing::error!("Cedar: failed to build action uid: {}", e);
+                return Err(());
+            }
+        };
+
+        let resource_uid = match EntityUid::from_str(r#"TrusteeApp::"default""#) {
+            Ok(uid) => uid,
+            Err(e) => {
+                tracing::error!("Cedar: failed to build resource uid: {}", e);
+                return Err(());
+            }
+        };
+
+        let request = match Request::new(principal_uid, action_uid, resource_uid, Context::empty(), None) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Cedar: failed to build request: {}", e);
+                return Err(());
+            }
+        };
+
+        let response = authorizer.is_allowed_with_entities(&request, &entities);
+
+        if response.allowed() {
+            tracing::debug!(
+                "Cedar: authorized user {} (sub={})",
+                claims.email.as_deref().unwrap_or("unknown"),
+                claims.sub
+            );
+            Ok(())
+        } else {
+            tracing::warn!(
+                "Cedar: DENIED user {} (sub={}) — matched policies: {:?}, errors: {:?}",
+                claims.email.as_deref().unwrap_or("unknown"),
+                claims.sub,
+                response.matched_policies(),
+                response.errors()
+            );
+            Err(())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +481,12 @@ pub async fn check_auth(
         }
 
         return match auth.validate_token(&token).await {
-            Ok(_) => Ok(None),
+            Ok(claims) => {
+                if auth.check_cedar_authorized(&claims).is_err() {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+                Ok(None)
+            }
             Err(e) => {
                 tracing::warn!("Bearer token validation failed: {}", e);
                 Err(StatusCode::UNAUTHORIZED)
@@ -402,7 +522,11 @@ pub async fn check_auth(
     // Session-based: look up via WebSessionManager (auto-refreshes)
     match auth.session_manager.get_token(&session_id).await {
         Ok(access_token) => match auth.validate_token(&access_token).await {
-            Ok(_) => {
+            Ok(claims) => {
+                // Cedar authorization check
+                if auth.check_cedar_authorized(&claims).is_err() {
+                    return Err(StatusCode::FORBIDDEN);
+                }
                 // Roll the cookie — reset max-age so active users stay logged in
                 let secure = auth.client_config.redirect_uri.starts_with("https");
                 let cookie = create_auth_cookie(
@@ -419,7 +543,11 @@ pub async fn check_auth(
                 tracing::warn!("Session token validation failed: {} — attempting force-refresh", e);
                 match auth.session_manager.force_refresh(&session_id).await {
                     Ok(new_token) => match auth.validate_token(&new_token).await {
-                        Ok(_) => {
+                        Ok(claims) => {
+                            // Cedar authorization check
+                            if auth.check_cedar_authorized(&claims).is_err() {
+                                return Err(StatusCode::FORBIDDEN);
+                            }
                             let secure = auth.client_config.redirect_uri.starts_with("https");
                             let cookie = create_auth_cookie(
                                 &auth.config.cookie_name,

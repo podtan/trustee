@@ -113,6 +113,22 @@ When you have completed the task, use the `submit` tool to indicate completion."
 enabled = false
 timeout_seconds = 30
 
+# Cedar Policy Authorization
+# When enabled, every authenticated request is additionally checked against
+# Cedar policies. This provides fine-grained, attribute-based access control
+# (ABAC) on top of OIDC/JWT identity validation.
+#
+# Default: disabled (auth = identity validation only)
+# When enabled with default policy: ALL access is DENIED unless you uncomment
+# a permit policy in the embedded policy file.
+#
+# [cedar]
+# enabled = false
+# policy_path = ""           # Optional: filesystem path to .cedar policy file(s)
+# schema_path = ""           # Optional: filesystem path to .cedarschema file
+# policy_store_url = ""      # Optional: remote policy store URL (e.g. PDT)
+# policy_store_token = ""    # Optional: bearer token for policy store auth
+
 # Checkpoint and Session Management Configuration
 [checkpointing]
 enabled = true

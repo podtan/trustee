@@ -1,0 +1,23 @@
+// Cedar Schema for Trustee API Authorization
+//
+// Defines the entity model used by Trustee's authorization layer.
+// Principal is always a User (built from JWT claims), action is Access,
+// and resource is the Trustee API itself.
+
+entity User = {
+    email?: String,
+    role?: String,
+    username?: String,
+    groups?: Set<String>,
+};
+
+// The Trustee API service — acts as the resource for all requests.
+entity TrusteeApp;
+
+// Single action for API access.
+// Trustee uses Cedar as an identity-level gate (authenticated users can
+// access the API). Resource-level policies can be added per deployment.
+action Access appliesTo {
+    principal: [User],
+    resource: [TrusteeApp],
+};
