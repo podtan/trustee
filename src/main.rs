@@ -256,16 +256,16 @@ fn get_user_home_dir() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".trustee").join("users").join(&user_hash))
 }
 
-/// Write Cedar policy files to ~/.trustee/policies/ if they don't exist.
+/// Write Cedar policy files to ~/.{agent_name}/policies/ if they don't exist.
 ///
 /// Creates the directory and writes default policy + schema files.
 /// Existing files are NOT overwritten (user customizations preserved).
 /// Called during `trustee init`.
-fn deploy_cedar_policies() {
+fn deploy_cedar_policies(agent_name: &str) {
     let Some(home) = dirs::home_dir() else {
         return;
     };
-    let policies_dir = home.join(".trustee").join("policies");
+    let policies_dir = home.join(format!(".{}", agent_name)).join("policies");
 
     if let Err(e) = std::fs::create_dir_all(&policies_dir) {
         eprintln!("[init] Warning: Failed to create {}: {}", policies_dir.display(), e);
@@ -687,7 +687,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (installed_config_path, _, _, _) = get_config_paths(agent_name);
 
         // Deploy Cedar policy files to ~/.trustee/policies/ (non-destructive)
-        deploy_cedar_policies();
+        deploy_cedar_policies(agent_name);
 
         let project_config = if installed_config_path.exists() {
             eprintln!("[init] Using existing config: {}", installed_config_path.display());

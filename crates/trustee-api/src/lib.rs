@@ -247,16 +247,35 @@ async fn parse_cedar_config(config_toml: &str) -> Option<Arc<pep::cedar::CedarAu
 
     tracing::info!("Cedar authorization enabled — initializing authorizer");
 
+    // Default policy/schema paths point to ~/{agent_name}/policies/ (created by trustee init).
+    // Agent name is read from [agent] name in config, defaulting to "trustee".
+    let agent_name = table
+        .get("agent")
+        .and_then(|a| a.as_table())
+        .and_then(|a| a.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("trustee");
+
+    let home_policies_dir = dirs::home_dir()
+        .map(|h| h.join(format!(".{}", agent_name)).join("policies"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent"));
+
+    let default_policy_path = home_policies_dir.join("trustee_default.cedar");
+    let default_schema_path = home_policies_dir.join("trustee_schema.cedarschema");
+
     let policy_path = cedar_section
         .get("policy_path")
         .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent"));
+        .unwrap_or(default_policy_path);
 
     let schema_path = cedar_section
         .get("schema_path")
         .and_then(|v| v.as_str())
-        .map(std::path::PathBuf::from);
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| Some(default_schema_path));
 
     let policy_store_url = cedar_section
         .get("policy_store_url")
