@@ -10,6 +10,10 @@ use getmyconfig::{ConfigReader, StorageConfig};
 /// Embedded default configuration - compiled into the binary
 const DEFAULT_CONFIG: &str = include_str!("../config/trustee_default.toml");
 
+/// Embedded Cedar policy files - written to ~/.trustee/policies/ during init
+const CEDAR_DEFAULT_POLICY: &str = include_str!("../config/policies/trustee_default.cedar");
+const CEDAR_SCHEMA: &str = include_str!("../config/policies/trustee_schema.cedarschema");
+
 /// Build-time metadata embedded by build.rs
 fn build_info() -> abk::cli::BuildInfo {
     abk::cli::BuildInfo::new(
@@ -250,6 +254,41 @@ fn compute_user_hash() -> String {
 fn get_user_home_dir() -> Option<std::path::PathBuf> {
     let user_hash = compute_user_hash();
     dirs::home_dir().map(|h| h.join(".trustee").join("users").join(&user_hash))
+}
+
+/// Write Cedar policy files to ~/.trustee/policies/ if they don't exist.
+///
+/// Creates the directory and writes default policy + schema files.
+/// Existing files are NOT overwritten (user customizations preserved).
+/// Called during `trustee init`.
+fn deploy_cedar_policies() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let policies_dir = home.join(".trustee").join("policies");
+
+    if let Err(e) = std::fs::create_dir_all(&policies_dir) {
+        eprintln!("[init] Warning: Failed to create {}: {}", policies_dir.display(), e);
+        return;
+    }
+
+    let policy_file = policies_dir.join("trustee_default.cedar");
+    if !policy_file.exists() {
+        if let Err(e) = std::fs::write(&policy_file, CEDAR_DEFAULT_POLICY) {
+            eprintln!("[init] Warning: Failed to write {}: {}", policy_file.display(), e);
+        } else {
+            eprintln!("[init] Created: {}", policy_file.display());
+        }
+    }
+
+    let schema_file = policies_dir.join("trustee_schema.cedarschema");
+    if !schema_file.exists() {
+        if let Err(e) = std::fs::write(&schema_file, CEDAR_SCHEMA) {
+            eprintln!("[init] Warning: Failed to write {}: {}", schema_file.display(), e);
+        } else {
+            eprintln!("[init] Created: {}", schema_file.display());
+        }
+    }
 }
 
 /// Merge embedded defaults with user overrides using figment.
@@ -646,6 +685,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // over the project's config/trustee.toml. This prevents `trustee init --force`
         // from overwriting user customizations (MCP servers, auto-handoff settings, etc.).
         let (installed_config_path, _, _, _) = get_config_paths(agent_name);
+
+        // Deploy Cedar policy files to ~/.trustee/policies/ (non-destructive)
+        deploy_cedar_policies();
+
         let project_config = if installed_config_path.exists() {
             eprintln!("[init] Using existing config: {}", installed_config_path.display());
             std::fs::read_to_string(&installed_config_path)

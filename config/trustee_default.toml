@@ -120,10 +120,12 @@ timeout_seconds = 30
 #
 # Default: disabled (auth = identity validation only)
 # When enabled with default policy: ALL access is DENIED unless you uncomment
-# a permit policy in the embedded policy file.
+# a permit policy in the policy file.
 #
-# [cedar]
-# enabled = false
+# Policy files are written to ~/.trustee/policies/ during `trustee init`.
+# Edit them to define who can access this Trustee instance.
+[cedar]
+enabled = false
 # policy_path = ""           # Optional: filesystem path to .cedar policy file(s)
 # schema_path = ""           # Optional: filesystem path to .cedarschema file
 # policy_store_url = ""      # Optional: remote policy store URL (e.g. PDT)
