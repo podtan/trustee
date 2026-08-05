@@ -42,6 +42,8 @@
       font-size: 14px;
       white-space: pre-wrap;
       word-break: break-word;
+      /* BiDi: each paragraph auto-detects direction */
+      unicode-bidi: plaintext;
     }
     @media (max-width: 600px) {
       .msg-user .bubble { max-width: 90%; font-size: 15px; }
@@ -62,6 +64,8 @@
       font-size: 14px;
       white-space: pre-wrap;
       word-break: break-word;
+      /* BiDi: each paragraph auto-detects direction */
+      unicode-bidi: plaintext;
     }
     @media (max-width: 600px) {
       .msg-agent .bubble { max-width: 90%; font-size: 15px; }
@@ -102,6 +106,8 @@
       word-break: break-word;
       padding: 4px 0 4px 4px;
       line-height: 1.5;
+      /* BiDi: auto-detect direction for reasoning text */
+      unicode-bidi: plaintext;
     }
     #input-bar {
       display: flex;
@@ -126,6 +132,10 @@
       max-height: 200px;
       line-height: 1.5;
       field-sizing: content; /* modern browsers auto-expand */
+      /* BiDi: auto-detect paragraph direction based on first strong character.
+         When typing Persian first, direction becomes RTL; English words typed
+         afterwards are embedded LTR within the RTL flow (and vice versa). */
+      unicode-bidi: plaintext;
     }
     #input:focus { border-color: #555; }
     #input::placeholder { color: #555; }
@@ -372,7 +382,7 @@
     .bubble.md h1 { font-size: 1.4em; }
     .bubble.md h2 { font-size: 1.25em; }
     .bubble.md h3 { font-size: 1.1em; }
-    .bubble.md ul, .bubble.md ol { margin: 0.4em 0; padding-left: 1.5em; }
+    .bubble.md ul, .bubble.md ol { margin: 0.4em 0; }
     .bubble.md li { margin: 0.2em 0; }
     .bubble.md a { color: #60a5fa; text-decoration: none; }
     .bubble.md a:hover { text-decoration: underline; }
@@ -390,21 +400,25 @@
     .bubble.md hr {
       border: none; border-top: 1px solid #333; margin: 0.8em 0;
     }
-    /* Inline code */
+    /* Inline code — always LTR for code snippets */
     .bubble.md code {
       font-family: 'SF Mono', 'Monaco', 'Cascadia Code', monospace;
       font-size: 0.88em;
       background: #111;
       padding: 2px 5px;
       border-radius: 3px;
+      direction: ltr;
+      unicode-bidi: embed;
     }
-    /* Code blocks */
+    /* Code blocks — always LTR (code should never be RTL) */
     .bubble.md pre {
       margin: 0.5em 0;
       padding: 0;
       background: #111;
       border-radius: 6px;
       overflow: hidden;
+      direction: ltr;
+      text-align: left;
     }
     .bubble.md pre > code {
       display: block;
@@ -414,7 +428,28 @@
       font-size: 13px;
       line-height: 1.5;
       overflow-x: auto;
+      direction: ltr;
+      unicode-bidi: embed;
     }
+    /* --- RTL-aware markdown layout (added when content is detected as RTL) --- */
+    .bubble.md[dir="rtl"] ul,
+    .bubble.md[dir="rtl"] ol {
+      list-style-position: outside;
+      padding-right: 1.5em; padding-left: 0;
+    }
+    .bubble.md[dir="rtl"] ul[dir="rtl"],
+    .bubble.md[dir="rtl"] ol[dir="rtl"] {
+      padding-right: 1.5em; padding-left: 0;
+    }
+    .bubble.md[dir="rtl"] ul[dir="ltr"],
+    .bubble.md[dir="rtl"] ol[dir="ltr"] {
+      padding-right: 0; padding-left: 1.5em;
+    }
+    .bubble.md[dir="rtl"] blockquote {
+      border-left: none; border-right: 3px solid #444;
+      padding: 0.2em 1em 0.2em 0;
+    }
+    .bubble.md[dir="rtl"] table { text-align: right; }
     /* highlight.js token colors (dark theme) */
     .hljs-comment, .hljs-quote { color: #6a737d; font-style: italic; }
     .hljs-keyword, .hljs-selector-tag, .hljs-literal { color: #ff7b72; }
@@ -759,7 +794,7 @@
 <div id="toast"></div>
 
 <div id="input-bar">
-  <textarea id="input" rows="1" placeholder="Type a task and press Enter..." autocomplete="off"></textarea>
+  <textarea id="input" rows="1" dir="auto" placeholder="Type a task and press Enter..." autocomplete="off"></textarea>
   <button id="btn-send">Send</button>
 </div>
 
@@ -779,6 +814,62 @@ function renderMarkdown(text) {
   if (typeof marked === 'undefined') return escapeHtml(text);
   const html = marked.parse(text);
   return html;
+}
+
+// Detect whether text is primarily RTL (Persian/Arabic/Hebrew etc.)
+function isRtlText(text) {
+  if (!text) return false;
+  // Count strong RTL vs LTR characters
+  var rtlCount = 0, ltrCount = 0;
+  for (var i = 0; i < text.length; i++) {
+    var ch = text.charCodeAt(i);
+    // Arabic/Persian block (0x0600–0x06FF), Arabic Supplement (0x0750–0x077F),
+    // Hebrew (0x0590–0x05FF), Arabic Presentation Forms (0xFB50–0xFDFF, 0xFE70–0xFEFF)
+    if ((ch >= 0x0600 && ch <= 0x06FF) || (ch >= 0x0750 && ch <= 0x077F) ||
+        (ch >= 0x0590 && ch <= 0x05FF) || (ch >= 0xFB50 && ch <= 0xFDFF) ||
+        (ch >= 0xFE70 && ch <= 0xFEFF)) {
+      rtlCount++;
+    } else if ((ch >= 0x0041 && ch <= 0x005A) || (ch >= 0x0061 && ch <= 0x007A)) {
+      // Basic Latin letters
+      ltrCount++;
+    }
+  }
+  return rtlCount > ltrCount;
+}
+
+// Post-process rendered markdown: detect overall content direction and set
+// dir on the container + each block element accordingly.
+function applyBidiToMarkdown(container) {
+  // Step 1: Detect overall direction from the container's text content
+  var isRtl = isRtlText(container.textContent);
+
+  // Set dir on the container itself — this drives the RTL CSS rules for lists etc.
+  container.setAttribute('dir', isRtl ? 'rtl' : 'ltr');
+
+  // Step 2: Each block-level element auto-detects its own direction
+  var blockEls = container.querySelectorAll(
+    'p, h1, h2, h3, h4, h5, h6, li, blockquote, td, th, caption, dt, dd, figcaption'
+  );
+  blockEls.forEach(function(el) {
+    el.setAttribute('dir', 'auto');
+    el.style.unicodeBidi = 'plaintext';
+  });
+
+  // Step 3: Lists — set dir on the ul/ol container so bullet/number markers
+  // align with text direction (bullet on the right for RTL, left for LTR)
+  container.querySelectorAll('ul, ol').forEach(function(list) {
+    // Check the first li's text direction
+    var firstItem = list.querySelector('li');
+    var listIsRtl = firstItem ? isRtlText(firstItem.textContent) : isRtl;
+    list.setAttribute('dir', listIsRtl ? 'rtl' : 'ltr');
+    list.style.unicodeBidi = 'plaintext';
+  });
+
+  // Step 4: Force code blocks & inline code to always be LTR
+  container.querySelectorAll('pre, pre code, code').forEach(function(el) {
+    el.setAttribute('dir', 'ltr');
+    el.style.unicodeBidi = 'embed';
+  });
 }
 
 // Highlight all <pre><code> blocks within an element
@@ -836,6 +927,7 @@ function renderLines(lines) {
     const bubble = document.createElement('div');
     bubble.className = 'bubble md';
     bubble.innerHTML = renderMarkdown(pendingAgentText);
+    applyBidiToMarkdown(bubble);
     highlightCodeIn(bubble);
     wrap.appendChild(bubble);
     outputEl.appendChild(wrap);
@@ -1096,6 +1188,7 @@ function closeAgentBubble() {
   if (agentBubble && agentBubble.isConnected && agentBubbleText) {
     agentBubble.classList.add('md');
     agentBubble.innerHTML = renderMarkdown(agentBubbleText);
+    applyBidiToMarkdown(agentBubble);
     highlightCodeIn(agentBubble);
   }
   agentBubble = null;
@@ -1751,6 +1844,7 @@ function renderHistory(histData) {
         const bubble = document.createElement('div');
         bubble.className = 'bubble md';
         bubble.innerHTML = renderMarkdown(msg.content);
+        applyBidiToMarkdown(bubble);
         highlightCodeIn(bubble);
         wrap.appendChild(bubble);
         outputEl.appendChild(wrap);
