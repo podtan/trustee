@@ -298,6 +298,10 @@ impl Session {
                 self.input = briefing;
                 self.execute_command();
             }
+            TuiMessage::SessionTitleUpdated(title) => {
+                // LLM-generated title has arrived — update the session name.
+                self.session_name = Some(title);
+            }
         }
         if self.auto_scroll {
             // Signal to frontend that it should scroll to bottom.
@@ -356,6 +360,8 @@ impl Session {
         };
 
         let secrets = self.secrets.clone().unwrap_or_default();
+        // Clone secrets for post-completion title generation (secrets are moved into run_task below)
+        let title_secrets = secrets.clone();
         let build_info = self.build_info.clone();
         let tx = self.workflow_tx.clone();
 
@@ -469,6 +475,37 @@ impl Session {
             };
             tx.send(msg).ok();
             tx.send(TuiMessage::ResumeInfo(task_result.resume_info)).ok();
+
+            // Solution B: After successful completion, spawn a lightweight LLM call
+            // to generate a descriptive session title. The title is sent back via
+            // SessionTitleUpdated message. This is fire-and-forget — errors are
+            // logged but don't affect the session.
+            if task_result.success {
+                let title_tx = tx.clone();
+                let title_config = config_toml.clone();
+                let title_command = command.clone();
+
+                tokio::spawn(async move {
+                    match abk::cli::generate_session_title(
+                        &title_config,
+                        title_secrets,
+                        &title_command,
+                    )
+                    .await
+                    {
+                        Ok(Some(title)) => {
+                            title_tx.send(TuiMessage::SessionTitleUpdated(title)).ok();
+                        }
+                        Ok(None) => {
+                            // Empty title — keep the default truncated-command title
+                        }
+                        Err(e) => {
+                            // Non-fatal: keep the default truncated-command title
+                            let _ = e;
+                        }
+                    }
+                });
+            }
         });
 
         self.input.clear();

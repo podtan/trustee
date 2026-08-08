@@ -91,6 +91,15 @@ exclude_hidden = true
 endpoint = "chat/completions"
 enable_streaming = true
 
+# Utility LLM Configuration (optional)
+# Used for lightweight background tasks like session title generation.
+# When absent, the main provider is used with sensible defaults.
+# Uncomment to use a cheaper/faster model for utility calls:
+# [llm.utility]
+# model = "gpt-4o-mini"     # Override model (None = provider default)
+# max_tokens = 100           # Default: 100
+# temperature = 0.3           # Default: 0.3 (deterministic-ish)
+
 # Lifecycle extension configuration
 [lifecycle]
 enabled = false  # Set to true to use WASM lifecycle extension (requires coder-lifecycle-wasm)

@@ -868,6 +868,12 @@ impl<'a> serde::Serialize for SerializableMessage<'a> {
                 s.serialize_field("error", error)?;
                 s.end()
             }
+            TuiMessage::SessionTitleUpdated(title) => {
+                let mut s = serializer.serialize_struct("msg", 2)?;
+                s.serialize_field("type", "SessionTitleUpdated")?;
+                s.serialize_field("title", title)?;
+                s.end()
+            }
         }
     }
 }
