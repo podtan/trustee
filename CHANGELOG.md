@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.4] - 2026-08-08
+
+### Fixed
+- **fix(session): persist LLM-generated titles to disk** — LLM-generated session titles were only updated in memory (via `SessionTitleUpdated` message) but never written to `session_metadata.json`. Now after generating a title, `persist_session_title()` writes it directly to disk via atomic file operations. The on-disk `description` field now reflects the LLM-generated title instead of the raw truncated command text.
+
+### Changed
+- **deps: bump abk to 0.12.4** — Adds `persist_session_title()` standalone function.
+- **deps: bump trustee-core to 0.5.7, trustee-api to 0.7.3**
+
 ## [0.8.3] - 2026-08-03
 
 ### Added

@@ -473,17 +473,25 @@ impl Session {
             } else {
                 TuiMessage::WorkflowError(task_result.error.unwrap_or_default())
             };
+
+            // Capture session_id from resume_info before it's moved into the channel
+            let title_session_id = task_result.resume_info
+                .as_ref()
+                .map(|ri| ri.session_id.clone());
+
             tx.send(msg).ok();
             tx.send(TuiMessage::ResumeInfo(task_result.resume_info)).ok();
 
             // Solution B: After successful completion, spawn a lightweight LLM call
-            // to generate a descriptive session title. The title is sent back via
-            // SessionTitleUpdated message. This is fire-and-forget — errors are
-            // logged but don't affect the session.
+            // to generate a descriptive session title. The title is:
+            // 1. Sent via SessionTitleUpdated message (updates in-memory session_name)
+            // 2. Persisted to session_metadata.json on disk via persist_session_title
+            // Fire-and-forget — errors don't affect the session.
             if task_result.success {
                 let title_tx = tx.clone();
                 let title_config = config_toml.clone();
                 let title_command = command.clone();
+                let title_ctx = run_ctx.clone();
 
                 tokio::spawn(async move {
                     match abk::cli::generate_session_title(
@@ -494,6 +502,17 @@ impl Session {
                     .await
                     {
                         Ok(Some(title)) => {
+                            // Persist to disk so the title survives session list/reload
+                            if let Some(ref sid) = title_session_id {
+                                if let Err(e) = abk::cli::persist_session_title(
+                                    &title_ctx,
+                                    sid,
+                                    &title,
+                                ).await {
+                                    let _ = e; // non-fatal
+                                }
+                            }
+                            // Update in-memory session name for live WS clients
                             title_tx.send(TuiMessage::SessionTitleUpdated(title)).ok();
                         }
                         Ok(None) => {
