@@ -125,7 +125,8 @@ impl AuthConfig {
         let client_id = oidc.get("client_id")?.as_str()?.to_string();
         let client_secret = oidc.get("client_secret").and_then(|v| v.as_str()).map(String::from);
         let redirect_uri = oidc
-            .get("redirect_url")
+            .get("redirect_uri")
+            .or_else(|| oidc.get("redirect_url")) // backward compat
             .and_then(|v| v.as_str())
             .unwrap_or("http://localhost:3000/auth/callback")
             .to_string();

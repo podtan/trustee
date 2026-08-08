@@ -484,8 +484,8 @@ impl Session {
 
             // Solution B: After successful completion, spawn a lightweight LLM call
             // to generate a descriptive session title. The title is:
-            // 1. Sent via SessionTitleUpdated message (updates in-memory session_name)
-            // 2. Persisted to session_metadata.json on disk via persist_session_title
+            // 1. Persisted to session_metadata.json on disk via persist_session_title
+            // 2. Sent via SessionTitleUpdated message (updates in-memory session_name)
             // Fire-and-forget — errors don't affect the session.
             if task_result.success {
                 let title_tx = tx.clone();
@@ -502,7 +502,7 @@ impl Session {
                     .await
                     {
                         Ok(Some(title)) => {
-                            // Persist to disk so the title survives session list/reload
+                            // Persist to disk
                             if let Some(ref sid) = title_session_id {
                                 if let Err(e) = abk::cli::persist_session_title(
                                     &title_ctx,
@@ -515,13 +515,8 @@ impl Session {
                             // Update in-memory session name for live WS clients
                             title_tx.send(TuiMessage::SessionTitleUpdated(title)).ok();
                         }
-                        Ok(None) => {
-                            // Empty title — keep the default truncated-command title
-                        }
-                        Err(e) => {
-                            // Non-fatal: keep the default truncated-command title
-                            let _ = e;
-                        }
+                        Ok(None) => {}
+                        Err(e) => { let _ = e; }
                     }
                 });
             }

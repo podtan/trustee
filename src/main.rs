@@ -256,6 +256,45 @@ fn get_user_home_dir() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".trustee").join("users").join(&user_hash))
 }
 
+/// Find the most recently created session ID from the checkpoint storage.
+///
+/// Scans `{home_dir}/projects/{project_id}/sessions/` and returns the
+/// session directory with the newest `session_metadata.json`.
+fn find_latest_session_id(ctx: &abk::context::RunContext) -> Option<String> {
+    let home_dir = ctx.resolve_home_dir().ok()?;
+    let project_id = ctx.project.as_ref().map(|p| p.id.clone())
+        .unwrap_or_else(|| {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            abk::checkpoint::project_id_from_path(&cwd)
+                .unwrap_or_else(|_| "default".to_string())
+        });
+
+    let sessions_dir = home_dir.join("projects").join(&project_id).join("sessions");
+    if !sessions_dir.exists() {
+        return None;
+    }
+
+    let mut latest: Option<(std::time::SystemTime, String)> = None;
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            let metadata_path = entry.path().join("session_metadata.json");
+            if metadata_path.exists() {
+                if let Ok(meta) = std::fs::metadata(&metadata_path) {
+                    if let Ok(modified) = meta.modified() {
+                        let sid = entry.file_name().to_string_lossy().to_string();
+                        match &latest {
+                            None => latest = Some((modified, sid)),
+                            Some((prev, _)) if modified > *prev => latest = Some((modified, sid)),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    latest.map(|(_, sid)| sid)
+}
+
 /// Write Cedar policy files to ~/.{agent_name}/policies/ if they don't exist.
 ///
 /// Creates the directory and writes default policy + schema files.
@@ -765,8 +804,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             rc
         };
         
+        // Clone for title generation (secrets are consumed by run_from_raw_config)
+        let title_secrets = secrets.clone();
+        let title_config = merged_config.clone();
+        let title_ctx = run_ctx.clone();
+        
+        // Extract task text from args for title generation
+        let title_task: Option<String> = {
+            let task_args: Vec<&str> = args.iter()
+                .skip_while(|a| a != &"run")
+                .skip(1) // skip "run" itself
+                .map(|s| s.as_str())
+                .collect();
+            if task_args.is_empty() { None } else { Some(task_args.join(" ")) }
+        };
+
         // Run with merged config (ABK does NOT read files)
-        abk::cli::run_from_raw_config(&merged_config, secrets, Some(build_info()), Some(&run_ctx)).await
+        let run_result = abk::cli::run_from_raw_config(&merged_config, secrets, Some(build_info()), Some(&run_ctx)).await;
+        
+        // After successful run, generate and persist LLM session title (Solution B)
+        if run_result.is_ok() {
+            if let Some(ref task_text) = title_task {
+                if std::env::var("RUST_LOG").map(|v| v.to_lowercase().contains("debug")).unwrap_or(false) {
+                    eprintln!("[session] CLI run succeeded, generating session title...");
+                }
+                // Find the session_id from the most recently modified session
+                if let Some(sid) = find_latest_session_id(&title_ctx) {
+                    match abk::cli::generate_session_title(&title_config, title_secrets, task_text).await {
+                        Ok(Some(title)) => {
+                            if let Err(e) = abk::cli::persist_session_title(&title_ctx, &sid, &title).await {
+                                if std::env::var("RUST_LOG").map(|v| v.to_lowercase().contains("debug")).unwrap_or(false) {
+                                    eprintln!("[session] title persist failed: {}", e);
+                                }
+                            }
+                        }
+                        _ => {} // empty or error — keep default title
+                    }
+                }
+            }
+        }
+        
+        run_result
     }
 }
 
