@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.3] - 2026-08-03
+
+### Added
+- **feat(session): LLM-generated session titles** — After a workflow completes successfully, a lightweight LLM call generates a concise (≤50 chars) descriptive session title, replacing the truncated-command placeholder. Fire-and-forget: errors don't affect the session. Configurable via optional `[llm.utility]` section (model, max_tokens, temperature).
+- **feat(core): `SessionTitleUpdated` TuiMessage variant** — New message type for asynchronous session title updates from background LLM calls. Handled in `handle_workflow_message()` to update `session_name`.
+- **feat(config): `[llm.utility]` documentation** — Added commented-out example config for utility LLM in `trustee_default.toml`.
+
+### Fixed
+- **fix(checkpoint): persist session description after first checkpoint** — Session titles (descriptions) were only written at creation and never updated in `session_metadata.json`. Now persisted after the first checkpoint via abk's new `update_session_description()`.
+
+### Changed
+- **deps: bump abk to 0.12.3** — Brings `[llm.utility]` config, `generate_session_title()`, and `update_session_description()` API.
+- **deps: bump trustee-core to 0.5.6, trustee-api to 0.7.2**
+
 ## [0.2.7] - 2026-07-25
 
 ### Added

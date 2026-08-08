@@ -112,6 +112,8 @@ pub enum TuiMessage {
         tool_count: usize,
         error: Option<String>,
     },
+    /// LLM-generated session title ready to replace the truncated command title
+    SessionTitleUpdated(String),
 }
 
 /// Tagged chunk type so we can distinguish reasoning (thinking) content
