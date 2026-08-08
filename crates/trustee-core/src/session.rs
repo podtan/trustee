@@ -506,6 +506,7 @@ impl Session {
                             if let Some(ref sid) = title_session_id {
                                 if let Err(e) = abk::cli::persist_session_title(
                                     &title_ctx,
+                                    &title_config,
                                     sid,
                                     &title,
                                 ).await {
