@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.8] - 2026-08-08
+
+### Fixed
+- **fix(session): skip title generation for resumed sessions** — Resumed sessions (continuations) were getting their titles overwritten with garbage from thinking model reasoning. Now only fresh sessions (first command, no `resume_info`) trigger title generation.
+- **fix(session): race condition mitigation** — Added 500ms delay before title persist to ensure checkpoint metadata writes complete first, preventing the checkpoint system from overwriting the LLM title.
+
+### Changed
+- **deps: bump trustee-core to 0.6.1, trustee-api to 0.7.7**
+
 ## [0.8.7] - 2026-08-08
 
 ### Fixed

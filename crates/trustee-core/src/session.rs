@@ -494,13 +494,26 @@ impl Session {
                 let title_command = command.clone();
                 let title_ctx = run_ctx.clone();
 
+                // Skip title generation for resumed sessions — they already have
+                // a title (either LLM-set from a prior command or user-named).
+                // Only generate for fresh sessions (first command, no resume_info).
+                let is_fresh = !is_continuation;
+
                 tokio::spawn(async move {
-                    // Check if title generation is needed
+                    if !is_fresh {
+                        return;
+                    }
+
+                    // Guard: check if title was already set (e.g. by Solution A or prior LLM run)
                     if let Some(ref sid) = title_session_id {
                         if !abk::cli::should_generate_title(&title_ctx, sid, &title_command).await {
-                            return; // Title already LLM-set or user-named
+                            return;
                         }
                     }
+
+                    // Small delay to ensure checkpoint metadata writes complete first
+                    // (avoids race where save_metadata overwrites our title)
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                     match abk::cli::generate_session_title(
                         &title_config,
