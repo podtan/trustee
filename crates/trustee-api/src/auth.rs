@@ -438,13 +438,29 @@ impl From<JwtClaims> for AuthUser {
 /// Cookie max-age for session cookies (1 hour, matching the server-side idle timeout).
 const SESSION_COOKIE_MAX_AGE: StdDuration = StdDuration::from_secs(3600);
 
+/// Extract a user key from a dev-mode token string (`dev:email:name:username`).
+/// Returns `dev:{email}` on success.
+fn dev_user_key(token: &str) -> Option<String> {
+    let parts: Vec<&str> = token.splitn(4, ':').collect();
+    if parts.len() >= 4 {
+        Some(format!("dev:{}", parts[1]))
+    } else {
+        None
+    }
+}
+
 /// Check authentication for a protected endpoint.
 ///
-/// Returns `Ok(None)` if auth is not configured (open mode), or if a valid
-/// token is present without needing cookie renewal. Returns `Ok(Some(cookie))`
-/// if auth succeeded and the caller should include the given `Set-Cookie`
-/// header value in the response (rolling session). Returns `Err(StatusCode)`
-/// if auth is configured but no valid token is found.
+/// Returns `Ok((None, user_key))` if auth is not configured (open mode), or if
+/// a valid token is present without needing cookie renewal. Returns
+/// `Ok((Some(cookie), user_key))` if auth succeeded and the caller should
+/// include the given `Set-Cookie` header value in the response (rolling session).
+/// Returns `Err(StatusCode)` if auth is configured but no valid token is found.
+///
+/// The returned `user_key` is the identity string used for session isolation
+/// (JWT `sub` claim for real users, `dev:{email}` for dev mode, `"default"`
+/// when auth is not configured). This avoids the need for handlers to call
+/// `resolve_user_key()` which would re-validate the JWT a second time.
 ///
 /// Token sources (in order):
 /// 1. `Authorization: Bearer <token>` header (raw JWT — validated directly)
@@ -455,9 +471,9 @@ const SESSION_COOKIE_MAX_AGE: StdDuration = StdDuration::from_secs(3600);
 pub async fn check_auth(
     auth: &Option<Arc<AuthState>>,
     headers: &axum::http::HeaderMap,
-) -> Result<Option<String>, StatusCode> {
+) -> Result<(Option<String>, String), StatusCode> {
     let Some(auth) = auth.as_ref() else {
-        return Ok(None); // Auth not configured — allow
+        return Ok((None, "default".to_string())); // Auth not configured — allow
     };
 
     // 1. Try Bearer header first (raw JWT — e.g. from API clients, Torpi proxy)
@@ -473,11 +489,9 @@ pub async fn check_auth(
                 tracing::warn!("Dev token presented but dev mode is disabled — rejecting");
                 return Err(StatusCode::UNAUTHORIZED);
             }
-            let parts: Vec<&str> = token.splitn(4, ':').collect();
-            return if parts.len() >= 4 {
-                Ok(None)
-            } else {
-                Err(StatusCode::UNAUTHORIZED)
+            return match dev_user_key(&token) {
+                Some(key) => Ok((None, key)),
+                None => Err(StatusCode::UNAUTHORIZED),
             };
         }
 
@@ -486,7 +500,7 @@ pub async fn check_auth(
                 if auth.check_cedar_authorized(&claims).is_err() {
                     return Err(StatusCode::FORBIDDEN);
                 }
-                Ok(None)
+                Ok((None, claims.sub))
             }
             Err(e) => {
                 tracing::warn!("Bearer token validation failed: {}", e);
@@ -512,11 +526,9 @@ pub async fn check_auth(
             tracing::warn!("Dev cookie presented but dev mode is disabled — rejecting");
             return Err(StatusCode::UNAUTHORIZED);
         }
-        let parts: Vec<&str> = session_id.splitn(4, ':').collect();
-        return if parts.len() >= 4 {
-            Ok(None)
-        } else {
-            Err(StatusCode::UNAUTHORIZED)
+        return match dev_user_key(&session_id) {
+            Some(key) => Ok((None, key)),
+            None => Err(StatusCode::UNAUTHORIZED),
         };
     }
 
@@ -536,7 +548,7 @@ pub async fn check_auth(
                     SESSION_COOKIE_MAX_AGE,
                     secure,
                 );
-                Ok(Some(cookie.to_string()))
+                Ok((Some(cookie.to_string()), claims.sub))
             }
             Err(e) => {
                 // Token was returned but JWT validation failed (e.g. ExpiredSignature
@@ -556,7 +568,7 @@ pub async fn check_auth(
                                 SESSION_COOKIE_MAX_AGE,
                                 secure,
                             );
-                            Ok(Some(cookie.to_string()))
+                            Ok((Some(cookie.to_string()), claims.sub))
                         }
                         Err(e2) => {
                             tracing::warn!("Session token still invalid after force-refresh: {}", e2);
@@ -953,7 +965,7 @@ async fn mcp_login_handler(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, AuthError> {
     // Require authentication — user must be logged into trustee-web
-    crate::auth::check_auth(&state.auth, &headers)
+    let (_cookie, _user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|_| AuthError::AuthNotConfigured)?;
 
@@ -1128,12 +1140,10 @@ async fn mcp_callback_handler(
         token_response.scope.clone(),
     );
 
-    let agent_name = {
-        let user_key = state.resolve_user_key(&headers).await;
-        let (_sid, session_arc, _, _) = state.ensure_active_session(&user_key).await;
-        let session = session_arc.lock().await;
-        session.agent_name.clone()
-    };
+    let agent_name = state.config_toml.as_ref().and_then(|t| {
+        toml::from_str::<toml::Value>(t).ok()
+            .and_then(|v| v.get("agent").and_then(|a| a.get("name")).and_then(|n| n.as_str()).map(String::from))
+    }).unwrap_or_else(|| "trustee".to_string());
     let token_store = FileTokenStore::new(&agent_name);
 
     if let Err(e) = token_store.save(cred_name, &stored) {
@@ -1165,13 +1175,13 @@ async fn mcp_status_handler(
     use pep::{FileTokenStore, TokenStore};
 
     // Require auth
-    if let Err(code) = crate::auth::check_auth(&state.auth, &headers).await {
-        return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response();
-    }
+    let (_cookie, user_key) = match crate::auth::check_auth(&state.auth, &headers).await {
+        Ok(result) => result,
+        Err(code) => return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response(),
+    };
 
     // Parse MCP config from session
     let config_toml = {
-        let user_key = state.resolve_user_key(&headers).await;
         let (_sid, session_arc, _, _) = state.ensure_active_session(&user_key).await;
         let session = session_arc.lock().await;
         match &session.config_toml {
@@ -1186,7 +1196,6 @@ async fn mcp_status_handler(
     };
 
     let agent_name = {
-        let user_key = state.resolve_user_key(&headers).await;
         let (_sid, session_arc, _, _) = state.ensure_active_session(&user_key).await;
         let session = session_arc.lock().await;
         session.agent_name.clone()
@@ -1270,12 +1279,12 @@ async fn mcp_logout_handler(
     use pep::{FileTokenStore, TokenStore};
 
     // Require auth
-    if let Err(code) = crate::auth::check_auth(&state.auth, &headers).await {
-        return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response();
-    }
+    let (_cookie, user_key) = match crate::auth::check_auth(&state.auth, &headers).await {
+        Ok(result) => result,
+        Err(code) => return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response(),
+    };
 
     let agent_name = {
-        let user_key = state.resolve_user_key(&headers).await;
         let (_sid, session_arc, _, _) = state.ensure_active_session(&user_key).await;
         let session = session_arc.lock().await;
         session.agent_name.clone()

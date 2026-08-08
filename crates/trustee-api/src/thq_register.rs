@@ -4,9 +4,10 @@
 //! server spawns a background task that registers this agent with the
 //! specified Torpi instance and periodically re-registers (heartbeat).
 //!
-//! Registration is unauthenticated — Torpi's `/thq/api/agents/register`
-//! endpoint accepts the POST without a Bearer token. When auth enforcement
-//! is added later (NGHR fbfd4a11), the agent will send its OIDC token.
+//! Registration supports an optional `registration_token` for authenticating
+//! with Torpi's `/thq/api/agents` endpoint. When provided, it is sent as
+//! `Authorization: Bearer <token>`. Without a token, registration is
+//! unauthenticated (legacy Torpi instances).
 //!
 //! The agent generates a stable UUID v4 on first run and persists it to
 //! `~/.trustee/agent_id` so the same identity survives restarts.
@@ -32,6 +33,10 @@ pub struct ThqConfig {
     pub tags: Vec<String>,
     /// Re-registration interval in seconds (default: 30).
     pub heartbeat_interval: u64,
+    /// Optional Bearer token for authenticating with the THQ API.
+    /// Sent as `Authorization: Bearer <token>` on every registration request.
+    /// When None, registration is unauthenticated (legacy Torpi instances).
+    pub registration_token: Option<String>,
 }
 
 impl ThqConfig {
@@ -89,6 +94,10 @@ impl ThqConfig {
             .and_then(|v| v.as_integer())
             .map(|v| v as u64)
             .unwrap_or(30);
+        let registration_token = thq
+            .get("registration_token")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         Some(Self {
             torpi_url,
@@ -98,6 +107,7 @@ impl ThqConfig {
             capabilities,
             tags,
             heartbeat_interval,
+            registration_token,
         })
     }
 }
@@ -191,6 +201,7 @@ pub fn spawn(config: ThqConfig) {
 
     let url = format!("{}/thq/api/agents", config.torpi_url);
     let interval_secs = config.heartbeat_interval;
+    let registration_token = config.registration_token.clone();
 
     tokio::spawn(async move {
         let mut first = true;
@@ -199,7 +210,12 @@ pub fn spawn(config: ThqConfig) {
             let mut body = body;
             body["last_seen"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
 
-            match client.post(&url).json(&body).send().await {
+            let mut request = client.post(&url).json(&body);
+            if let Some(ref token) = registration_token {
+                request = request.header("Authorization", format!("Bearer {}", token));
+            }
+
+            match request.send().await {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
@@ -256,6 +272,7 @@ heartbeat_interval = 60
         assert_eq!(cfg.capabilities, vec!["rust", "docker"]);
         assert_eq!(cfg.tags, vec!["edge", "arm64"]);
         assert_eq!(cfg.heartbeat_interval, 60);
+        assert!(cfg.registration_token.is_none());
     }
 
     #[test]
@@ -272,6 +289,19 @@ advertise_url = "https://10.0.0.5:3000/"
         assert!(cfg.capabilities.is_empty());
         assert!(cfg.tags.is_empty());
         assert_eq!(cfg.heartbeat_interval, 30);
+        assert!(cfg.registration_token.is_none());
+    }
+
+    #[test]
+    fn parse_registration_token() {
+        let toml = r#"
+[thq]
+torpi_url = "https://torpi.example.com"
+advertise_url = "https://10.0.0.5:3000"
+registration_token = "secret-agent-token"
+"#;
+        let cfg = ThqConfig::from_toml(toml).expect("should parse");
+        assert_eq!(cfg.registration_token.as_deref(), Some("secret-agent-token"));
     }
 
     #[test]

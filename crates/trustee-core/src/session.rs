@@ -486,6 +486,7 @@ impl Session {
             // to generate a descriptive session title. The title is:
             // 1. Persisted to session_metadata.json on disk via persist_session_title
             // 2. Sent via SessionTitleUpdated message (updates in-memory session_name)
+            // Only fires if the title hasn't been LLM-set yet.
             // Fire-and-forget — errors don't affect the session.
             if task_result.success {
                 let title_tx = tx.clone();
@@ -494,6 +495,13 @@ impl Session {
                 let title_ctx = run_ctx.clone();
 
                 tokio::spawn(async move {
+                    // Check if title generation is needed
+                    if let Some(ref sid) = title_session_id {
+                        if !abk::cli::should_generate_title(&title_ctx, sid, &title_command).await {
+                            return; // Title already LLM-set or user-named
+                        }
+                    }
+
                     match abk::cli::generate_session_title(
                         &title_config,
                         title_secrets,
@@ -502,7 +510,7 @@ impl Session {
                     .await
                     {
                         Ok(Some(title)) => {
-                            // Persist to disk
+                            // Persist to disk + remote
                             if let Some(ref sid) = title_session_id {
                                 if let Err(e) = abk::cli::persist_session_title(
                                     &title_ctx,
