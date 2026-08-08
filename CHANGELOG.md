@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.7] - 2026-08-08
+
+### Fixed
+- **fix(session): title generation no longer overwrites existing LLM titles** — Added `should_generate_title()` guard that checks whether the session description is still the raw truncated command (needs LLM title) or has already been set. Prevents title churn when multiple commands run in the same session.
+
+### Changed
+- **deps: bump abk to 0.12.7** — `should_generate_title()` + improved reasoning extraction.
+- **deps: bump trustee-core to 0.6.0, trustee-api to 0.7.6**
+
 ## [0.8.6] - 2026-08-08
 
 ### Fixed

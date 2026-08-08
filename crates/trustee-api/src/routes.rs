@@ -204,8 +204,7 @@ pub async fn get_session(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
-    let user_key = state.resolve_user_key(&headers).await;
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers).await?;
     let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
     let session = session_arc.lock().await;
     let resp = Json(session_to_response(&session));
@@ -218,11 +217,10 @@ pub async fn post_command(
     headers: axum::http::HeaderMap,
     Json(req): Json<CommandRequest>,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let user_key = state.resolve_user_key(&headers).await;
     let (_sid, session_arc, ws_tx, token_store) = state.ensure_active_session(&user_key).await;
 
     execute_command_inner(&state, &headers, &session_arc, &ws_tx, &token_store, req).await?;
@@ -236,8 +234,7 @@ pub async fn post_cancel(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
-    let user_key = state.resolve_user_key(&headers).await;
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers).await?;
     let (_sid, session_arc, ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
 
     let cancelled = {
@@ -263,8 +260,7 @@ pub async fn post_handoff(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers).await?;
-    let user_key = state.resolve_user_key(&headers).await;
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers).await?;
     let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
     let mut session = session_arc.lock().await;
     session.trigger_handoff(String::new());
@@ -279,8 +275,7 @@ pub async fn ws_handler(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let _cookie = crate::auth::check_auth(&state.auth, &headers).await?;
-    let user_key = state.resolve_user_key(&headers).await;
+    let (_cookie, user_key) = crate::auth::check_auth(&state.auth, &headers).await?;
     let (_sid, session_arc, ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
     Ok(ws.on_upgrade(move |socket| handle_ws(socket, session_arc, ws_tx)))
 }
@@ -338,12 +333,11 @@ pub async fn list_sessions(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let (config_toml, home_dir) = {
-        let user_key = state.resolve_user_key(&headers).await;
         let (config, home) = state.get_user_config_and_home(&user_key);
         match config {
             Some(c) => (c, home),
@@ -369,11 +363,10 @@ pub async fn list_live_sessions(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let user_key = state.resolve_user_key(&headers).await;
     let items = state.list_sessions(&user_key).await;
 
     let resp = Json(serde_json::json!({ "sessions": items }));
@@ -386,12 +379,11 @@ pub async fn get_session_detail(
     Path(session_id): Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let (config_toml, home_dir) = {
-        let user_key = state.resolve_user_key(&headers).await;
         let (config, home) = state.get_user_config_and_home(&user_key);
         match config {
             Some(c) => (c, home),
@@ -428,11 +420,9 @@ pub async fn resume_session(
     headers: axum::http::HeaderMap,
     _body: Option<Json<ResumeRequestBody>>,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
-
-    let user_key = state.resolve_user_key(&headers).await;
 
     // 1. Get config + home_dir without creating a session (read-only)
     let (config_toml, home_dir) = {
@@ -547,11 +537,11 @@ pub async fn get_session_history(
     Path(session_id): Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let home_dir = state.get_user_home_dir(&state.resolve_user_key(&headers).await);
+    let home_dir = state.get_user_home_dir(&user_key);
 
     let history = trustee_core::sessions::load_session_history(&session_id, home_dir.as_deref())
         .await
@@ -583,11 +573,10 @@ pub async fn set_session_name(
     headers: axum::http::HeaderMap,
     Json(req): Json<SetNameRequest>,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let user_key = state.resolve_user_key(&headers).await;
     let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
 
     {
@@ -605,11 +594,10 @@ pub async fn set_project_name(
     headers: axum::http::HeaderMap,
     Json(req): Json<SetNameRequest>,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let user_key = state.resolve_user_key(&headers).await;
     let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
 
     {
@@ -629,11 +617,9 @@ pub async fn new_session(
     headers: axum::http::HeaderMap,
     Json(req): Json<NewSessionRequest>,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
-
-    let user_key = state.resolve_user_key(&headers).await;
 
     let session_id = state
         .create_session(&user_key, req.session_name)
@@ -665,11 +651,9 @@ pub async fn create_session(
     headers: axum::http::HeaderMap,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
-
-    let user_key = state.resolve_user_key(&headers).await;
 
     let session_id = state
         .create_session(&user_key, req.session_name)
@@ -711,11 +695,9 @@ pub async fn get_live_session(
     headers: axum::http::HeaderMap,
     Path(session_id): Path<String>,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
-
-    let user_key = state.resolve_user_key(&headers).await;
 
     let (session_arc, _ws_tx) = state
         .get_session(&user_key, &session_id)
@@ -734,11 +716,9 @@ pub async fn post_command_session(
     Path(session_id): Path<String>,
     Json(req): Json<CommandRequest>,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
-
-    let user_key = state.resolve_user_key(&headers).await;
 
     let (session_arc, ws_tx) = state
         .get_session(&user_key, &session_id)
@@ -766,11 +746,9 @@ pub async fn post_cancel_session(
     headers: axum::http::HeaderMap,
     Path(session_id): Path<String>,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
-
-    let user_key = state.resolve_user_key(&headers).await;
 
     let (session_arc, ws_tx) = state
         .get_session(&user_key, &session_id)
@@ -801,11 +779,9 @@ pub async fn post_handoff_session(
     headers: axum::http::HeaderMap,
     Path(session_id): Path<String>,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
-
-    let user_key = state.resolve_user_key(&headers).await;
 
     let (session_arc, _ws_tx) = state
         .get_session(&user_key, &session_id)
@@ -826,11 +802,9 @@ pub async fn set_session_name_session(
     Path(session_id): Path<String>,
     Json(req): Json<SetNameRequest>,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
-
-    let user_key = state.resolve_user_key(&headers).await;
 
     let (session_arc, _ws_tx) = state
         .get_session(&user_key, &session_id)
@@ -852,11 +826,9 @@ pub async fn destroy_session(
     headers: axum::http::HeaderMap,
     Path(session_id): Path<String>,
 ) -> Result<Response, (StatusCode, String)> {
-    let cookie = crate::auth::check_auth(&state.auth, &headers)
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
-
-    let user_key = state.resolve_user_key(&headers).await;
 
     state
         .destroy_session(&user_key, &session_id)
@@ -880,8 +852,7 @@ pub async fn ws_session_handler(
     headers: axum::http::HeaderMap,
     Path(session_id): Path<String>,
 ) -> Result<Response, StatusCode> {
-    let _cookie = crate::auth::check_auth(&state.auth, &headers).await?;
-    let user_key = state.resolve_user_key(&headers).await;
+    let (_cookie, user_key) = crate::auth::check_auth(&state.auth, &headers).await?;
     let (session_arc, ws_tx) = state
         .get_session(&user_key, &session_id)
         .await

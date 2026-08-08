@@ -24,6 +24,13 @@ fn build_info() -> abk::cli::BuildInfo {
     )
 }
 
+/// Debug logging helper — only prints when RUST_LOG contains "debug".
+fn log_debug_main(msg: &str) {
+    if std::env::var("RUST_LOG").map(|v| v.to_lowercase().contains("debug")).unwrap_or(false) {
+        eprintln!("{}", msg);
+    }
+}
+
 /// Load secrets from a .env file into a HashMap
 /// 
 /// Format: KEY=VALUE (one per line, # for comments)
@@ -825,20 +832,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // After successful run, generate and persist LLM session title (Solution B)
         if run_result.is_ok() {
             if let Some(ref task_text) = title_task {
-                if std::env::var("RUST_LOG").map(|v| v.to_lowercase().contains("debug")).unwrap_or(false) {
-                    eprintln!("[session] CLI run succeeded, generating session title...");
-                }
                 // Find the session_id from the most recently modified session
                 if let Some(sid) = find_latest_session_id(&title_ctx) {
-                    match abk::cli::generate_session_title(&title_config, title_secrets, task_text).await {
-                        Ok(Some(title)) => {
-                            if let Err(e) = abk::cli::persist_session_title(&title_ctx, &title_config, &sid, &title).await {
-                                if std::env::var("RUST_LOG").map(|v| v.to_lowercase().contains("debug")).unwrap_or(false) {
-                                    eprintln!("[session] title persist failed: {}", e);
+                    // Only generate if the title hasn't been LLM-set yet
+                    if abk::cli::should_generate_title(&title_ctx, &sid, task_text).await {
+                        if std::env::var("RUST_LOG").map(|v| v.to_lowercase().contains("debug")).unwrap_or(false) {
+                            eprintln!("[session] generating session title...");
+                        }
+                        match abk::cli::generate_session_title(&title_config, title_secrets, task_text).await {
+                            Ok(Some(title)) => {
+                                if let Err(e) = abk::cli::persist_session_title(&title_ctx, &title_config, &sid, &title).await {
+                                    if std::env::var("RUST_LOG").map(|v| v.to_lowercase().contains("debug")).unwrap_or(false) {
+                                        eprintln!("[session] title persist failed: {}", e);
+                                    }
                                 }
                             }
+                            _ => {} // empty or error — keep default title
                         }
-                        _ => {} // empty or error — keep default title
+                    } else {
+                        log_debug_main("[session] title already set, skipping generation");
                     }
                 }
             }
