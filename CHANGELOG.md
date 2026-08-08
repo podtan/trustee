@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.6] - 2026-08-08
+
+### Fixed
+- **fix(session): LLM titles now persisted to remote backend** — `persist_session_title()` now accepts `config_toml` and writes to DocumentDB/MongoDB when configured, in addition to local filesystem.
+
+### Changed
+- **deps: bump abk to 0.12.6** — Remote backend support in persist_session_title.
+- **deps: bump trustee-core to 0.5.9, trustee-api to 0.7.5**
+
 ## [0.8.5] - 2026-08-08
 
 ### Fixed

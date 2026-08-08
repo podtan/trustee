@@ -832,7 +832,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(sid) = find_latest_session_id(&title_ctx) {
                     match abk::cli::generate_session_title(&title_config, title_secrets, task_text).await {
                         Ok(Some(title)) => {
-                            if let Err(e) = abk::cli::persist_session_title(&title_ctx, &sid, &title).await {
+                            if let Err(e) = abk::cli::persist_session_title(&title_ctx, &title_config, &sid, &title).await {
                                 if std::env::var("RUST_LOG").map(|v| v.to_lowercase().contains("debug")).unwrap_or(false) {
                                     eprintln!("[session] title persist failed: {}", e);
                                 }
