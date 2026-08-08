@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.5] - 2026-08-08
+
+### Fixed
+- **fix(session): LLM session titles now work for CLI path** — Title generation was only in trustee-core's `execute_command()` (web/TUI). The CLI `run` command bypasses that entirely. Added title generation + persistence to main.rs after `run_from_raw_config` succeeds.
+- **fix(session): LLM titles persisted to disk** — `persist_session_title()` writes directly to `session_metadata.json` via atomic file operations, independent of the ABK SessionManager lifecycle.
+
+### Changed
+- **deps: bump abk to 0.12.5** — Thinking model support + persist_session_title.
+- **deps: bump trustee-core to 0.5.8, trustee-api to 0.7.4**
+
 ## [0.8.4] - 2026-08-08
 
 ### Fixed
