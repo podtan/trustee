@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.4] - 2026-08-09
+
+### Fixed
+- **fix(web): session-scoped routes resolve by checkpoint/session id OR live MSU key** — `POST /api/v1/sessions/{id}/handoff` (and command/cancel/name/stream/live/destroy) now resolve the target session via new `ServerState::get_session_by_any_id()`: first by live MSU registry key (Torpi/THQ), then by `session.session_id` (the checkpoint/continuity id the embedded web UI tracks from `ResumeInfo`). This fixes web handoff returning 404 — the frontend holds `session_YYYY_...` while the live registry is keyed `"default"`/`new_sid`. Reverting to the legacy route is NOT done, preserving multi-session correctness for Torpi/THQ.
+- **fix(web): `post_command_session` sets active session using the resolved live key** — avoids setting active to a checkpoint id that isn't a registry key.
+
+### Changed
+- **deps: bump trustee-api to 0.7.13**
+
 ## [0.9.3] - 2026-08-09
 
 ### Fixed

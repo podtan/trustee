@@ -296,6 +296,54 @@ impl ServerState {
         Some((entry.session.clone(), entry.ws_tx.clone()))
     }
 
+    /// Get a session by EITHER its live MSU registry key OR its
+    /// checkpoint/session identity (`session.session_id`).
+    ///
+    /// The web frontend tracks `currentSessionId` from the `ResumeInfo` WS
+    /// message, which carries the auto-derived checkpoint id
+    /// (`session_YYYY_MM_DD_HH_MM_uuid8`) — NOT the live MSU registry key
+    /// (`"default"` or the key from `create_session()`). External clients
+    /// like Torpi/THQ pass the live registry key. This resolver accepts both:
+    ///
+    /// 1. Try registry-key lookup first (precise, used by Torpi/THQ).
+    /// 2. Fall back to scanning the user's live sessions for one whose
+    ///    `session.session_id` matches the requested id (used by the
+    ///    embedded web UI after a command or resume).
+    ///
+    /// Returns `(live_registry_key, session_arc, ws_tx)`, or `None` if not
+    /// found. The live key is returned so callers that need to set it as
+    /// active (or otherwise reference the registry) use the real key.
+    pub async fn get_session_by_any_id(
+        &self,
+        user_key: &str,
+        id: &str,
+    ) -> Option<(String, Arc<Mutex<Session>>, broadcast::Sender<String>)> {
+        // Fast path: registry key match.
+        let user_sessions = self.sessions.get(user_key)?;
+        if let Some(entry) = user_sessions.sessions.get(id) {
+            // Update last_active
+            let now = chrono::Utc::now();
+            *entry.last_active.lock().await = now;
+            return Some((id.to_string(), entry.session.clone(), entry.ws_tx.clone()));
+        }
+
+        // Slow path: scan live sessions for a matching session.session_id.
+        for entry in user_sessions.sessions.iter() {
+            let session = entry.session.lock().await;
+            if session.session_id.as_deref() == Some(id) {
+                let key = entry.key().clone();
+                let ws_tx = entry.ws_tx.clone();
+                drop(session);
+                // Update last_active
+                let now = chrono::Utc::now();
+                *entry.last_active.lock().await = now;
+                return Some((key, entry.session.clone(), ws_tx));
+            }
+        }
+
+        None
+    }
+
     /// List all active sessions for a user, sorted by last_active desc.
     pub async fn list_sessions(&self, user_key: &str) -> Vec<SessionListItem> {
         let Some(user_sessions) = self.sessions.get(user_key) else {

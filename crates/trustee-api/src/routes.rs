@@ -699,8 +699,8 @@ pub async fn get_live_session(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let (session_arc, _ws_tx) = state
-        .get_session(&user_key, &session_id)
+    let (_live_key, session_arc, _ws_tx) = state
+        .get_session_by_any_id(&user_key, &session_id)
         .await
         .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
 
@@ -720,8 +720,8 @@ pub async fn post_command_session(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let (session_arc, ws_tx) = state
-        .get_session(&user_key, &session_id)
+    let (live_key, session_arc, ws_tx) = state
+        .get_session_by_any_id(&user_key, &session_id)
         .await
         .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
 
@@ -733,8 +733,8 @@ pub async fn post_command_session(
 
     execute_command_inner(&state, &headers, &session_arc, &ws_tx, &token_store, req).await?;
 
-    // Set this session as active (most recently used)
-    state.set_active_session(&user_key, &session_id).await;
+    // Set this session as active (most recently used) — use the LIVE key
+    state.set_active_session(&user_key, &live_key).await;
 
     let resp = Json(CommandResponse { accepted: true });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
@@ -750,8 +750,8 @@ pub async fn post_cancel_session(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let (session_arc, ws_tx) = state
-        .get_session(&user_key, &session_id)
+    let (_live_key, session_arc, ws_tx) = state
+        .get_session_by_any_id(&user_key, &session_id)
         .await
         .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
 
@@ -783,8 +783,11 @@ pub async fn post_handoff_session(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let (session_arc, _ws_tx) = state
-        .get_session(&user_key, &session_id)
+    // Resolve by live MSU registry key OR checkpoint/session identity
+    // (session.session_id). The web frontend holds the checkpoint id from
+    // ResumeInfo; Torpi/THQ holds the live key. Both must work.
+    let (_live_key, session_arc, _ws_tx) = state
+        .get_session_by_any_id(&user_key, &session_id)
         .await
         .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
 
@@ -806,8 +809,8 @@ pub async fn set_session_name_session(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
-    let (session_arc, _ws_tx) = state
-        .get_session(&user_key, &session_id)
+    let (_live_key, session_arc, _ws_tx) = state
+        .get_session_by_any_id(&user_key, &session_id)
         .await
         .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
 
@@ -830,8 +833,14 @@ pub async fn destroy_session(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
+    // Resolve to the live registry key first (accepts checkpoint/session id too)
+    let (live_key, _session_arc, _ws_tx) = state
+        .get_session_by_any_id(&user_key, &session_id)
+        .await
+        .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
+
     state
-        .destroy_session(&user_key, &session_id)
+        .destroy_session(&user_key, &live_key)
         .await
         .map_err(|e| match e {
             SessionError::NotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
@@ -854,8 +863,9 @@ pub async fn ws_session_handler(
 ) -> Result<Response, StatusCode> {
     let (_cookie, user_key) = crate::auth::check_auth(&state.auth, &headers).await?;
     let (session_arc, ws_tx) = state
-        .get_session(&user_key, &session_id)
+        .get_session_by_any_id(&user_key, &session_id)
         .await
+        .map(|(_, s, ws)| (s, ws))
         .ok_or(StatusCode::NOT_FOUND)?;
     Ok(ws.on_upgrade(move |socket| handle_ws(socket, session_arc, ws_tx)))
 }
