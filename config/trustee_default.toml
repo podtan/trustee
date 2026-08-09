@@ -97,7 +97,7 @@ enable_streaming = true
 # Uncomment to use a cheaper/faster model for utility calls:
 # [llm.utility]
 # model = "gpt-4o-mini"     # Override model (None = provider default)
-# max_tokens = 100           # Default: 100
+# max_tokens = 1000          # Default: 1000 (high enough for thinking models)
 # temperature = 0.3           # Default: 0.3 (deterministic-ish)
 
 # Lifecycle extension configuration
