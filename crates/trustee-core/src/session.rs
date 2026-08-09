@@ -15,7 +15,7 @@ use abk::context::RunContext;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::types::{
-    AutoHandoffConfig, BuildInfo, CapturedText, HandoffCaptureSink, McpServerInfo, McpServerStatus,
+    AutoHandoffConfig, BuildInfo, McpServerInfo, McpServerStatus,
     TuiMessage, WorkflowState,
 };
 
@@ -613,49 +613,34 @@ impl Session {
             }
         };
 
-        // Disable checkpointing for the briefing run so it does NOT write new
-        // checkpoints into the OLD session's chain (Bug 6). Resume-from-checkpoint
-        // still works — SessionManager is always created — but no checkpoints are
-        // saved during the briefing, so history stays intact.
-        let briefing_config = {
-            let mut value: toml::Value = config_toml
-                .parse()
-                .unwrap_or_else(|_| toml::Value::Table(toml::Table::new()));
-            if let Some(ckpt) = value.get_mut("checkpointing").and_then(|c| c.as_table_mut()) {
-                ckpt.insert("enabled".to_string(), toml::Value::Boolean(false));
-            }
-            toml::to_string(&value).unwrap_or_else(|_| config_toml.clone())
-        };
-
-        let secrets = self.secrets.clone().unwrap_or_default();
-        let build_info = self.build_info.clone();
         let tx = self.workflow_tx.clone();
 
         let agent_name = self.agent_name.clone();
-        let token_store = self.token_store.clone();
         let project_id = self.project_id.clone();
         let project_name = self.project_name.clone();
         let session_id = self.session_id.clone();
         let session_name = self.session_name.clone();
         let home_dir = self.home_dir.clone();
 
-        // Preserve resume_info so a failed/cancelled briefing can restore the
-        // session instead of losing all continuity (Bug 4/8).
+        // Preserve resume_info so a failed briefing can restore the session
+        // instead of losing all continuity (Bug 4/8).
         let backup_resume_info = self.resume_info.clone();
-        let resume_info = self.resume_info.take();
+        let resume_info = match self.resume_info.take() {
+            Some(ri) => ri,
+            None => {
+                // Already checked is_none() above — defensive only.
+                self.output_lines.push("ℹ Nothing to hand off — run a task first".to_string());
+                return;
+            }
+        };
 
         self.workflow_state = WorkflowState::Running;
         self.auto_scroll = true;
         self.cancel_token = CancellationToken::new();
-        let child_token = self.cancel_token.clone();
 
         self.output_lines.push("🔀 Generating session handoff briefing...".to_string());
 
         tokio::spawn(async move {
-            let (cap_tx, mut cap_rx) = mpsc::unbounded_channel::<CapturedText>();
-            let cap_sink: abk::orchestration::output::SharedSink =
-                Arc::new(HandoffCaptureSink::new(cap_tx, child_token.clone()));
-
             let base = "Output a session handoff briefing in at most 300 lines. \
                  Do NOT use any tools. Include: the FULL ABSOLUTE PATH of every \
                  project/repository being worked on (e.g. /Projects/Foo/bar — never \
@@ -669,8 +654,6 @@ impl Session {
             } else {
                 format!("{base}\n\nIn the briefing also consider: {hint}")
             };
-
-            let (dummy_tx, _dummy_rx) = mpsc::unbounded_channel();
 
             // Build RunContext for stateless operation — same fields as execute_command
             let mut run_ctx = RunContext::new()
@@ -696,11 +679,6 @@ impl Session {
                     name: session_name,
                 });
             }
-            #[cfg(feature = "registry-mcp-token")]
-            {
-                // Note: token_store not available in handoff — handoffs don't
-                // need MCP credentials, so we skip it here.
-            }
 
             // Run inside per-task logger + TUI-mode scope (task-local, not process-global)
             let scope_logger = abk::observability::Logger::with_agent_name(
@@ -709,18 +687,16 @@ impl Session {
                 Some(&agent_name),
             ).unwrap_or_else(|_| abk::observability::Logger::new(None, Some("INFO")).unwrap());
 
-            let _res = abk::observability::with_logger(scope_logger, async {
+            // Single direct LLM call — no agentic workflow loop. This is the fix
+            // for the session-bricking bug: the full workflow ran tools, looped
+            // on the large history, and never completed.
+            let result = abk::observability::with_logger(scope_logger, async {
                 abk::observability::with_tui_mode(true, async {
-                    abk::cli::run_task_from_raw_config(
-                        &briefing_config,
-                        secrets,
-                        build_info,
+                    abk::cli::generate_handoff_briefing(
+                        &config_toml,
+                        &run_ctx,
+                        &resume_info,
                         &prompt,
-                        Some(cap_sink),
-                        resume_info,
-                        Some(dummy_tx),
-                        Some(child_token),
-                        Some(&run_ctx),
                     )
                     .await
                 })
@@ -728,32 +704,14 @@ impl Session {
             })
             .await;
 
-            let mut text_parts = String::new();
-            let mut reasoning_parts = String::new();
-            while let Ok(captured) = cap_rx.try_recv() {
-                match captured {
-                    CapturedText::Text(s) => text_parts.push_str(&s),
-                    CapturedText::Reasoning(s) => reasoning_parts.push_str(&s),
-                }
-            }
-
-            let briefing = if !text_parts.trim().is_empty() {
-                Some(text_parts.trim().to_string())
-            } else if !reasoning_parts.trim().is_empty() {
-                Some(reasoning_parts.trim().to_string())
-            } else {
-                None
-            };
-
-            match briefing {
-                Some(briefing) => {
+            match result {
+                Ok(briefing) if !briefing.trim().is_empty() => {
                     tx.send(TuiMessage::HandoffReady(briefing)).ok();
                 }
-                None => {
-                    // Briefing unavailable (LLM failure, truncation, or the
-                    // briefing was cancelled/tool-call aborted). Restore session
-                    // continuity and surface the failure — NEVER auto-execute a
-                    // garbage fallback string as a new task (Bug 8).
+                _ => {
+                    // Briefing unavailable (LLM failure, truncation, cancel).
+                    // Restore session continuity and surface the failure —
+                    // NEVER auto-execute a garbage fallback string (Bug 8).
                     tx.send(TuiMessage::ResumeInfo(backup_resume_info)).ok();
                     tx.send(TuiMessage::HandoffFailed).ok();
                 }

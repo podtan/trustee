@@ -3,9 +3,6 @@
 //! All enums, structs, and type aliases used by trustee-core.
 
 use abk::cli::ResumeInfo;
-use abk::orchestration::output::{OutputEvent, OutputSink};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 /// Auto-handoff configuration parsed from `[tui.auto_handoff]` in trustee.toml.
 ///
@@ -116,51 +113,4 @@ pub enum TuiMessage {
     },
     /// LLM-generated session title ready to replace the truncated command title
     SessionTitleUpdated(String),
-}
-
-/// Tagged chunk type so we can distinguish reasoning (thinking) content
-/// from regular text content after draining the capture channel.
-pub enum CapturedText {
-    Text(String),
-    Reasoning(String),
-}
-
-/// Sink used during handoff briefing — captures LLM response text and
-/// cancels the loop immediately if the LLM makes a tool call.
-///
-/// Also captures ReasoningChunk events as a fallback: some thinking-capable
-/// models deliver their entire output through reasoning tokens, so without
-/// this the briefing channel would remain empty.
-pub struct HandoffCaptureSink {
-    tx: mpsc::UnboundedSender<CapturedText>,
-    cancel: CancellationToken,
-}
-
-impl HandoffCaptureSink {
-    pub fn new(tx: mpsc::UnboundedSender<CapturedText>, cancel: CancellationToken) -> Self {
-        Self { tx, cancel }
-    }
-}
-
-impl OutputSink for HandoffCaptureSink {
-    fn emit(&self, event: OutputEvent) {
-        match event {
-            OutputEvent::StreamingChunk { delta } if !delta.is_empty() => {
-                let _ = self.tx.send(CapturedText::Text(delta));
-            }
-            OutputEvent::LlmResponse { text, .. } if !text.is_empty() => {
-                let _ = self.tx.send(CapturedText::Text(text));
-            }
-            // Reasoning/thinking tokens — capture as fallback in case the model
-            // delivers its entire briefing through reasoning instead of text.
-            OutputEvent::ReasoningChunk { delta } if !delta.is_empty() => {
-                let _ = self.tx.send(CapturedText::Reasoning(delta));
-            }
-            // LLM disobeyed "Do NOT use any tools" — cancel immediately.
-            OutputEvent::ToolsExecuting { .. } => {
-                self.cancel.cancel();
-            }
-            _ => {}
-        }
-    }
 }
