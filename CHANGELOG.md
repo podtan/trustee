@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.1] - 2026-08-09
+
+### Fixed
+- **fix(config): default `[llm.utility] max_tokens` raised from 100 to 1000** — Thinking models like GLM-4.7-Flash need 500-600+ reasoning tokens before producing a title. The old default caused truncated responses with empty content, resulting in no LLM title being generated.
+- **deps: bump abk to 0.12.10** — Title generation now retries with higher max_tokens on truncation, improved reasoning extraction for GLM "Idea N:" brainstorming patterns.
+
+### Changed
+- **deps: bump trustee-core to 0.6.4, trustee-api to 0.7.10**
+
 ## [0.9.0] - 2026-08-09
 
 ### Fixed
