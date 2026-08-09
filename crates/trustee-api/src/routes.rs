@@ -263,7 +263,7 @@ pub async fn post_handoff(
     let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers).await?;
     let (_sid, session_arc, _ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
     let mut session = session_arc.lock().await;
-    session.trigger_handoff(String::new());
+    session.request_handoff(String::new());
 
     let resp = Json(CommandResponse { accepted: true });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
@@ -789,7 +789,7 @@ pub async fn post_handoff_session(
         .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
 
     let mut session = session_arc.lock().await;
-    session.trigger_handoff(String::new());
+    session.request_handoff(String::new());
 
     let resp = Json(CommandResponse { accepted: true });
     Ok(with_rolling_cookie(resp.into_response(), cookie))

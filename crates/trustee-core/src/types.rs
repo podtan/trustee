@@ -99,6 +99,8 @@ pub enum TuiMessage {
     WorkflowCancelled,
     /// LLM-generated handoff briefing ready — start a fresh session with it
     HandoffReady(String),
+    /// Handoff briefing failed/unavailable — session preserved, NO auto-execute.
+    HandoffFailed,
     /// A native tool call has started (shows spinner)
     ToolPending { tool_name: String, hint: Option<String> },
     /// A native tool call has finished (replaces spinner with ✓/✗)
