@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.0] - 2026-08-09
+
+### Fixed
+- **fix(session): description survives session resume** — `create_session_with_description` now reads existing metadata instead of overwriting with null. Preserves description/tags on resume.
+- **fix(session): web sessions get description at creation** — Falls back to task description when `SessionIdentity.name` is None.
+
+### Changed
+- **deps: bump abk to 0.12.9, trustee-core to 0.6.3, trustee-api to 0.7.9**
+
 ## [0.8.8] - 2026-08-08
 
 ### Fixed
