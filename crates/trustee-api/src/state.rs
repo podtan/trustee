@@ -820,9 +820,16 @@ impl<'a> serde::Serialize for SerializableMessage<'a> {
                 s.serialize_field("state", "Idle")?;
                 s.end()
             }
-            TuiMessage::HandoffReady(_) => {
-                let mut s = serializer.serialize_struct("msg", 2)?;
+            TuiMessage::HandoffReady(briefing) => {
+                let mut s = serializer.serialize_struct("msg", 3)?;
                 s.serialize_field("type", "HandoffReady")?;
+                s.serialize_field("state", "Idle")?;
+                s.serialize_field("briefing", briefing)?;
+                s.end()
+            }
+            TuiMessage::HandoffFailed => {
+                let mut s = serializer.serialize_struct("msg", 2)?;
+                s.serialize_field("type", "HandoffFailed")?;
                 s.serialize_field("state", "Idle")?;
                 s.end()
             }

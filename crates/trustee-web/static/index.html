@@ -897,6 +897,10 @@ let autoScroll = true;
 // chain to resume from. Cleared on "New Session".
 let currentSessionId = null;
 
+// Whether a checkpoint exists to hand off. Handoff requires resume_info,
+// which is only present after a workflow completes (Bug 3).
+window._handoffAvailable = false;
+
 // --- Output rendering ---
 const outputEl = document.getElementById('output');
 
@@ -1081,11 +1085,19 @@ function handleMessage(msg) {
       // messages signal the actual end.
       if (msg.session_id) {
         currentSessionId = msg.session_id;
+        // A checkpoint exists — handoff is now available (Bug 3)
+        window._handoffAvailable = true;
       }
       break;
     case 'HandoffReady':
-      closeAgentBubble();
+      // Show the briefing to the user BEFORE the new task auto-executes (Bug 7)
       updateState('Idle');
+      if (msg.briefing) appendHandoffBriefing(msg.briefing);
+      break;
+    case 'HandoffFailed':
+      // Briefing unavailable — session preserved, no auto-execute (Bug 8)
+      updateState('Idle');
+      appendOutput('✗ Handoff briefing unavailable — session preserved, try again.');
       break;
     case 'NewSession':
       // Server confirmed new session — clear output and reset state
@@ -1183,6 +1195,21 @@ function ensureAgentBubble() {
   agentBubbleText = '';
 }
 
+function appendHandoffBriefing(text) {
+  closeAgentBubble();
+  closeReasoningSection();
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-agent';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble md';
+  bubble.innerHTML = renderMarkdown(text);
+  applyBidiToMarkdown(bubble);
+  highlightCodeIn(bubble);
+  wrap.appendChild(bubble);
+  outputEl.appendChild(wrap);
+  if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
+}
+
 function closeAgentBubble() {
   // Render accumulated text as markdown before closing
   if (agentBubble && agentBubble.isConnected && agentBubbleText) {
@@ -1251,6 +1278,9 @@ async function refreshSession() {
     if (data.session_id) {
       currentSessionId = data.session_id;
     }
+    // Handoff is only available when the session actually has a checkpoint
+    // to hand off (resume_info present) — Bug 3
+    window._handoffAvailable = !!data.resume_info_present;
     // If there's existing session content, enable handoff button
     if ((data.output_lines || []).length > 0) {
       window._hasSession = true;
@@ -1308,10 +1338,11 @@ function updateState(state) {
   const cancelling = state === 'Cancelling';
   document.getElementById('spinner-container').innerHTML = running ? '<span class="spinner"></span>' : '';
   document.getElementById('btn-cancel').style.display = running ? '' : 'none';
-  // Handoff always visible — disabled until there's session context
+  // Handoff always visible — disabled while running/cancelling or when no
+  // checkpoint exists to hand off (Bugs 2/3)
   const handoffBtn = document.getElementById('btn-handoff');
   handoffBtn.style.display = '';
-  handoffBtn.disabled = (running || cancelling) ? false : !window._hasSession;
+  handoffBtn.disabled = (running || cancelling) || !window._handoffAvailable;
   document.getElementById('btn-send').disabled = running || cancelling;
   document.getElementById('input').disabled = running || cancelling;
 }
@@ -1356,7 +1387,9 @@ async function cancelWorkflow() {
 }
 
 async function doHandoff() {
-  await fetch(API + '/api/v1/session/handoff', { method: 'POST' });
+  // Use the session-scoped route so the correct session is targeted in
+  // multi-session mode (Bug 9)
+  await fetch(API + '/api/v1/sessions/' + encodeURIComponent(currentSessionId || '') + '/handoff', { method: 'POST' });
 }
 
 // --- Event listeners ---
@@ -1766,7 +1799,8 @@ async function resumeSession(sessionId, checkpointCount) {
 
     showToast(`Session resumed — ${checkpointCount} checkpoint${checkpointCount !== 1 ? 's' : ''} loaded`, 'success');
 
-    // Enable input
+    // Enable input — handoff is available after resuming a checkpoint
+    window._handoffAvailable = true;
     document.getElementById('btn-handoff').disabled = false;
     document.getElementById('input').focus();
     if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;

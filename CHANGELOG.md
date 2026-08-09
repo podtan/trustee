@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.2] - 2026-08-09
+
+### Fixed
+- **fix(handoff): safe `request_handoff()` state-machine entry** — Handoff requests while a workflow is running now cancel + queue (mirroring TUI Ctrl+H) instead of spawning a concurrent briefing workflow that corrupts the session (Bug 1/2/5).
+- **fix(handoff): preserve `resume_info` on failed/cancelled briefing** — The briefing run now keeps a backup and restores session continuity via `HandoffFailed` if the LLM returns nothing useful (Bug 4/8).
+- **fix(handoff): disable checkpointing during briefing** — The briefing no longer writes checkpoints into the old session's chain, keeping history intact (Bug 6).
+- **fix(handoff): never auto-execute a garbage briefing** — Empty/truncated briefings surface an error and leave the session preserved instead of being run as a destructive task (Bug 8).
+- **fix(web): handoff briefing visible before new task runs** — `HandoffReady` now carries the briefing text and the frontend renders it as an agent bubble before the follow-up task executes (Bug 7).
+- **fix(web): handoff button gated on Idle + actual checkpoint availability** — Button is disabled while running/cancelling and until a checkpoint (`resume_info`) exists; no more silent no-op (Bug 2/3).
+- **fix(web): handoff uses session-scoped route** — `/api/v1/sessions/{id}/handoff` targets the correct session in multi-session mode (Bug 9).
+
+### Changed
+- **deps: bump trustee-core to 0.6.5, trustee-web to 0.1.13, trustee-api to 0.7.11**
+
 ## [0.9.1] - 2026-08-09
 
 ### Fixed

@@ -298,6 +298,16 @@ impl Session {
                 self.input = briefing;
                 self.execute_command();
             }
+            TuiMessage::HandoffFailed => {
+                // Briefing unavailable — session continuity was already restored
+                // by the ResumeInfo(Some) that precedes this message. Return to
+                // Idle so the user can retry or continue manually (Bug 5/8).
+                self.workflow_state = WorkflowState::Idle;
+                self.output_lines.push(
+                    "✗ Handoff briefing unavailable — session preserved, try again.".to_string(),
+                );
+                self.output_lines.push("".to_string());
+            }
             TuiMessage::SessionTitleUpdated(title) => {
                 // LLM-generated title has arrived — update the session name.
                 self.session_name = Some(title);
@@ -548,11 +558,48 @@ impl Session {
         self.input.clear();
     }
 
+    /// Request a session handoff through the safe state-machine entry point.
+    ///
+    /// Mirrors the TUI Ctrl+H behavior:
+    /// - Idle → trigger the handoff immediately
+    /// - Running → cancel the workflow, fire handoff once it stops
+    /// - Cancelling → queue handoff for when it stops
+    ///
+    /// This prevents any caller (web button, API, future MCP tool) from
+    /// spawning a briefing task concurrently with a running workflow
+    /// (Bugs 1/2/5).
+    pub fn request_handoff(&mut self, hint: String) {
+        match self.workflow_state {
+            WorkflowState::Idle => self.trigger_handoff(hint),
+            WorkflowState::Running => {
+                self.cancel_token.cancel();
+                self.workflow_state = WorkflowState::Cancelling;
+                self.handoff_pending = true;
+                self.output_lines
+                    .push("⏹ Cancelling before handoff...".to_string());
+            }
+            WorkflowState::Cancelling => {
+                self.handoff_pending = true;
+            }
+        }
+    }
+
     /// Trigger a session handoff.
     ///
     /// Runs a single LLM call using the current session's resume_info to generate
     /// a briefing. On completion, sends `TuiMessage::HandoffReady(briefing)`.
+    ///
+    /// This is the internal Idle-only entry point. Callers that may be invoked
+    /// while a workflow is running should use [`Session::request_handoff`].
     pub fn trigger_handoff(&mut self, hint: String) {
+        // Belt-and-braces guard: never run a briefing concurrently with a
+        // workflow (Bug 1). request_handoff handles the Running/Cancelling
+        // states; direct callers must be Idle.
+        if self.workflow_state != WorkflowState::Idle {
+            self.output_lines
+                .push("⏳ Workflow still running — handoff will fire after it stops".to_string());
+            return;
+        }
         if self.resume_info.is_none() {
             self.output_lines.push("ℹ Nothing to hand off — run a task first".to_string());
             return;
@@ -564,6 +611,20 @@ impl Session {
                 self.output_lines.push("✗ Error: Configuration not loaded".to_string());
                 return;
             }
+        };
+
+        // Disable checkpointing for the briefing run so it does NOT write new
+        // checkpoints into the OLD session's chain (Bug 6). Resume-from-checkpoint
+        // still works — SessionManager is always created — but no checkpoints are
+        // saved during the briefing, so history stays intact.
+        let briefing_config = {
+            let mut value: toml::Value = config_toml
+                .parse()
+                .unwrap_or_else(|_| toml::Value::Table(toml::Table::new()));
+            if let Some(ckpt) = value.get_mut("checkpointing").and_then(|c| c.as_table_mut()) {
+                ckpt.insert("enabled".to_string(), toml::Value::Boolean(false));
+            }
+            toml::to_string(&value).unwrap_or_else(|_| config_toml.clone())
         };
 
         let secrets = self.secrets.clone().unwrap_or_default();
@@ -578,6 +639,9 @@ impl Session {
         let session_name = self.session_name.clone();
         let home_dir = self.home_dir.clone();
 
+        // Preserve resume_info so a failed/cancelled briefing can restore the
+        // session instead of losing all continuity (Bug 4/8).
+        let backup_resume_info = self.resume_info.clone();
         let resume_info = self.resume_info.take();
 
         self.workflow_state = WorkflowState::Running;
@@ -648,7 +712,7 @@ impl Session {
             let _res = abk::observability::with_logger(scope_logger, async {
                 abk::observability::with_tui_mode(true, async {
                     abk::cli::run_task_from_raw_config(
-                        &config_toml,
+                        &briefing_config,
                         secrets,
                         build_info,
                         &prompt,
@@ -674,14 +738,26 @@ impl Session {
             }
 
             let briefing = if !text_parts.trim().is_empty() {
-                text_parts.trim().to_string()
+                Some(text_parts.trim().to_string())
             } else if !reasoning_parts.trim().is_empty() {
-                reasoning_parts.trim().to_string()
+                Some(reasoning_parts.trim().to_string())
             } else {
-                "Session handoff: briefing unavailable — continue from previous context.".to_string()
+                None
             };
 
-            tx.send(TuiMessage::HandoffReady(briefing)).ok();
+            match briefing {
+                Some(briefing) => {
+                    tx.send(TuiMessage::HandoffReady(briefing)).ok();
+                }
+                None => {
+                    // Briefing unavailable (LLM failure, truncation, or the
+                    // briefing was cancelled/tool-call aborted). Restore session
+                    // continuity and surface the failure — NEVER auto-execute a
+                    // garbage fallback string as a new task (Bug 8).
+                    tx.send(TuiMessage::ResumeInfo(backup_resume_info)).ok();
+                    tx.send(TuiMessage::HandoffFailed).ok();
+                }
+            }
         });
     }
 }
