@@ -575,8 +575,13 @@ impl Session {
                 self.cancel_token.cancel();
                 self.workflow_state = WorkflowState::Cancelling;
                 self.handoff_pending = true;
-                self.output_lines
-                    .push("⏹ Cancelling before handoff...".to_string());
+                // Broadcast via the message channel so live UI (web/TUI) sees
+                // the status immediately. A direct output_lines.push() would
+                // only appear after a page refresh (output_lines is served via
+                // the /api/v1/session poll, not pushed over WebSocket).
+                self.workflow_tx
+                    .send(TuiMessage::OutputLine("⏹ Cancelling before handoff...".to_string()))
+                    .ok();
             }
             WorkflowState::Cancelling => {
                 self.handoff_pending = true;
@@ -638,7 +643,15 @@ impl Session {
         self.auto_scroll = true;
         self.cancel_token = CancellationToken::new();
 
-        self.output_lines.push("🔀 Generating session handoff briefing...".to_string());
+        // Broadcast via the message channel so live UI (web/TUI) sees the
+        // status line immediately. A direct output_lines.push() would only
+        // appear after a page refresh (output_lines is served via the
+        // /api/v1/session poll, not pushed over WebSocket). The drain task
+        // pushes this line to output_lines (via handle_workflow_message) AND
+        // broadcasts StateChanged(Running) + OutputLine to WS clients.
+        self.workflow_tx
+            .send(TuiMessage::OutputLine("🔀 Generating session handoff briefing...".to_string()))
+            .ok();
 
         tokio::spawn(async move {
             let base = "Output a session handoff briefing in at most 300 lines. \

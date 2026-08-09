@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.5] - 2026-08-09
+
+### Fixed
+- **fix(web): handoff status line now appears live (no refresh needed)** — `trigger_handoff()` was pushing `"🔀 Generating session handoff briefing..."` directly to `output_lines`, which is only served via the `/api/v1/session` poll. It now sends the line through the `TuiMessage` channel as `OutputLine`, so the WebSocket drain task pushes it to `output_lines` AND broadcasts it live (frontend `appendOutput` + `StateChanged Running`). Same fix for `"⏹ Cancelling before handoff..."` in `request_handoff()`. The user now sees immediate feedback when clicking Handoff.
+
+### Changed
+- **deps: bump trustee-core to 0.6.7, trustee-api to 0.7.14**
+
 ## [0.9.4] - 2026-08-09
 
 ### Fixed
