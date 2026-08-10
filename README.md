@@ -428,6 +428,46 @@ The `InteractiveTokenProvider` automatically:
 - Checks expiry and refreshes if a refresh token is available
 - Returns an error if the token is expired and cannot be refreshed
 
+## THQ Auto-Registration with Torpi
+
+Trustee can automatically register itself with a Torpi instance (Trustee Head Quarters) for centralized agent management. When a `[thq]` section is present in the config, a background task periodically registers this agent and sends heartbeats.
+
+### Configuration
+
+Add a `[thq]` section to your trustee config (`~/.trustee/config/trustee.toml`):
+
+```toml
+[thq]
+torpi_url = "https://torpi.tanbal.ir"
+advertise_url = "https://your-agent-host:3000"
+agent_name = "my-agent"
+owner_id = "your-jwt-sub-uuid"
+```
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `torpi_url` | Yes | — | Base URL of the Torpi instance |
+| `advertise_url` | Yes | — | This agent's externally-reachable URL |
+| `agent_name` | No | `$HOSTNAME` | Human-friendly name shown in THQ |
+| `agent_role` | No | `general` | Agent role (e.g. `code-review`, `deploy`) |
+| `capabilities` | No | `[]` | Skill list (e.g. `["rust", "docker"]`) |
+| `tags` | No | `[]` | Free-form tags for filtering |
+| `heartbeat_interval` | No | `30` | Re-registration interval in seconds |
+| `registration_token` | No | — | Optional Bearer token for Torpi auth |
+| `owner_id` | No | — | User's JWT `sub` UUID for per-user agent access |
+
+### Per-User Agent Access (owner_id)
+
+When `owner_id` is set, Torpi associates this agent with the specified user. This allows non-admin users to view and manage their own agents through the Torpi THQ UI without requiring admin privileges.
+
+The `owner_id` should be the user's JWT `sub` claim from your OIDC provider (e.g. Kanidm). Users can find their UUID by checking the Torpi `/api/permissions` endpoint while logged in.
+
+**Without `owner_id`**: The agent is visible only to Torpi admins (backward compatible).
+
+### Agent Identity Persistence
+
+The agent generates a stable UUID v4 on first run and persists it to `~/.trustee/agent_id`, ensuring the same identity survives process restarts.
+
 ## Lifecycle Plugins
 
 Trustee's morphing capability comes from WASM lifecycle plugins that define different agent types:
