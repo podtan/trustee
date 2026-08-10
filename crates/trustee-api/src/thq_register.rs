@@ -37,6 +37,11 @@ pub struct ThqConfig {
     /// Sent as `Authorization: Bearer <token>` on every registration request.
     /// When None, registration is unauthenticated (legacy Torpi instances).
     pub registration_token: Option<String>,
+    /// Owning user's subject identifier (typically their JWT `sub` UUID).
+    /// When set, Torpi associates this agent with the user so they can
+    /// manage it through the THQ UI without admin privileges.
+    /// Set from the `[thq] owner_id` config field.
+    pub owner_id: Option<String>,
 }
 
 impl ThqConfig {
@@ -98,6 +103,11 @@ impl ThqConfig {
             .get("registration_token")
             .and_then(|v| v.as_str())
             .map(String::from);
+        let owner_id = thq
+            .get("owner_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         Some(Self {
             torpi_url,
@@ -108,6 +118,7 @@ impl ThqConfig {
             tags,
             heartbeat_interval,
             registration_token,
+            owner_id,
         })
     }
 }
@@ -123,6 +134,8 @@ struct AgentEntry {
     status: String,
     tags: Vec<String>,
     last_seen: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_id: Option<String>,
 }
 
 /// Resolve or create a persistent agent ID.
@@ -197,6 +210,7 @@ pub fn spawn(config: ThqConfig) {
         status: "idle".to_string(),
         tags: config.tags.clone(),
         last_seen: chrono::Utc::now().to_rfc3339(),
+        owner_id: config.owner_id.clone(),
     };
 
     let url = format!("{}/thq/api/agents", config.torpi_url);
@@ -273,6 +287,7 @@ heartbeat_interval = 60
         assert_eq!(cfg.tags, vec!["edge", "arm64"]);
         assert_eq!(cfg.heartbeat_interval, 60);
         assert!(cfg.registration_token.is_none());
+        assert!(cfg.owner_id.is_none());
     }
 
     #[test]
@@ -290,6 +305,7 @@ advertise_url = "https://10.0.0.5:3000/"
         assert!(cfg.tags.is_empty());
         assert_eq!(cfg.heartbeat_interval, 30);
         assert!(cfg.registration_token.is_none());
+        assert!(cfg.owner_id.is_none());
     }
 
     #[test]
@@ -302,6 +318,30 @@ registration_token = "secret-agent-token"
 "#;
         let cfg = ThqConfig::from_toml(toml).expect("should parse");
         assert_eq!(cfg.registration_token.as_deref(), Some("secret-agent-token"));
+    }
+
+    #[test]
+    fn parse_owner_id() {
+        let toml = r#"
+[thq]
+torpi_url = "https://torpi.example.com"
+advertise_url = "https://10.0.0.5:3000"
+owner_id = "d0f5c4ba-9c10-4ff7-85a4-f2c0e588a55a"
+"#;
+        let cfg = ThqConfig::from_toml(toml).expect("should parse");
+        assert_eq!(cfg.owner_id.as_deref(), Some("d0f5c4ba-9c10-4ff7-85a4-f2c0e588a55a"));
+    }
+
+    #[test]
+    fn parse_empty_owner_id_is_none() {
+        let toml = r#"
+[thq]
+torpi_url = "https://torpi.example.com"
+advertise_url = "https://10.0.0.5:3000"
+owner_id = ""
+"#;
+        let cfg = ThqConfig::from_toml(toml).expect("should parse");
+        assert!(cfg.owner_id.is_none());
     }
 
     #[test]
@@ -333,11 +373,32 @@ torpi_url = "https://torpi.example.com"
             status: "idle".to_string(),
             tags: vec![],
             last_seen: "2025-01-01T00:00:00Z".to_string(),
+            owner_id: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["id"], "test-id");
         assert_eq!(v["status"], "idle");
         assert!(v["capabilities"].is_array());
+        // owner_id should be absent when None (skip_serializing_if)
+        assert!(v.get("owner_id").is_none());
+    }
+
+    #[test]
+    fn agent_entry_serializes_owner_id() {
+        let entry = AgentEntry {
+            id: "test-id".to_string(),
+            name: "test".to_string(),
+            endpoint: "https://localhost:3000".to_string(),
+            role: "general".to_string(),
+            capabilities: vec!["rust".to_string()],
+            status: "idle".to_string(),
+            tags: vec![],
+            last_seen: "2025-01-01T00:00:00Z".to_string(),
+            owner_id: Some("user-uuid-123".to_string()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["owner_id"], "user-uuid-123");
     }
 }
