@@ -27,6 +27,8 @@ max_history = 200
 enable_dangerous_command_validation = true
 max_iterations = 1000
 request_interval_seconds = 0
+retry_base_delay_seconds = 1
+retry_strategy = "exponential"
 
 [modes.confirm]
 description = "Agent proposes actions and asks for confirmation"
