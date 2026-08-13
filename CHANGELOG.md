@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.9] - 2026-08-10
+
+### Added
+- **feat: TOML-based LLM provider configuration** — LLM model, base_url, and api_key can now be configured in TOML via `[llm.provider]`, using the same `${ENV_VAR}` substitution pattern as MCP credentials. This enables per-user LLM config in multi-tenant web mode (each user's `~/.trustee/users/{hash}/config/trustee.toml` can specify a different model/base_url). Environment variables (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_DEFAULT_MODEL`) remain as fallback when `[llm.provider]` is absent — fully backward-compatible.
+  - **ABK** (0.12.14): New `ProviderConfig` struct, `OpenAIProvider::with_config()`, `ProviderFactory::create_with_config()`, threaded from `Agent::new_from_config()` and `runner.rs` callers.
+  - **Default config** (`trustee_default.toml`): Added `[llm.provider]` section with `name`, `model`, `base_url`, `api_key = "${OPENAI_API_KEY}"`.
+
+### Changed
+- **deps: bump abk to 0.12.14, trustee-core to 0.6.9, trustee-api to 0.7.17, trustee-tui to 0.3.4**
+
 ## [0.9.8] - 2026-08-10
 
 ### Added
