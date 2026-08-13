@@ -31,12 +31,15 @@ use abk::cli::ResumeInfo;
 /// * `secrets` - Key-value secrets map
 /// * `build_info` - Build-time metadata
 /// * `resume_info` - Optional checkpoint resume info (from `trustee resume -i`)
+/// * `home_dir` - Optional per-user home directory for checkpoint isolation
+/// * `identity` - Optional agent identity content prepended to the system prompt
 pub async fn run(
     config_toml: String,
     secrets: HashMap<String, String>,
     build_info: BuildInfo,
     resume_info: Option<ResumeInfo>,
     home_dir: Option<std::path::PathBuf>,
+    identity: Option<String>,
 ) -> anyhow::Result<()> {
     let mut app = App::new();
 
@@ -47,6 +50,9 @@ pub async fn run(
 
     // Set per-user home_dir for checkpoint isolation
     app.session.home_dir = home_dir;
+
+    // Set optional agent identity
+    app.session.identity = identity;
 
     // Extract agent name from config for stateless operation
     if let Ok(table) = config_toml.parse::<toml::Value>() {

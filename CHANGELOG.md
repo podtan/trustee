@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.8] - 2026-08-10
+
+### Added
+- **feat: optional agent identity injection** — Trustee now accepts an optional identity string that is prepended to `lifecycle.system_template` at runtime, enabling agents to load a self-model (e.g. from Fame) before the agent loop starts. Fully backward-compatible: if no identity is provided, the default system template is used unchanged.
+  - **Session layer** (`trustee-core`): `Session.identity: Option<String>` field, injected into the config clone inside `execute_command()` and `trigger_handoff()` — never written to disk, fresh per session.
+  - **TUI**: reads `TRUSTEE_IDENTITY` env var at startup, passes through `trustee_tui::run()`.
+  - **Web/API**: `identity` field added to `CommandRequest`, `CreateSessionRequest`, and `NewSessionRequest` (all `#[serde(default)]`). Each session can carry a different identity.
+  - **CLI**: reads `TRUSTEE_IDENTITY` env var, injects directly into config string before `run_from_raw_config()`.
+
+### Changed
+- **deps: bump trustee-core to 0.6.8, trustee-api to 0.7.16, trustee-tui to 0.3.3**
+
 ## [0.9.5] - 2026-08-09
 
 ### Fixed
