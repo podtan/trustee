@@ -193,6 +193,7 @@ impl ServerState {
         &self,
         user_key: &str,
         session_name: Option<String>,
+        identity: Option<String>,
     ) -> Result<String, SessionError> {
         // Get or create the user's UserSessions entry
         let user_sessions = self
@@ -235,6 +236,9 @@ impl ServerState {
 
         // Apply session_name if provided
         session.session_name = session_name;
+
+        // Apply agent identity if provided
+        session.identity = identity;
 
         // Create broadcast channel
         let (ws_tx_entry, _) = broadcast::channel::<String>(256);
@@ -494,7 +498,7 @@ impl ServerState {
 
         // Create a brand new session
         let session_id = self
-            .create_session(user_key, None)
+            .create_session(user_key, None, None)
             .await
             .unwrap_or_else(|_| "default".to_string());
 

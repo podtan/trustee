@@ -90,6 +90,12 @@ pub struct Session {
     /// releasing the permit back to the global semaphore.
     /// None when no workflow is running or when concurrency limiting is disabled.
     pub workflow_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+
+    /// Optional agent identity content (e.g. fetched from Fame).
+    /// When set, prepended to `lifecycle.system_template` in the config
+    /// clone inside `execute_command()` and `trigger_handoff()`.
+    /// None = use the config's default system template.
+    pub identity: Option<String>,
 }
 
 impl Session {
@@ -127,6 +133,7 @@ impl Session {
             session_name: None,
             home_dir: None,
             workflow_permit: None,
+            identity: None,
         };
         (session, workflow_rx)
     }
@@ -368,6 +375,9 @@ impl Session {
                 return;
             }
         };
+
+        // Inject identity into the config clone if present.
+        let config_toml = inject_identity(config_toml, &self.identity);
 
         let secrets = self.secrets.clone().unwrap_or_default();
         // Clone secrets for post-completion title generation (secrets are moved into run_task below)
@@ -618,6 +628,9 @@ impl Session {
             }
         };
 
+        // Inject identity into the config clone if present.
+        let config_toml = inject_identity(config_toml, &self.identity);
+
         let tx = self.workflow_tx.clone();
 
         let agent_name = self.agent_name.clone();
@@ -737,6 +750,48 @@ impl Default for Session {
     fn default() -> Self {
         Self::new().0
     }
+}
+
+/// Prepend agent identity to `lifecycle.system_template` in the config TOML.
+///
+/// If `identity` is `None` or empty, returns the config unchanged.
+/// On parse/serialize failure, returns the config unchanged (best-effort).
+fn inject_identity(config_toml: String, identity: &Option<String>) -> String {
+    let Some(identity) = identity.as_ref().filter(|s| !s.is_empty()) else {
+        return config_toml;
+    };
+
+    let Ok(mut table) = config_toml.parse::<toml::Value>() else {
+        return config_toml;
+    };
+
+    let lifecycle = table
+        .get_mut("lifecycle")
+        .and_then(|v| v.as_table_mut());
+
+    if let Some(lifecycle) = lifecycle {
+        let existing = lifecycle
+            .get("system_template")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let combined = format!("{}\n\n{}", identity, existing);
+        lifecycle.insert(
+            "system_template".to_string(),
+            toml::Value::String(combined),
+        );
+    } else {
+        // No [lifecycle] section — create one with just the identity as template.
+        let mut ltable = toml::value::Table::new();
+        ltable.insert(
+            "system_template".to_string(),
+            toml::Value::String(identity.clone()),
+        );
+        if let Some(table) = table.as_table_mut() {
+            table.insert("lifecycle".to_string(), toml::Value::Table(ltable));
+        }
+    }
+
+    toml::to_string(&table).unwrap_or(config_toml)
 }
 
 /// A sink that forwards ABK `OutputEvent`s to the message channel.

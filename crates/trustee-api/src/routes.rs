@@ -56,6 +56,10 @@ pub struct McpServerJson {
 pub struct CommandRequest {
     pub command: String,
     pub session_id: Option<String>,
+    /// Optional agent identity content. If provided and the session has no
+    /// identity yet, it is set before executing the command.
+    #[serde(default)]
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,6 +121,9 @@ pub struct CreateSessionRequest {
     pub session_name: Option<String>,
     #[serde(default)]
     pub resume_from: Option<String>,
+    /// Optional agent identity content prepended to the system prompt.
+    #[serde(default)]
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +144,9 @@ pub struct SetNameRequest {
 #[derive(Debug, Deserialize)]
 pub struct NewSessionRequest {
     pub session_name: Option<String>,
+    /// Optional agent identity content prepended to the system prompt.
+    #[serde(default)]
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -463,7 +473,7 @@ pub async fn resume_session(
     // 3. Create a NEW MSU session for this resume
     let session_name = format!("Resumed: {}", checkpoint_session_id);
     let new_sid = state
-        .create_session(&user_key, Some(session_name))
+        .create_session(&user_key, Some(session_name), None)
         .await
         .map_err(|e| match e {
             crate::state::SessionError::MaxSessionsReached(n) => {
@@ -622,7 +632,7 @@ pub async fn new_session(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let session_id = state
-        .create_session(&user_key, req.session_name)
+        .create_session(&user_key, req.session_name, req.identity)
         .await
         .map_err(|e| match e {
             SessionError::MaxSessionsReached(n) => (
@@ -656,7 +666,7 @@ pub async fn create_session(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let session_id = state
-        .create_session(&user_key, req.session_name)
+        .create_session(&user_key, req.session_name, req.identity)
         .await
         .map_err(|e| match e {
             SessionError::MaxSessionsReached(n) => (
@@ -968,6 +978,12 @@ async fn execute_command_inner(
                     }
                 }
             }
+        }
+
+        // Set identity from request if session doesn't have one yet.
+        // Allows identity to be passed on the first command of a legacy session.
+        if session.identity.is_none() {
+            session.identity = req.identity;
         }
 
         let permit = state

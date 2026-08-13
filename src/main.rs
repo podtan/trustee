@@ -378,6 +378,43 @@ fn merge_config(user_config_toml: &str) -> Result<String, Box<dyn std::error::Er
     Ok(merged_toml)
 }
 
+/// Prepend agent identity to `lifecycle.system_template` in the config TOML.
+///
+/// Used in CLI mode where config goes directly to ABK (no Session layer).
+/// On parse/serialize failure, returns the config unchanged (best-effort).
+fn inject_identity_into_config(config_toml: String, identity: &str) -> String {
+    let Ok(mut table) = config_toml.parse::<toml::Value>() else {
+        return config_toml;
+    };
+
+    let lifecycle = table
+        .get_mut("lifecycle")
+        .and_then(|v| v.as_table_mut());
+
+    if let Some(lifecycle) = lifecycle {
+        let existing = lifecycle
+            .get("system_template")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let combined = format!("{}\n\n{}", identity, existing);
+        lifecycle.insert(
+            "system_template".to_string(),
+            toml::Value::String(combined),
+        );
+    } else {
+        let mut ltable = toml::value::Table::new();
+        ltable.insert(
+            "system_template".to_string(),
+            toml::Value::String(identity.to_string()),
+        );
+        if let Some(table) = table.as_table_mut() {
+            table.insert("lifecycle".to_string(), toml::Value::Table(ltable));
+        }
+    }
+
+    toml::to_string(&table).unwrap_or(config_toml)
+}
+
 /// Restore terminal to normal state — called from panic hook and signal handlers.
 /// Uses `let _` so all steps run even if one fails.
 #[cfg(feature = "tui")]
@@ -469,7 +506,8 @@ async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
 
     // Launch the TUI application with config and per-user home_dir
     let user_home = get_user_home_dir();
-    trustee_tui::run(merged_config, secrets, build_info(), None, user_home).await?;
+    let identity = std::env::var("TRUSTEE_IDENTITY").ok().filter(|s| !s.is_empty());
+    trustee_tui::run(merged_config, secrets, build_info(), None, user_home, identity).await?;
     Ok(())
 }
 
@@ -595,7 +633,8 @@ async fn run_resume_tui_mode(args: &[String]) -> Result<(), Box<dyn std::error::
 
     // Launch TUI with resume_info and per-user home_dir
     let user_home = get_user_home_dir();
-    trustee_tui::run(merged_config, secrets, build_info(), Some(resume_info), user_home).await?;
+    let identity = std::env::var("TRUSTEE_IDENTITY").ok().filter(|s| !s.is_empty());
+    trustee_tui::run(merged_config, secrets, build_info(), Some(resume_info), user_home, identity).await?;
     Ok(())
 }
 
@@ -796,7 +835,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         
         // Merge embedded defaults with user overrides (from local or S3)
-        let merged_config = merge_config(&user_config_toml)?;
+        let mut merged_config = merge_config(&user_config_toml)?;
+        
+        // Inject agent identity from env var if provided (CLI mode).
+        // TUI/Web modes handle identity at the session level.
+        if let Ok(identity) = std::env::var("TRUSTEE_IDENTITY") {
+            if !identity.is_empty() {
+                merged_config = inject_identity_into_config(merged_config, &identity);
+            }
+        }
         
         // Inject secrets into process env for ${VAR} substitution in config.
         // Safe: single-threaded CLI process.
