@@ -598,8 +598,23 @@ pub async fn resume_session(
     let checkpoint_id = resume_info.checkpoint_id.clone();
     let iteration = resume_info.iteration;
 
-    // 3. Create a NEW MSU session for this resume
-    let session_name = format!("Resumed: {}", checkpoint_session_id);
+    // 3. Create a NEW MSU session for this resume.
+    // Name it from the checkpoint session's stored description (the LLM-generated
+    // friendly title) so resumed sessions are recognizable in live-session lists.
+    // Fall back to "Resumed: {sid}" when no description was ever persisted.
+    let session_name = match trustee_core::sessions::get_session_detail(
+        &config_toml,
+        &checkpoint_session_id,
+        home_dir.as_deref(),
+    )
+    .await
+    {
+        Ok(Some((summary, _))) => summary.description.filter(|d| !d.trim().is_empty()),
+        _ => None,
+    }
+    .map(|d| format!("Resumed: {}", d))
+    .unwrap_or_else(|| format!("Resumed: {}", checkpoint_session_id));
+
     let new_sid = state
         .create_session(&user_key, Some(session_name), None)
         .await
