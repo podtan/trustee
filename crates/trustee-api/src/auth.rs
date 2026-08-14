@@ -1242,6 +1242,32 @@ async fn mcp_status_handler(
                     "connected": connected,
                     "servers": servers_using,
                 }));
+            } else if cred_type == "service-account" {
+                // Long-lived service token, exchanged lazily (RFC 8693) by the
+                // agent at runtime. "Connected" = the service_token resolved to
+                // a non-empty value in this (already ${VAR}-substituted) config.
+                let token = cred_config
+                    .get("service_token")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                result.push(serde_json::json!({
+                    "credential": cred_name,
+                    "type": cred_type,
+                    "connected": !token.is_empty(),
+                    "servers": servers_using,
+                }));
+            } else if cred_type == "static" {
+                // Static token — connected when it resolved non-empty.
+                let token = cred_config
+                    .get("token")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                result.push(serde_json::json!({
+                    "credential": cred_name,
+                    "type": cred_type,
+                    "connected": !token.is_empty(),
+                    "servers": servers_using,
+                }));
             } else if cred_type == "web-interactive" || cred_type == "interactive" {
                 // Check token store
                 let status = match token_store.load(cred_name) {

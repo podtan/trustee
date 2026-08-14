@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.13] - 2026-08-14
+
+### Fixed
+- **fix(web): MCP status panel showed "No MCP credentials configured" for service-account/static credentials** — the `/auth/mcp/status` handler only emitted `web-session`, `web-interactive`, and `interactive` types, silently skipping `service-account` and `static` credentials. Both are now listed: `connected: true` when their token resolved non-empty (exchange happens lazily at runtime). UI labels: "Configured (auto)" / "Token missing". Pre-existing gap (not caused by the burger-menu move), verified against a real `kanidm_pdt` service-account credential serving pdt/nghr/trp.
+
+### Changed (deps)
+- trustee-api 0.7.21, trustee-web 0.1.16
+
 ## [0.9.12] - 2026-08-14
 
 ### Fixed

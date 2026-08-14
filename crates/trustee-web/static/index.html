@@ -2104,7 +2104,7 @@ async function fetchMcpStatus() {
 
 function renderMcpStatus(credentials) {
   if (!credentials || !credentials.length) {
-    mcpStatusBody.innerHTML = '<div class="sessions-empty">No MCP credentials configured.<br>Add credentials in trustee.toml.</div>';
+    mcpStatusBody.innerHTML = '<div class="sessions-empty">No MCP credentials in config.<br>Define them under [mcp.credentials] in trustee.toml.</div>';
     return;
   }
 
@@ -2116,7 +2116,9 @@ function renderMcpStatus(credentials) {
     const dotClass = cred.connected ? 'ok' : 'fail';
     const statusText = cred.type === 'web-session'
       ? (cred.connected ? 'Session (auto)' : 'No session')
-      : (cred.connected ? 'Connected' : 'Not connected');
+      : (cred.type === 'service-account' || cred.type === 'static')
+        ? (cred.connected ? 'Configured (auto)' : 'Token missing')
+        : (cred.connected ? 'Connected' : 'Not connected');
 
     let metaHtml = `<span style="color:#888">${escapeHtml(cred.type)}</span> · <span>${statusText}</span>`;
     if (cred.expires_at && cred.connected && cred.type !== 'web-session') {
