@@ -595,6 +595,14 @@
     }
     .session-card:hover { border-color: #444; background: #1e1e32; }
     .session-card.current-project { border-left: 3px solid #60a5fa; }
+    .session-card.live { border-left: 3px solid #10b981; }
+    .live-sessions-label {
+      font-size: 11px; color: #666; text-transform: uppercase;
+      letter-spacing: 0.05em; margin: 18px 0 8px 2px;
+    }
+    .session-badge.running { color: #fbbf24; border-color: #fbbf24; }
+    .session-badge.idle { color: #4ade80; border-color: #4ade80; }
+    .session-badge.cancelling { color: #f87171; border-color: #f87171; }
     .session-card-info { flex: 1; min-width: 0; overflow: hidden; }
     .session-card-id {
       font-size: 13px; font-weight: 600; color: #e0e0e0;
@@ -1481,7 +1489,13 @@ async function sendCommand() {
   document.getElementById('btn-send').disabled = true;
   document.getElementById('input').disabled = true;
 
-  await fetch(API + '/api/v1/session/command', {
+  // Session-scoped endpoint when attached to a specific live session —
+  // the legacy active-session route would send commands to the wrong
+  // session in multi-session mode.
+  const cmdUrl = currentSessionId
+    ? API + '/api/v1/sessions/' + encodeURIComponent(currentSessionId) + '/command'
+    : API + '/api/v1/session/command';
+  await fetch(cmdUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1510,7 +1524,12 @@ async function sendCommand() {
 }
 
 async function cancelWorkflow() {
-  await fetch(API + '/api/v1/session/cancel', { method: 'POST' });
+  // Session-scoped when attached to a specific session, else legacy active-session
+  if (currentSessionId) {
+    await fetch(API + '/api/v1/sessions/' + encodeURIComponent(currentSessionId) + '/cancel', { method: 'POST' });
+  } else {
+    await fetch(API + '/api/v1/session/cancel', { method: 'POST' });
+  }
 }
 
 async function doHandoff() {
@@ -1801,8 +1820,97 @@ async function fetchSessions() {
     }
     const data = await res.json();
     renderSessionCards(data.sessions || []);
+    await renderLiveSessions(); // appended below checkpoint cards
   } catch (e) {
     sessionsBody.innerHTML = '<div class="sessions-empty">Failed to load sessions. Please try again.</div>';
+  }
+}
+
+// --- Live sessions (in-memory, agent-side) ---
+// Uses GET /api/v1/sessions/live. Attaching switches this page to the
+// session-scoped endpoints (command/cancel/handoff/WS) so commands go to
+// the selected session, not the "active" one.
+let liveSessions = [];
+
+async function renderLiveSessions() {
+  try {
+    const res = await fetch(API + '/api/v1/sessions/live');
+    if (!res.ok) return;
+    const data = await res.json();
+    liveSessions = data.sessions || [];
+  } catch {
+    return;
+  }
+  if (!liveSessions.length) return;
+
+  const label = document.createElement('div');
+  label.className = 'live-sessions-label';
+  label.textContent = '⚡ Live Sessions';
+  sessionsBody.appendChild(label);
+
+  for (const s of liveSessions) {
+    const card = document.createElement('div');
+    card.className = 'session-card live';
+    const state = (s.workflow_state || 'idle').toLowerCase();
+    const stateBadge = `<span class="session-badge ${state}">${state}</span>`;
+    const name = s.session_name || (s.session_id || '').slice(0, 24) + '…';
+    const timeAgo = formatSessionTimeAgo(s.last_active || s.created_at);
+    card.innerHTML = `
+      <div class="session-card-info">
+        <div class="session-card-id">${escapeHtml(name)}</div>
+        <div class="session-card-meta">
+          <span>${timeAgo}</span>
+          ${stateBadge}
+        </div>
+      </div>
+      <div class="session-card-actions">
+        <button onclick="attachLiveSession('${escapeHtml(s.session_id)}')">Open</button>
+      </div>
+    `;
+    sessionsBody.appendChild(card);
+  }
+}
+
+async function attachLiveSession(sessionId) {
+  currentSessionId = sessionId;
+  window._hasSession = true;
+  outputEl.innerHTML = '';
+  updateState('Idle');
+  closeSessionsOverlay();
+  connectSessionWs(sessionId);
+  loadSessionHistory(sessionId);
+  showToast('Attached to live session', 'success');
+}
+
+// Connect the page to a specific session's WS stream.
+function connectSessionWs(sessionId) {
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+  const url = (API.startsWith('https') ? 'wss' : 'ws') + '://'
+    + window.location.host + '/api/v1/sessions/' + encodeURIComponent(sessionId) + '/stream';
+  ws = new WebSocket(url);
+  ws.onopen = () => { wsReconnectDelay = 1000; };
+  ws.onmessage = (event) => { handleMessage(JSON.parse(event.data)); };
+  ws.onclose = () => {
+    setTimeout(() => {
+      if (currentSessionId) connectSessionWs(currentSessionId);
+      else if (!ws || ws.readyState === WebSocket.CLOSED) connectWS();
+    }, wsReconnectDelay);
+    wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_MAX_RECONNECT_DELAY);
+  };
+}
+
+// Load the conversation history for a live session's checkpoint ID.
+async function loadSessionHistory(sessionId) {
+  try {
+    const res = await fetch(API + '/api/v1/sessions/' + encodeURIComponent(sessionId) + '/history');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.messages && data.messages.length) {
+      outputEl.innerHTML = '';
+      renderHistory(data);
+    }
+  } catch {
+    // best-effort
   }
 }
 
