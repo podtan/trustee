@@ -130,6 +130,7 @@ pub async fn run(
         .route("/api/v1/health", get(routes::health))
         .nest("/auth", auth::auth_routes())
         // Protected API routes
+        .route("/api/v1/models", get(routes::list_models))
         .route("/api/v1/session", get(routes::get_session))
         .route("/api/v1/session/command", post(routes::post_command))
         .route("/api/v1/session/cancel", post(routes::post_cancel))
