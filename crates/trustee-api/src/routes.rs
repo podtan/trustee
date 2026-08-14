@@ -60,6 +60,11 @@ pub struct CommandRequest {
     /// identity yet, it is set before executing the command.
     #[serde(default)]
     pub identity: Option<String>,
+    /// Optional model override — name of a provider from `[llm.providers.{name}]`
+    /// in the config TOML. When set, that provider's model/base_url/api_key
+    /// override `[llm.provider]` for this command.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,6 +129,9 @@ pub struct CreateSessionRequest {
     /// Optional agent identity content prepended to the system prompt.
     #[serde(default)]
     pub identity: Option<String>,
+    /// Optional model override — name of a provider from `[llm.providers.{name}]`.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,6 +155,9 @@ pub struct NewSessionRequest {
     /// Optional agent identity content prepended to the system prompt.
     #[serde(default)]
     pub identity: Option<String>,
+    /// Optional model override — name of a provider from `[llm.providers.{name}]`.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -632,7 +643,7 @@ pub async fn new_session(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let session_id = state
-        .create_session(&user_key, req.session_name, req.identity)
+        .create_session(&user_key, req.session_name.clone(), req.identity.clone())
         .await
         .map_err(|e| match e {
             SessionError::MaxSessionsReached(n) => (
@@ -641,6 +652,14 @@ pub async fn new_session(
             ),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         })?;
+
+    // Set model override on the new session if provided.
+    if let Some(ref model) = req.model {
+        if let Some((session_arc, _)) = state.get_session(&user_key, &session_id).await {
+            let mut session = session_arc.lock().await;
+            session.model = Some(model.clone());
+        }
+    }
 
     // Broadcast so WebSocket clients know to reset their view
     let (_, _ws_tx, ws_tx, _token_store) = state.ensure_active_session(&user_key).await;
@@ -666,7 +685,7 @@ pub async fn create_session(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let session_id = state
-        .create_session(&user_key, req.session_name, req.identity)
+        .create_session(&user_key, req.session_name.clone(), req.identity.clone())
         .await
         .map_err(|e| match e {
             SessionError::MaxSessionsReached(n) => (
@@ -675,6 +694,14 @@ pub async fn create_session(
             ),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         })?;
+
+    // Set model override on the new session if provided.
+    if let Some(ref model) = req.model {
+        if let Some((session_arc, _)) = state.get_session(&user_key, &session_id).await {
+            let mut session = session_arc.lock().await;
+            session.model = Some(model.clone());
+        }
+    }
 
     // If resume_from is provided, set resume_info on the new session
     if let Some(resume_from) = req.resume_from {
@@ -985,6 +1012,9 @@ async fn execute_command_inner(
         if session.identity.is_none() {
             session.identity = req.identity;
         }
+
+        // Set model override for this command (consumed by execute_command).
+        session.model = req.model;
 
         let permit = state
             .workflow_semaphore
