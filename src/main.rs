@@ -415,6 +415,52 @@ fn inject_identity_into_config(config_toml: String, identity: &str) -> String {
     toml::to_string(&table).unwrap_or(config_toml)
 }
 
+/// Replace `${VAR_NAME}` placeholders in the config TOML with values from
+/// `secrets`. Falls back to the process environment for vars not in the map.
+///
+/// Mirrors the substitution in trustee-api's `apply_user_isolation()` so the
+/// CLI path behaves identically to the web path for secrets referenced from
+/// TOML (e.g. `[llm.provider] api_key = "${OPENAI_API_KEY}"`).
+///
+/// Best-effort: unresolvable placeholders are left in place.
+fn substitute_config_vars(config_toml: &mut String, secrets: &HashMap<String, String>) {
+    let mut result = config_toml.clone();
+    let mut any = false;
+
+    // Collect ${VAR} occurrences
+    let mut i = 0;
+    let bytes = config_toml.as_bytes();
+    while let Some(start) = config_toml[i..].find("${") {
+        let start = i + start;
+        if let Some(end_rel) = config_toml[start + 2..].find('}') {
+            let end = start + 2 + end_rel;
+            let var = &config_toml[start + 2..end];
+            if !var.is_empty()
+                && var
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                let value = secrets
+                    .get(var)
+                    .cloned()
+                    .or_else(|| std::env::var(var).ok());
+                if let Some(value) = value {
+                    result = result.replacen(&config_toml[start..end + 1], &value, 1);
+                    any = true;
+                }
+            }
+            i = end + 1;
+        } else {
+            break;
+        }
+    }
+
+    let _ = bytes;
+    if any {
+        *config_toml = result;
+    }
+}
+
 /// Restore terminal to normal state — called from panic hook and signal handlers.
 /// Uses `let _` so all steps run even if one fails.
 #[cfg(feature = "tui")]
@@ -844,7 +890,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 merged_config = inject_identity_into_config(merged_config, &identity);
             }
         }
-        
+
+        // Substitute ${VAR} placeholders in the config TOML using the loaded
+        // secrets. This is REQUIRED for [llm.provider] api_key = "${OPENAI_API_KEY}"
+        // style references — ABK's runner skips env-var injection when a
+        // RunContext is present (multi-user guard), so the substitution must
+        // happen here before the config reaches the agent.
+        substitute_config_vars(&mut merged_config, &secrets);
+
         // Inject secrets into process env for ${VAR} substitution in config.
         // Safe: single-threaded CLI process.
         inject_secrets_into_env(&secrets);

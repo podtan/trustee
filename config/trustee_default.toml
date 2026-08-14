@@ -93,44 +93,50 @@ exclude_hidden = true
 endpoint = "chat/completions"
 enable_streaming = true
 
-# Provider configuration for model/base_url/api_key from TOML.
-# When present, these values take priority over environment variables
-# (OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_DEFAULT_MODEL, LLM_PROVIDER).
-# This enables per-user LLM config in multi-tenant web mode.
+# Active provider — ONE endpoint with ONE OR MORE models.
 #
-# The api_key supports ${ENV_VAR} substitution (resolved from .env by
-# trustee before parsing), so secrets are never hardcoded in TOML.
+# Field semantics:
+#   name          — display label only (never selects the implementation)
+#   provider_type — "openai" (native, default) or "wasm" (extension system)
+#   base_url      — endpoint URL. NOT a secret — belongs here, not in .env.
+#   api_key       — secret. Reference via ${ENV_VAR} resolved from .env.
+#   model         — default model for this endpoint
+#   models        — all selectable models (populates the web UI model picker).
+#                   Falls back to [model] when absent.
+#
+# Env var fallbacks (when fields are absent here):
+#   BASE_URL (preferred) or OPENAI_BASE_URL (legacy)  → base_url
+#   OPENAI_API_KEY                                     → api_key
+#   OPENAI_DEFAULT_MODEL                               → model
 #
 # Per-user override: ~/.trustee/users/{hash}/config/trustee.toml can
-# override [llm.provider] with a different model/base_url.
+# replace this entire section with a different endpoint/models.
 [llm.provider]
-name = "openai-unofficial"
-model = "gpt-4o-mini"
+name = "openai"
+provider_type = "openai"
 base_url = "https://api.openai.com/v1"
 api_key = "${OPENAI_API_KEY}"
+model = "gpt-4o-mini"
+models = ["gpt-4o-mini", "gpt-4o"]
 
-# Named alternative providers — selectable per-command via the `model` field
-# in API requests (e.g. { "command": "do work", "model": "gpt4o" }).
-# The matching provider's config overrides [llm.provider] for that command.
-# Each entry inherits the same ProviderConfig fields (name, model, base_url, api_key).
+# Alternative providers — different endpoints/keys selectable per command
+# via the `model` field in API requests. When a requested model matches a
+# key here AND that entry has base_url/api_key/models, the whole provider
+# is swapped (endpoint + key + models).
 #
-# Per-user: users can define their own [llm.providers.*] in their
-# ~/.trustee/users/{hash}/config/trustee.toml with different models/keys.
-#
-# [llm.providers.gpt4o]
-# model = "gpt-4o"
-# base_url = "https://api.openai.com/v1"
-# api_key = "${OPENAI_API_KEY}"
-#
-# [llm.providers.claude]
-# model = "claude-3.5-sonnet"
+# [llm.providers.anthropic]
+# name = "anthropic"
 # base_url = "https://api.anthropic.com"
 # api_key = "${ANTHROPIC_API_KEY}"
+# model = "claude-3.5-sonnet"
+# models = ["claude-3.5-sonnet", "claude-3-5-haiku"]
 #
-# [llm.providers.local]
-# model = "llama3"
+# [llm.providers.ollama]
+# name = "ollama-local"
 # base_url = "http://localhost:11434/v1"
 # api_key = "ollama"
+# model = "llama3"
+# models = ["llama3", "llama3-70b", "mistral"]
 
 # Utility LLM Configuration (optional)
 # Used for lightweight background tasks like session title generation.

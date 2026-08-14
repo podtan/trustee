@@ -175,22 +175,33 @@ pub struct NewSessionResponse {
 // Models DTOs
 // ---------------------------------------------------------------------------
 
-/// One selectable LLM model.
+/// One selectable model entry.
 #[derive(Debug, Serialize)]
 pub struct ModelInfo {
-    /// Provider id — the key in `[llm.providers.{id}]`. `None` = the default
-    /// `[llm.provider]`.
-    pub id: Option<String>,
-    /// The actual model string sent to the LLM API (e.g. "gpt-4o").
-    pub model: Option<String>,
+    /// The literal model string sent to the LLM API (e.g. "GLM-5.2").
+    /// This is what the client sends back in the `model` field.
+    pub model: String,
+}
+
+/// One provider (endpoint) with its selectable models.
+#[derive(Debug, Serialize)]
+pub struct ProviderInfo {
+    /// Display label (e.g. "glm-zai").
+    pub name: Option<String>,
+    /// Base URL (not a secret). Useful for UI tooltips.
+    pub base_url: Option<String>,
+    /// Default model for this endpoint.
+    pub default_model: Option<String>,
+    /// All selectable models (single-element if `models` was absent).
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ModelsResponse {
-    /// The default model (from `[llm.provider]`). Always present.
-    pub default: ModelInfo,
-    /// Named alternative providers from `[llm.providers.*]`.
-    pub models: Vec<ModelInfo>,
+    /// The active provider (from `[llm.provider]`). Always present.
+    pub provider: ProviderInfo,
+    /// Alternative providers (from `[llm.providers.*]`).
+    pub providers: Vec<ProviderInfo>,
 }
 
 // ---------------------------------------------------------------------------
@@ -242,12 +253,12 @@ pub async fn health() -> Json<HealthResponse> {
     })
 }
 
-/// GET /api/v1/models — list available LLM models for this user.
+/// GET /api/v1/models — list available LLM providers and their models.
 ///
 /// Resolves the per-user config (shared + overlay + ${VAR} substitution),
-/// then extracts `[llm.provider]` (default) and `[llm.providers.*]` (named
-/// alternatives). API keys and base URLs are NEVER returned — only the
-/// provider id and the model string.
+/// then extracts `[llm.provider]` (active) and `[llm.providers.*]`
+/// (alternatives). For each provider, returns its display name, base_url
+/// (not a secret), and full `models` list. API keys are NEVER returned.
 pub async fn list_models(
     State(state): State<ServerState>,
     headers: axum::http::HeaderMap,
@@ -256,50 +267,73 @@ pub async fn list_models(
         .await
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
+    let empty = || ModelsResponse {
+        provider: ProviderInfo {
+            name: None,
+            base_url: None,
+            default_model: None,
+            models: vec![],
+        },
+        providers: vec![],
+    };
+
     let Some(config_toml) = state.resolve_user_config(&user_key) else {
-        // No config loaded — return just the implicit default
-        return Ok(with_rolling_cookie(
-            Json(ModelsResponse {
-                default: ModelInfo { id: None, model: None },
-                models: vec![],
-            })
-            .into_response(),
-            cookie,
-        ));
+        return Ok(with_rolling_cookie(Json(empty()).into_response(), cookie));
     };
 
     let Ok(table) = config_toml.parse::<toml::Value>() else {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to parse config".to_string()));
+        return Ok(with_rolling_cookie(Json(empty()).into_response(), cookie));
     };
 
-    let extract_model = |v: &toml::Value| -> Option<String> {
-        v.get("model").and_then(|m| m.as_str()).map(|s| s.to_string())
+    let get_str = |v: &toml::Value, k: &str| -> Option<String> {
+        v.get(k).and_then(|m| m.as_str()).map(|s| s.to_string())
+    };
+    let get_models = |v: &toml::Value| -> Vec<String> {
+        v.get("models")
+            .and_then(|m| m.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let to_info = |v: &toml::Value| -> ProviderInfo {
+        let default_model = get_str(v, "model");
+        let mut models = get_models(v);
+        // Fallback: single-element list from `model` when `models` absent.
+        if models.is_empty() {
+            if let Some(ref m) = default_model {
+                models = vec![m.clone()];
+            }
+        }
+        ProviderInfo {
+            name: get_str(v, "name"),
+            base_url: get_str(v, "base_url"),
+            default_model,
+            models,
+        }
     };
 
-    // Default from [llm.provider]
-    let default = table
+    let provider = table
         .get("llm")
         .and_then(|l| l.get("provider"))
-        .map(|p| ModelInfo { id: None, model: extract_model(p) })
-        .unwrap_or(ModelInfo { id: None, model: None });
+        .map(|p| to_info(p))
+        .unwrap_or(ProviderInfo {
+            name: None,
+            base_url: None,
+            default_model: None,
+            models: vec![],
+        });
 
-    // Named providers from [llm.providers.*]
-    let models = table
+    let providers = table
         .get("llm")
         .and_then(|l| l.get("providers"))
         .and_then(|p| p.as_table())
-        .map(|providers| {
-            providers
-                .iter()
-                .map(|(id, cfg)| ModelInfo {
-                    id: Some(id.clone()),
-                    model: extract_model(cfg),
-                })
-                .collect::<Vec<_>>()
-        })
+        .map(|ps| ps.iter().map(|(_, v)| to_info(v)).collect::<Vec<_>>())
         .unwrap_or_default();
 
-    let resp = Json(ModelsResponse { default, models });
+    let resp = Json(ModelsResponse { provider, providers });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
