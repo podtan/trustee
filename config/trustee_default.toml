@@ -109,6 +109,29 @@ model = "gpt-4o-mini"
 base_url = "https://api.openai.com/v1"
 api_key = "${OPENAI_API_KEY}"
 
+# Named alternative providers — selectable per-command via the `model` field
+# in API requests (e.g. { "command": "do work", "model": "gpt4o" }).
+# The matching provider's config overrides [llm.provider] for that command.
+# Each entry inherits the same ProviderConfig fields (name, model, base_url, api_key).
+#
+# Per-user: users can define their own [llm.providers.*] in their
+# ~/.trustee/users/{hash}/config/trustee.toml with different models/keys.
+#
+# [llm.providers.gpt4o]
+# model = "gpt-4o"
+# base_url = "https://api.openai.com/v1"
+# api_key = "${OPENAI_API_KEY}"
+#
+# [llm.providers.claude]
+# model = "claude-3.5-sonnet"
+# base_url = "https://api.anthropic.com"
+# api_key = "${ANTHROPIC_API_KEY}"
+#
+# [llm.providers.local]
+# model = "llama3"
+# base_url = "http://localhost:11434/v1"
+# api_key = "ollama"
+
 # Utility LLM Configuration (optional)
 # Used for lightweight background tasks like session title generation.
 # When absent, the main provider is used with sensible defaults.

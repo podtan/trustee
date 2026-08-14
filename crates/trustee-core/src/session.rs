@@ -96,6 +96,13 @@ pub struct Session {
     /// clone inside `execute_command()` and `trigger_handoff()`.
     /// None = use the config's default system template.
     pub identity: Option<String>,
+
+    /// Optional model override for the next command.
+    /// When set, `[llm.providers.{model}]` from the config TOML is injected
+    /// into `[llm.provider]` before creating the agent, switching the LLM
+    /// for that command. Consumed per-command (cleared after injection).
+    /// None = use the default `[llm.provider]`.
+    pub model: Option<String>,
 }
 
 impl Session {
@@ -134,6 +141,7 @@ impl Session {
             home_dir: None,
             workflow_permit: None,
             identity: None,
+            model: None,
         };
         (session, workflow_rx)
     }
@@ -378,6 +386,10 @@ impl Session {
 
         // Inject identity into the config clone if present.
         let config_toml = inject_identity(config_toml, &self.identity);
+
+        // Inject model override (select from [llm.providers.{model}]) if present.
+        let model_override = self.model.take();
+        let config_toml = inject_model(config_toml, model_override);
 
         let secrets = self.secrets.clone().unwrap_or_default();
         // Clone secrets for post-completion title generation (secrets are moved into run_task below)
@@ -631,8 +643,11 @@ impl Session {
         // Inject identity into the config clone if present.
         let config_toml = inject_identity(config_toml, &self.identity);
 
-        let tx = self.workflow_tx.clone();
+        // Inject model override for handoff briefing (use same model as the session).
+        let model_override = self.model.clone();
+        let config_toml = inject_model(config_toml, model_override);
 
+        let tx = self.workflow_tx.clone();
         let agent_name = self.agent_name.clone();
         let project_id = self.project_id.clone();
         let project_name = self.project_name.clone();
@@ -794,7 +809,49 @@ fn inject_identity(config_toml: String, identity: &Option<String>) -> String {
     toml::to_string(&table).unwrap_or(config_toml)
 }
 
-/// A sink that forwards ABK `OutputEvent`s to the message channel.
+/// Override `[llm.provider]` with a named provider from `[llm.providers.{model}]`.
+///
+/// Looks up the `model` key in `[llm.providers]`, and if found, copies that
+/// provider's config into `[llm.provider]` (overriding the default). This lets
+/// each command use a different LLM without restarting.
+///
+/// If `model` is `None`, or the named provider doesn't exist in the config,
+/// the config is returned unchanged (falls back to `[llm.provider]`).
+fn inject_model(config_toml: String, model: Option<String>) -> String {
+    let Some(model_name) = model.as_ref().filter(|s| !s.is_empty()) else {
+        return config_toml;
+    };
+
+    let Ok(mut table) = config_toml.parse::<toml::Value>() else {
+        return config_toml;
+    };
+
+    // Navigate to llm.providers.{model_name}
+    let provider_config = table
+        .get("llm")
+        .and_then(|v| v.get("providers"))
+        .and_then(|v| v.get(model_name.as_str()))
+        .cloned();
+
+    if let Some(selected) = provider_config {
+        // Inject into llm.provider (replacing whatever was there)
+        if let Some(llm) = table.get_mut("llm").and_then(|v| v.as_table_mut()) {
+            // Ensure the provider config has a name if missing
+            let mut selected = selected.clone();
+            if let Some(provider_table) = selected.as_table_mut() {
+                if !provider_table.contains_key("name") {
+                    provider_table.insert(
+                        "name".to_string(),
+                        toml::Value::String("openai-unofficial".to_string()),
+                    );
+                }
+            }
+            llm.insert("provider".to_string(), selected);
+        }
+    }
+
+    toml::to_string(&table).unwrap_or(config_toml)
+}
 ///
 /// Includes a 3-state atomic state machine (IDLE/REASONING/CONTENT) that
 /// inserts blank separator lines when transitioning between reasoning and

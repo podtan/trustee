@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.10] - 2026-08-10
+
+### Added
+- **feat: multi-provider LLM selection** — Define multiple named LLM providers in TOML via `[llm.providers.{name}]`, then select which one to use per-command via the `model` field in API requests. The selected provider's config (model, base_url, api_key) overrides `[llm.provider]` for that command only. Works with per-user config isolation — each user can define their own providers.
+  - **ABK** (0.12.16): Added `providers: HashMap<String, ProviderConfig>` to `LlmConfig`.
+  - **trustee-core** (0.6.10): Added `Session.model: Option<String>` field. `inject_model()` helper replaces `[llm.provider]` with the selected `[llm.providers.{name}]` entry in the config TOML clone before each command.
+  - **trustee-api** (0.7.18): Added `model: Option<String>` to `CommandRequest`, `CreateSessionRequest`, and `NewSessionRequest`.
+  - **Config**: Added commented `[llm.providers.*]` examples to `trustee_default.toml`.
+
+### Changed
+- **deps: bump abk to 0.12.16, trustee-core to 0.6.10, trustee-api to 0.7.18, trustee-tui to 0.3.5**
+
 ## [0.9.9] - 2026-08-10
 
 ### Added
