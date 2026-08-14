@@ -809,14 +809,19 @@ fn inject_identity(config_toml: String, identity: &Option<String>) -> String {
     toml::to_string(&table).unwrap_or(config_toml)
 }
 
-/// Override `[llm.provider]` with a named provider from `[llm.providers.{model}]`.
+/// Override the model for the next command.
 ///
-/// Looks up the `model` key in `[llm.providers]`, and if found, copies that
-/// provider's config into `[llm.provider]` (overriding the default). This lets
-/// each command use a different LLM without restarting.
+/// `model` is a LITERAL model string (e.g. "GLM-4.7-Flash", "gpt-4o"),
+/// not necessarily a provider key. Resolution order:
 ///
-/// If `model` is `None`, or the named provider doesn't exist in the config,
-/// the config is returned unchanged (falls back to `[llm.provider]`).
+/// 1. If it matches a KEY in `[llm.providers.*]` → swap to that provider,
+///    use its default model.
+/// 2. Else if it appears in some named provider's `models` list (or equals
+///    its `model`) → swap to that provider AND set that model on it.
+/// 3. Else — set it as the `model` on the current provider. This lets users
+///    pass any model name their endpoint accepts even if unlisted.
+///
+/// If `model` is `None`, the config is returned unchanged.
 fn inject_model(config_toml: String, model: Option<String>) -> String {
     let Some(model_name) = model.as_ref().filter(|s| !s.is_empty()) else {
         return config_toml;
@@ -826,28 +831,74 @@ fn inject_model(config_toml: String, model: Option<String>) -> String {
         return config_toml;
     };
 
-    // Navigate to llm.providers.{model_name}
-    let provider_config = table
-        .get("llm")
-        .and_then(|v| v.get("providers"))
-        .and_then(|v| v.get(model_name.as_str()))
-        .cloned();
+    let llm = match table.get_mut("llm").and_then(|v| v.as_table_mut()) {
+        Some(l) => l,
+        None => return config_toml,
+    };
 
-    if let Some(selected) = provider_config {
-        // Inject into llm.provider (replacing whatever was there)
-        if let Some(llm) = table.get_mut("llm").and_then(|v| v.as_table_mut()) {
-            // Ensure the provider config has a name if missing
-            let mut selected = selected.clone();
-            if let Some(provider_table) = selected.as_table_mut() {
-                if !provider_table.contains_key("name") {
-                    provider_table.insert(
-                        "name".to_string(),
-                        toml::Value::String("openai-unofficial".to_string()),
-                    );
+    // Helper: is this named-provider entry a real provider (vs ambiguous)?
+    let looks_like_provider = |v: &toml::Value| -> bool {
+        v.as_table()
+            .map(|t| {
+                t.contains_key("base_url")
+                    || t.contains_key("api_key")
+                    || t.contains_key("models")
+            })
+            .unwrap_or(false)
+    };
+    // Helper: does this entry offer this model?
+    let offers_model = |v: &toml::Value| -> bool {
+        v.get("models")
+            .and_then(|m| m.as_array())
+            .map(|arr| arr.iter().any(|m| m.as_str() == Some(model_name)))
+            .unwrap_or(false)
+            || v.get("model").and_then(|m| m.as_str()) == Some(model_name.as_str())
+    };
+
+    let providers = llm.get("providers").cloned();
+
+    // Case 1: model_name is a provider KEY → swap, keep provider's default model.
+    if let Some(ref ps) = providers {
+        if let Some(selected) = ps.get(model_name.as_str()) {
+            if looks_like_provider(selected) {
+                let mut selected = selected.clone();
+                if let Some(st) = selected.as_table_mut() {
+                    st.entry("provider_type".to_string())
+                        .or_insert_with(|| toml::Value::String("openai".to_string()));
+                }
+                llm.insert("provider".to_string(), selected);
+                return toml::to_string(&table).unwrap_or(config_toml);
+            }
+        }
+    }
+
+    // Case 2: model_name is OFFERED by some named provider → swap + set model.
+    if let Some(ref ps) = providers {
+        if let Some(ptable) = ps.as_table() {
+            for (_key, entry) in ptable {
+                if looks_like_provider(entry) && offers_model(entry) {
+                    let mut selected = entry.clone();
+                    if let Some(st) = selected.as_table_mut() {
+                        st.insert(
+                            "model".to_string(),
+                            toml::Value::String(model_name.clone()),
+                        );
+                        st.entry("provider_type".to_string())
+                            .or_insert_with(|| toml::Value::String("openai".to_string()));
+                    }
+                    llm.insert("provider".to_string(), selected);
+                    return toml::to_string(&table).unwrap_or(config_toml);
                 }
             }
-            llm.insert("provider".to_string(), selected);
         }
+    }
+
+    // Case 3: literal model string — set it on the current provider.
+    if let Some(provider) = llm.get_mut("provider").and_then(|p| p.as_table_mut()) {
+        provider.insert(
+            "model".to_string(),
+            toml::Value::String(model_name.clone()),
+        );
     }
 
     toml::to_string(&table).unwrap_or(config_toml)

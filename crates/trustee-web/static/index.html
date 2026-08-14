@@ -775,6 +775,13 @@
     }
     .model-check { color: #60a5fa; font-size: 16px; flex-shrink: 0; visibility: hidden; }
     .model-option.selected .model-check { visibility: visible; }
+    .model-group-label {
+      font-size: 10px; color: #666; text-transform: uppercase;
+      letter-spacing: 0.05em; padding: 12px 4px 6px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      word-break: break-all;
+    }
+    .model-group-label:first-child { padding-top: 4px; }
   </style>
 </head>
 <body>
@@ -2173,12 +2180,13 @@ function checkMcpCallback() {
 }
 
 // --- Model selection ---
-// selectedModel: null = default provider, string = provider id from [llm.providers.*]
-// Persisted per-browser. Sent as `model` field on every command.
+// selectedModel: null = provider default, string = literal model name
+// (e.g. "GLM-4.7-Flash"). Sent as `model` on every command.
+// Persisted per-browser.
 const modelsOverlay = document.getElementById('models-overlay');
 const modelsBody = document.getElementById('models-body');
 let selectedModel = JSON.parse(localStorage.getItem('trustee_model') || 'null');
-let modelsData = null; // { default: {model}, models: [{id, model}] }
+let modelsData = null; // { provider: {...}, providers: [...] }
 
 document.getElementById('models-close').addEventListener('click', closeModelsOverlay);
 modelsOverlay.addEventListener('click', (e) => {
@@ -2188,12 +2196,9 @@ modelsOverlay.addEventListener('click', (e) => {
 function updateMenuModelValue() {
   const el = document.getElementById('menu-model-value');
   if (!modelsData) { el.textContent = 'Default'; return; }
-  if (!selectedModel) {
-    el.textContent = modelsData.default.model || 'Default';
-  } else {
-    const m = modelsData.models.find(m => m.id === selectedModel);
-    el.textContent = m ? (m.model || m.id) : 'Default';
-  }
+  el.textContent = selectedModel
+    || modelsData.provider.default_model
+    || 'Default';
 }
 
 function openModelsOverlay() {
@@ -2231,38 +2236,57 @@ function renderModelOptions() {
   if (!modelsData) return;
   modelsBody.innerHTML = '';
 
-  const mkOption = (id, model, label) => {
+  const mkSection = (label) => {
+    const d = document.createElement('div');
+    d.className = 'model-group-label';
+    d.textContent = label;
+    modelsBody.appendChild(d);
+  };
+
+  const mkOption = (modelName, isDefault) => {
     const card = document.createElement('div');
-    card.className = 'model-option' + (selectedModel === id ? ' selected' : '');
+    card.className = 'model-option' + (selectedModel === modelName ? ' selected' : '');
     card.innerHTML = `
       <div class="model-option-info">
-        <div class="model-option-model">${escapeHtml(model || label)}</div>
-        <div class="model-option-id">${id ? escapeHtml(id) : 'default provider'}</div>
+        <div class="model-option-model">${escapeHtml(modelName)}</div>
+        <div class="model-option-id">${isDefault ? 'default' : ''}</div>
       </div>
       <span class="model-check">✓</span>
     `;
-    card.onclick = () => selectModel(id);
+    card.onclick = () => selectModel(modelName, isDefault);
     modelsBody.appendChild(card);
   };
 
-  // Default always first
-  mkOption(null, modelsData.default.model, 'Default');
+  // Active provider first
+  const p = modelsData.provider || {};
+  if (p.name) mkSection(p.name + (p.base_url ? ' · ' + p.base_url : ''));
+  const defaultModel = p.default_model;
+  for (const m of (p.models || [])) {
+    mkOption(m, m === defaultModel);
+  }
+  if (!(p.models || []).length) {
+    const d = document.createElement('div');
+    d.className = 'sessions-empty';
+    d.textContent = 'No models configured.';
+    modelsBody.appendChild(d);
+  }
 
-  // Named providers
-  for (const m of (modelsData.models || [])) {
-    mkOption(m.id, m.model || m.id, m.id);
+  // Alternative providers
+  for (const alt of (modelsData.providers || [])) {
+    if (alt.name) mkSection(alt.name + (alt.base_url ? ' · ' + alt.base_url : ''));
+    for (const m of (alt.models || [])) {
+      mkOption(m, m === alt.default_model);
+    }
   }
 }
 
-function selectModel(id) {
-  selectedModel = id;
-  localStorage.setItem('trustee_model', JSON.stringify(id));
+function selectModel(modelName, isDefault) {
+  // Selecting the default = clear override (send no model field)
+  selectedModel = isDefault ? null : modelName;
+  localStorage.setItem('trustee_model', JSON.stringify(selectedModel));
   renderModelOptions();
   updateMenuModelValue();
-  const label = id
-    ? ((modelsData.models.find(m => m.id === id) || {}).model || id)
-    : (modelsData.default.model || 'default');
-  showToast(`Model: ${label}`, 'success');
+  showToast(`Model: ${modelName}`, 'success');
   closeModelsOverlay();
 }
 

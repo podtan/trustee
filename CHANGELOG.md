@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.12] - 2026-08-14
+
+### Fixed
+- **fix: agent creation crash with non-"openai-unofficial" provider names** — `[llm.provider] name = "GLM-ZAI"` (any label) previously fell into the WASM-extension dispatch path and failed with "Failed to create LLM provider" when the extension feature was disabled. `name` is now a display label ONLY; implementation selection uses the new `provider_type` field ("openai" = native default, "wasm" = extension).
+- **fix: CLI 401 "token expired or incorrect"** — the CLI path never substituted `${VAR}` placeholders in the config TOML (ABK's runner skips env injection when a RunContext is present). Added `substitute_config_vars()` in main.rs, mirroring the web path's `apply_user_isolation()`. Verified working: real API calls succeed.
+
+### Changed
+- **base_url moved from .env to TOML** — `OPENAI_BASE_URL` is not a secret. It now belongs in `[llm.provider] base_url`. `BASE_URL` (new, preferred) and `OPENAI_BASE_URL` (legacy) env vars remain as fallbacks.
+- **BREAKING (config schema): multi-model providers** — `[llm.provider]` now supports `models = [...]` (one endpoint, many models) plus the existing `model` (default). The `model` field in API requests is now a LITERAL model string resolved as: (1) key in `[llm.providers.*]` → provider swap, (2) offered by a named provider → swap + select, (3) otherwise set on current provider.
+- **`GET /api/v1/models` response changed** — now returns `{ provider: {name, base_url, default_model, models[]}, providers: [...] }` grouped by endpoint; the web model picker groups options by provider.
+
+### Added
+- **ABK 0.12.18**: `ProviderConfig.models: Vec<String>`, `ProviderConfig.provider_type`, `effective_models()` helper.
+- Web UI model picker groups by provider with base_url shown in section headers.
+
+### Changed (deps)
+- abk 0.12.18, trustee-core 0.6.11, trustee-api 0.7.20, trustee-tui 0.3.6, trustee-web 0.1.15
+
 ## [0.9.11] - 2026-08-10
 
 ### Added
