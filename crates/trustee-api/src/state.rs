@@ -595,71 +595,114 @@ impl ServerState {
         let mut merged_secrets = shared_secrets.clone();
 
         if let Some(ref user_home) = user_home {
-            let user_env_path = user_home.join(".env");
-            if user_env_path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&user_env_path) {
-                    for line in content.lines() {
-                        let line = line.trim();
-                        if line.is_empty() || line.starts_with('#') {
-                            continue;
-                        }
-                        if let Some((key, value)) = line.split_once('=') {
-                            let key = key.trim().to_string();
-                            let value = value.trim()
-                                .trim_matches('"')
-                                .trim_matches('\'')
-                                .to_string();
-                            merged_secrets.insert(key, value);
-                        }
-                    }
-                    tracing::debug!(
-                        "Loaded {} per-user secrets from {}",
-                        merged_secrets.len() - shared_secrets.len(),
-                        user_env_path.display()
-                    );
-                }
+            if let Ok(merged) = self.load_user_secrets(user_home, &merged_secrets) {
+                merged_secrets = merged;
             }
         }
 
         // ── Per-user config overlay (Task 3) ────────────────────────────
-        //
-        // Load per-user config from ~/.trustee/users/{hash}/config/trustee.toml
-        // and deep-merge it on top of the shared config. Per-user keys
-        // override shared keys; missing keys inherit from shared.
         if let Some(ref user_home) = user_home {
-            let user_config_path = user_home.join("config").join("trustee.toml");
-            if user_config_path.exists() {
-                if let Ok(user_config_toml) = std::fs::read_to_string(&user_config_path) {
-                    if let (Ok(mut shared), Ok(overlay)) = (
-                        session.config_toml.as_ref()
-                            .unwrap_or(&String::new())
-                            .parse::<toml::Value>(),
-                        user_config_toml.parse::<toml::Value>(),
-                    ) {
-                        deep_merge_toml(&mut shared, &overlay);
-                        session.config_toml = toml::to_string(&shared).ok();
-                        tracing::debug!("Merged per-user config from {}", user_config_path.display());
-                    }
-                }
+            if let Some(merged) = self.merge_user_config(user_home, session.config_toml.as_deref()) {
+                session.config_toml = Some(merged);
+                tracing::debug!("Merged per-user config into session");
             }
         }
 
         // ── ${VAR} substitution (Task 4) ────────────────────────────────
-        //
-        // Replace ${VAR_NAME} in the config TOML with values from the
-        // merged secrets HashMap. Falls back to process env if not in
-        // the HashMap. This replaces the need for std::env::set_var.
         if let Some(ref mut config_toml) = session.config_toml {
             substitute_env_vars(config_toml, &merged_secrets);
         }
 
         // ── Strip per-user secrets (Task 5) ────────────────────────────
-        //
-        // Keep only shared secrets on session.secrets. When abk's
-        // run_task_from_raw_config() processes the session, its set_var
-        // loop only sees shared secrets (identical for all users → no race).
-        // Per-user secrets were already substituted into config_toml above.
         session.secrets = Some(shared_secrets);
+    }
+
+    /// Load secrets from a user's ~/.trustee/users/{hash}/.env and merge
+    /// on top of `base` (user wins). Returns the merged map.
+    fn load_user_secrets(
+        &self,
+        user_home: &std::path::Path,
+        base: &std::collections::HashMap<String, String>,
+    ) -> std::io::Result<std::collections::HashMap<String, String>> {
+        let user_env_path = user_home.join(".env");
+        if !user_env_path.exists() {
+            return Ok(base.clone());
+        }
+        let content = std::fs::read_to_string(&user_env_path)?;
+        let mut merged = base.clone();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim().to_string();
+                let value = value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+                merged.insert(key, value);
+            }
+        }
+        tracing::debug!("Loaded per-user secrets from {}", user_env_path.display());
+        Ok(merged)
+    }
+
+    /// Deep-merge a user's per-user config overlay on top of the shared
+    /// config. Returns the merged TOML string, or None if no overlay exists.
+    fn merge_user_config(
+        &self,
+        user_home: &std::path::Path,
+        shared_config: Option<&str>,
+    ) -> Option<String> {
+        let user_config_path = user_home.join("config").join("trustee.toml");
+        if !user_config_path.exists() {
+            return None;
+        }
+        let user_config_toml = std::fs::read_to_string(&user_config_path).ok()?;
+        let shared = shared_config
+            .unwrap_or("")
+            .parse::<toml::Value>()
+            .ok()?;
+        let overlay = user_config_toml.parse::<toml::Value>().ok()?;
+        let mut shared = shared;
+        deep_merge_toml(&mut shared, &overlay);
+        let merged = toml::to_string(&shared).ok()?;
+        tracing::debug!("Merged per-user config from {}", user_config_path.display());
+        Some(merged)
+    }
+
+    /// Resolve the fully-merged config TOML for a user WITHOUT creating a session.
+    ///
+    /// This is the read-only equivalent of the config resolution in
+    /// `apply_user_isolation`: shared config + per-user overlay + ${VAR}
+    /// substitution. Used by endpoints that need to inspect config (e.g.
+    /// listing available LLM models) without spawning a ghost session.
+    ///
+    /// Returns None if no shared config is loaded.
+    pub fn resolve_user_config(&self, user_key: &str) -> Option<String> {
+        let config_toml = self.config_toml.clone()?;
+
+        // Resolve user home dir (same hash scheme as apply_user_isolation)
+        let user_home = self.get_user_home_dir(user_key)?;
+
+        // Start from shared secrets; merge per-user .env on top
+        let mut merged_secrets = self.secrets.clone().unwrap_or_default();
+        if let Ok(merged) = self.load_user_secrets(&user_home, &merged_secrets) {
+            merged_secrets = merged;
+        }
+
+        // Merge per-user config overlay
+        let mut resolved = config_toml;
+        if let Some(merged) = self.merge_user_config(&user_home, Some(&resolved)) {
+            resolved = merged;
+        }
+
+        // Substitute ${VAR} from merged secrets
+        substitute_env_vars(&mut resolved, &merged_secrets);
+
+        Some(resolved)
     }
 
     /// Spawn a background drain task for a specific session's workflow receiver.

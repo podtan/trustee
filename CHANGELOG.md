@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.11] - 2026-08-10
+
+### Added
+- **feat(web): model picker UI + unified app menu** — The burger menu is now a unified dropdown containing Model, Sessions, and MCP Connections (replacing the separate header MCP button). Model selection lists `[llm.provider]` (default) and all `[llm.providers.*]` entries from the user's merged config; the choice is persisted in `localStorage` and sent as `model` on every command.
+  - **API**: New `GET /api/v1/models` endpoint returning `{ default: {model}, models: [{id, model}] }`. Resolves the per-user config (shared + overlay + `${VAR}` substitution) via the new `ServerState::resolve_user_config()` — extracted from `apply_user_isolation` into reusable `load_user_secrets()` + `merge_user_config()`. Secrets (api_key, base_url) are never exposed.
+  - **Web UI**: Model picker overlay, unified burger menu with current-model value shown inline, selection persisted per browser.
+
+### Changed
+- **deps: bump trustee-api to 0.7.19, trustee-web to 0.1.14**
+
 ## [0.9.10] - 2026-08-10
 
 ### Added

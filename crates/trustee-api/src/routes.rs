@@ -172,6 +172,28 @@ pub struct NewSessionResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Models DTOs
+// ---------------------------------------------------------------------------
+
+/// One selectable LLM model.
+#[derive(Debug, Serialize)]
+pub struct ModelInfo {
+    /// Provider id — the key in `[llm.providers.{id}]`. `None` = the default
+    /// `[llm.provider]`.
+    pub id: Option<String>,
+    /// The actual model string sent to the LLM API (e.g. "gpt-4o").
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModelsResponse {
+    /// The default model (from `[llm.provider]`). Always present.
+    pub default: ModelInfo,
+    /// Named alternative providers from `[llm.providers.*]`.
+    pub models: Vec<ModelInfo>,
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
@@ -218,6 +240,67 @@ pub async fn health() -> Json<HealthResponse> {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// GET /api/v1/models — list available LLM models for this user.
+///
+/// Resolves the per-user config (shared + overlay + ${VAR} substitution),
+/// then extracts `[llm.provider]` (default) and `[llm.providers.*]` (named
+/// alternatives). API keys and base URLs are NEVER returned — only the
+/// provider id and the model string.
+pub async fn list_models(
+    State(state): State<ServerState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let (cookie, user_key) = crate::auth::check_auth(&state.auth, &headers)
+        .await
+        .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    let Some(config_toml) = state.resolve_user_config(&user_key) else {
+        // No config loaded — return just the implicit default
+        return Ok(with_rolling_cookie(
+            Json(ModelsResponse {
+                default: ModelInfo { id: None, model: None },
+                models: vec![],
+            })
+            .into_response(),
+            cookie,
+        ));
+    };
+
+    let Ok(table) = config_toml.parse::<toml::Value>() else {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to parse config".to_string()));
+    };
+
+    let extract_model = |v: &toml::Value| -> Option<String> {
+        v.get("model").and_then(|m| m.as_str()).map(|s| s.to_string())
+    };
+
+    // Default from [llm.provider]
+    let default = table
+        .get("llm")
+        .and_then(|l| l.get("provider"))
+        .map(|p| ModelInfo { id: None, model: extract_model(p) })
+        .unwrap_or(ModelInfo { id: None, model: None });
+
+    // Named providers from [llm.providers.*]
+    let models = table
+        .get("llm")
+        .and_then(|l| l.get("providers"))
+        .and_then(|p| p.as_table())
+        .map(|providers| {
+            providers
+                .iter()
+                .map(|(id, cfg)| ModelInfo {
+                    id: Some(id.clone()),
+                    model: extract_model(cfg),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let resp = Json(ModelsResponse { default, models });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
 /// GET /api/v1/session — return active session state (legacy).
