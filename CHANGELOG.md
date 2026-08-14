@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.15] - 2026-08-14
+
+### Added
+- **feat(web): Live Sessions section in the Sessions overlay** — trustee-web previously only listed checkpoint (disk) sessions, with no way to see in-memory sessions. The Sessions overlay now appends a "⚡ Live Sessions" list from `GET /api/v1/sessions/live` (existing endpoint): session name, relative activity, workflow-state badge (idle/running/cancelling). "Open" attaches this page to that session via the session-scoped endpoints — WS `/api/v1/sessions/{id}/stream`, `/command`, `/cancel` — so commands target the selected session, not the legacy "active" one. History loads from the session's checkpoint. Cancelling falls back to the legacy route when not attached.
+
+### Changed (deps)
+- trustee-web 0.1.17
+
 ## [0.9.14] - 2026-08-14
 
 ### Fixed
