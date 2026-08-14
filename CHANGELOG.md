@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.14] - 2026-08-14
+
+### Fixed
+- **fix(api): resumed sessions showed raw ID as name** — the resume handler hardcoded `Resumed: session_2026_08_14_11_00_4dc269ab` for the new in-memory session. It now looks up the checkpoint session's stored LLM-generated description (the same one shown in checkpoint-session lists) and names the resumed session `Resumed: {description}` (e.g. `Resumed: List of Planets in Order`). Falls back to the raw session ID when no description exists. Visible in Torpi/THQ Live Sessions and any client using `/api/v1/sessions/live`.
+
+### Changed (deps)
+- trustee-api 0.7.22
+
 ## [0.9.13] - 2026-08-14
 
 ### Fixed
