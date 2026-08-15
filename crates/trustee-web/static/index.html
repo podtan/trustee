@@ -1812,18 +1812,37 @@ function closeSessionsOverlay() {
 
 async function fetchSessions() {
   sessionsBody.innerHTML = '<div class="sessions-loading"><span class="spinner"></span>Loading sessions...</div>';
+  let live = [];
+  let checkpoints = null;
   try {
-    const res = await fetch(API + '/api/v1/sessions');
-    if (!res.ok) {
-      sessionsBody.innerHTML = '<div class="sessions-empty">Failed to load sessions. Please try again.</div>';
-      return;
+    // Fetch both lists in parallel — live sessions render first (top),
+    // checkpoint sessions below.
+    const [liveRes, cpRes] = await Promise.all([
+      fetch(API + '/api/v1/sessions/live'),
+      fetch(API + '/api/v1/sessions'),
+    ]);
+    if (liveRes.ok) {
+      const data = await liveRes.json();
+      live = data.sessions || [];
     }
-    const data = await res.json();
-    renderSessionCards(data.sessions || []);
-    await renderLiveSessions(); // appended below checkpoint cards
+    if (cpRes.ok) {
+      const data = await cpRes.json();
+      checkpoints = data.sessions || [];
+    }
   } catch (e) {
     sessionsBody.innerHTML = '<div class="sessions-empty">Failed to load sessions. Please try again.</div>';
+    return;
   }
+
+  sessionsBody.innerHTML = '';
+
+  // Live (in-memory) sessions at top
+  if (live.length) {
+    renderLiveSessions(live);
+  }
+
+  // Checkpoint (disk) sessions below
+  renderSessionCards(checkpoints || []);
 }
 
 // --- Live sessions (in-memory, agent-side) ---
@@ -1832,15 +1851,8 @@ async function fetchSessions() {
 // the selected session, not the "active" one.
 let liveSessions = [];
 
-async function renderLiveSessions() {
-  try {
-    const res = await fetch(API + '/api/v1/sessions/live');
-    if (!res.ok) return;
-    const data = await res.json();
-    liveSessions = data.sessions || [];
-  } catch {
-    return;
-  }
+async function renderLiveSessions(live) {
+  liveSessions = live || [];
   if (!liveSessions.length) return;
 
   const label = document.createElement('div');
@@ -1865,9 +1877,44 @@ async function renderLiveSessions() {
       </div>
       <div class="session-card-actions">
         <button onclick="attachLiveSession('${escapeHtml(s.session_id)}')">Open</button>
+        <button class="danger" onclick="terminateLiveSession('${escapeHtml(s.session_id)}')">Terminate</button>
       </div>
     `;
     sessionsBody.appendChild(card);
+  }
+}
+
+// Terminate a live session (DELETE /api/v1/sessions/{id}).
+// Discards the in-memory session; its checkpoints stay on disk.
+async function terminateLiveSession(sessionId) {
+  try {
+    const res = await fetch(
+      API + '/api/v1/sessions/' + encodeURIComponent(sessionId),
+      { method: 'DELETE' }
+    );
+    if (res.status === 409) {
+      showToast('Session is running — cancel the workflow first.', 'error');
+      return;
+    }
+    if (res.status === 404) {
+      showToast('Session already gone.', 'error');
+      fetchSessions(); // refresh list
+      return;
+    }
+    if (!res.ok) {
+      showToast('Terminate failed.', 'error');
+      return;
+    }
+    // If we were attached to it, detach back to the default stream
+    if (currentSessionId === sessionId) {
+      currentSessionId = null;
+      if (ws) { ws.onclose = null; ws.close(); ws = null; }
+      connectWS();
+    }
+    showToast('Session terminated', 'success');
+    fetchSessions();
+  } catch (e) {
+    showToast('Terminate failed.', 'error');
   }
 }
 
@@ -1916,11 +1963,13 @@ async function loadSessionHistory(sessionId) {
 
 function renderSessionCards(sessions) {
   if (!sessions.length) {
-    sessionsBody.innerHTML = '<div class="sessions-empty">No sessions available for resume.<br>Run a task first to create checkpoints.</div>';
+    // Append (not replace) — live session cards may already be rendered above.
+    const empty = document.createElement('div');
+    empty.className = 'sessions-empty';
+    empty.textContent = 'No checkpoint sessions available for resume.';
+    sessionsBody.appendChild(empty);
     return;
   }
-
-  sessionsBody.innerHTML = '';
 
   // Add "New Session" button at top
   const newBtn = document.createElement('button');

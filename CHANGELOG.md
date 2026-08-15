@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.16] - 2026-08-14
+
+### Changed
+- **feat(web): Live Sessions render at the TOP of the Sessions overlay** (checkpoint sessions below). Both lists now fetch in parallel. The no-checkpoints empty state appends below any live cards instead of replacing them.
+- **feat(web): Terminate button on live session cards** — softer naming than the API's "destroy" semantics; discards the in-memory session (checkpoints stay on disk). Handles 409 (running — cancel first), 404 (already gone, refreshes list), detaches the page back to the default stream if it was attached to the terminated session.
+
+### Changed (deps)
+- trustee-web 0.1.18
+
 ## [0.9.15] - 2026-08-14
 
 ### Added
