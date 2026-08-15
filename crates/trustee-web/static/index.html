@@ -1172,6 +1172,14 @@ function connectWS() {
 }
 
 function handleMessage(msg) {
+  // The WS snapshot (first message after connect/reconnect — the only message
+  // carrying output_lines) also carries the server's current checkpoint-chain
+  // session_id. After a handoff rotation, currentSessionId may hold the dead
+  // OLD chain id; adopt the server's current one so subsequent commands
+  // resolve to this session instead of 404ing (Bug 1/3 companion).
+  if (msg.output_lines && msg.session_id && msg.session_id !== currentSessionId) {
+    currentSessionId = msg.session_id;
+  }
   switch (msg.type) {
     case 'OutputLine':
       appendOutput(msg.line);
@@ -1218,6 +1226,16 @@ function handleMessage(msg) {
         currentSessionId = msg.session_id;
         // A checkpoint exists — handoff is now available (Bug 3)
         window._handoffAvailable = true;
+      }
+      break;
+    case 'SessionRotated':
+      // Explicit rotation event (0.9.17+): the checkpoint-chain id rotated
+      // after handoff. Adopt the new chain id immediately — commands sent
+      // with the OLD id during the pending-first-checkpoint window would
+      // otherwise resume the old disk chain (Bug 3), and the page title /
+      // history target would stay stale (Bug 1).
+      if (msg.new) {
+        currentSessionId = msg.new;
       }
       break;
     case 'HandoffReady':
@@ -1866,12 +1884,20 @@ async function renderLiveSessions(live) {
     const state = (s.workflow_state || 'idle').toLowerCase();
     const stateBadge = `<span class="session-badge ${state}">${state}</span>`;
     const name = s.session_name || (s.session_id || '').slice(0, 24) + '…';
+    // Bug 5: handoff rotation keeps the registry key while the chain name
+    // changes — a rotation-count hint makes the rename visible as lineage,
+    // not a silent rename.
+    const rotations = s.handoff_count || 0;
+    const rotateBadge = rotations > 0
+      ? `<span class="session-badge idle" title="Handoff rotation: same live session, new checkpoint chain (chain identity changed ${rotations} time(s))">↻${rotations}</span>`
+      : '';
     const timeAgo = formatSessionTimeAgo(s.last_active || s.created_at);
     card.innerHTML = `
       <div class="session-card-info">
         <div class="session-card-id">${escapeHtml(name)}</div>
         <div class="session-card-meta">
           <span>${timeAgo}</span>
+          ${rotateBadge}
           ${stateBadge}
         </div>
       </div>

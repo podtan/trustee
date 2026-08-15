@@ -103,6 +103,22 @@ pub struct Session {
     /// for that command. Consumed per-command (cleared after injection).
     /// None = use the default `[llm.provider]`.
     pub model: Option<String>,
+
+    // --- Handoff rotation (post 0.9.16 bugs) ---
+    /// Set to true immediately before the post-handoff briefing execute, so
+    /// `execute_command` treats that run as a rotation rather than a fresh
+    /// session: it derives a new chain identity but does NOT clear the
+    /// visible transcript (Bug 2). Cleared once the rotation is handled.
+    pub rotating_from_handoff: bool,
+    /// True while the current chain identity was born from a handoff briefing
+    /// and no user command has run in it yet (Bug 4). While true, handoff is
+    /// blocked entirely (manual + auto) to prevent briefing-of-briefing loops.
+    /// Cleared on the first user-initiated command.
+    pub briefing_born: bool,
+    /// Monotonic count of handoff rotations this session has performed.
+    /// Surfaced in live-session listings so the UI can show lineage
+    /// (Bug 5: "name rotated silently" → "name · ↻2").
+    pub handoff_count: u32,
 }
 
 impl Session {
@@ -142,6 +158,9 @@ impl Session {
             workflow_permit: None,
             identity: None,
             model: None,
+            rotating_from_handoff: false,
+            briefing_born: false,
+            handoff_count: 0,
         };
         (session, workflow_rx)
     }
@@ -283,6 +302,11 @@ impl Session {
                     && self.workflow_state == WorkflowState::Running
                     && !self.handoff_pending
                     && self.resume_info.is_some()
+                    // Bug 4: never auto-handoff a briefing-born chain — a large
+                    // briefing inflating the context would chain handoffs into a
+                    // briefing-of-briefing loop. Auto-handoff only re-arms after
+                    // a real user command has run in this chain.
+                    && !self.briefing_born
                 {
                     self.handoff_pending = true;
                     self.cancel_token.cancel();
@@ -306,12 +330,34 @@ impl Session {
             TuiMessage::HandoffReady(briefing) => {
                 self.workflow_state = WorkflowState::Idle;
                 self.resume_info = None;
+                // Capture the pre-rotation chain id so the rotation event can
+                // tell clients exactly which chain was replaced (Bug 1).
+                let old_session_id = self.session_id.clone();
                 // Clear session identity so execute_command generates fresh
                 // session_id/session_name for the new post-handoff session.
                 self.session_id = None;
                 self.session_name = None;
+                // Rotation markers (Bugs 2/4): preserve the transcript across
+                // the identity switch, and mark the new chain as briefing-born
+                // so it can't immediately hand off again (briefing-of-briefing
+                // loop) until a real user command runs in it.
+                self.rotating_from_handoff = true;
+                self.briefing_born = true;
+                self.handoff_count += 1;
                 self.input = briefing;
                 self.execute_command();
+                // execute_command derives the new chain id synchronously —
+                // broadcast the explicit rotation event so clients adopt the
+                // new identity without inferring it from ResumeInfo (Bug 1).
+                let _ = self.workflow_tx.send(TuiMessage::SessionRotated {
+                    old: old_session_id,
+                    new: self.session_id.clone(),
+                });
+            }
+            TuiMessage::SessionRotated { .. } => {
+                // Identity rotation already applied in-place by the
+                // HandoffReady handler. This event is for external clients
+                // (web/torpi consoles) — nothing to do in session state.
             }
             TuiMessage::HandoffFailed => {
                 // Briefing unavailable — session continuity was already restored
@@ -350,8 +396,33 @@ impl Session {
 
         let is_continuation = self.resume_info.is_some();
 
-        if !is_continuation {
+        // Rotation gate (Bug 2): the post-handoff briefing execute is a
+        // "fresh chain" run (resume_info == None) but NOT a fresh session —
+        // the user's visible transcript must survive the identity switch.
+        // Take the flag so it applies exactly once, to this run.
+        let rotating_from_handoff = self.rotating_from_handoff;
+        self.rotating_from_handoff = false;
+
+        // Bug 4: the first command that is NOT the briefing run itself is a
+        // real user command — the briefing-born lock lifts and handoff
+        // (manual and auto) re-arms for this chain.
+        if !rotating_from_handoff {
+            self.briefing_born = false;
+        }
+
+        // Transcript gate (Bug 2): never wipe the visible transcript for a
+        // session that has rotated its chain identity. This covers the
+        // briefing run itself (rotating_from_handoff) AND any later command
+        // that lands on the non-continuation path (e.g. after a failed
+        // checkpoint) — a rotated session is one logical conversation, not a
+        // fresh one.
+        if !is_continuation && !rotating_from_handoff && self.handoff_count == 0 {
             self.output_lines.clear();
+        }
+        // Identity derivation: applies to EVERY non-continuation run (fresh
+        // session OR handoff rotation) — a rotated session must get its new
+        // chain id immediately so the SessionRotated event can carry it.
+        if !is_continuation {
             // Auto-derive session_id and session_name from the first command
             // if not explicitly set. The session_id uses timestamp + UUID suffix
             // (session_YYYY_MM_DD_HH_MM_{uuid8}) for uniqueness across all
@@ -591,6 +662,19 @@ impl Session {
     /// spawning a briefing task concurrently with a running workflow
     /// (Bugs 1/2/5).
     pub fn request_handoff(&mut self, hint: String) {
+        // Bug 4: a session born from a handoff briefing cannot hand off again
+        // before a user command has run in it. Manual double-triggers during
+        // handoff investigation spawned two extra chains in 3 minutes; the
+        // second briefing was literally about the first briefing. Explicit
+        // user action may re-arm it only after real work has happened.
+        if self.briefing_born {
+            self.workflow_tx
+                .send(TuiMessage::OutputLine(
+                    "ℹ Handoff unavailable — this session started from a handoff briefing. Run a command first.".to_string(),
+                ))
+                .ok();
+            return;
+        }
         match self.workflow_state {
             WorkflowState::Idle => self.trigger_handoff(hint),
             WorkflowState::Running => {
@@ -625,6 +709,14 @@ impl Session {
         if self.workflow_state != WorkflowState::Idle {
             self.output_lines
                 .push("⏳ Workflow still running — handoff will fire after it stops".to_string());
+            return;
+        }
+        // Bug 4 (defense in depth): request_handoff already rejects this, but
+        // trigger_handoff is also reachable from the handoff_pending path —
+        // never hand off a chain that hasn't seen a user command yet.
+        if self.briefing_born {
+            self.output_lines
+                .push("ℹ Handoff unavailable — this session started from a handoff briefing. Run a command first.".to_string());
             return;
         }
         if self.resume_info.is_none() {

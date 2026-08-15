@@ -1118,11 +1118,34 @@ async fn execute_command_inner(
 
         // Handle session_id / resume_info (same as original post_command)
         if let Some(ref client_session_id) = req.session_id {
+            // NOTE: session.session_id is only ever set when None (pre-0.9.17
+            // semantics preserved) — it is never overwritten by a client id.
+            // Torpi/THQ consoles send the live registry key here; trustee-web
+            // sends the checkpoint-chain id from ResumeInfo. Clobbering the
+            // chain id with the registry key would corrupt checkpoint routing.
             if session.session_id.is_none() {
                 session.session_id = Some(client_session_id.clone());
             }
 
-            if session.resume_info.is_none() {
+            // Bug 3: after a handoff rotation the session has rotated its
+            // chain identity but not yet produced its first checkpoint —
+            // resume_info is None and session.session_id already holds the
+            // NEW chain id. A queued or fast-follow command still carrying
+            // the OLD chain id (the client's last ResumeInfo) must NOT
+            // resurrect the old disk chain: that would orphan the briefing
+            // run and split the context. During that window, only a client id
+            // matching the CURRENT chain may build resume_info; anything else
+            // runs fresh under the current chain.
+            let id_matches_current_chain = session
+                .session_id
+                .as_deref()
+                .is_some_and(|sid| sid == client_session_id.as_str());
+            let rotation_pending_first_checkpoint =
+                session.handoff_count > 0 && session.resume_info.is_none();
+            let stale_during_rotation_window =
+                rotation_pending_first_checkpoint && !id_matches_current_chain;
+
+            if session.resume_info.is_none() && !stale_during_rotation_window {
                 if let Some(ref config_toml) = session.config_toml.clone() {
                     let home_dir = session.home_dir.as_deref();
                     if let Ok(Some(info)) =
