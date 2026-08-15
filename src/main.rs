@@ -532,7 +532,16 @@ async fn run_tui_mode() -> Result<(), Box<dyn std::error::Error>> {
     };
     
     // Merge embedded defaults with user overrides
-    let merged_config = merge_config(&user_config_toml)?;
+    let mut merged_config = merge_config(&user_config_toml)?;
+
+    // Substitute ${VAR} placeholders in the config TOML using the loaded
+    // secrets (same as the CLI path added in d3cea6e). This is REQUIRED for
+    // [llm.provider] api_key = "${OPENAI_API_KEY}" style references: the TUI
+    // path always runs with a RunContext (trustee-core execute_command builds
+    // one), and ABK's run_task_from_raw_config skips env-var injection when a
+    // RunContext is present (multi-user guard) — so inject_secrets_into_env
+    // alone leaves the literal "${OPENAI_API_KEY}" in the config → 401.
+    substitute_config_vars(&mut merged_config, &secrets);
 
     // Inject secrets into process env for ${VAR} substitution in config.
     // Safe: single-threaded, before any concurrent access.
@@ -592,7 +601,13 @@ async fn run_resume_tui_mode(args: &[String]) -> Result<(), Box<dyn std::error::
             (config_toml, local_secrets)
         }
     };
-    let merged_config = merge_config(&user_config_toml)?;
+    let mut merged_config = merge_config(&user_config_toml)?;
+
+    // Substitute ${VAR} placeholders in the config TOML using the loaded
+    // secrets — required for the same reason as run_tui_mode(): ABK skips
+    // env-var injection when a RunContext is present, and this path feeds
+    // the config to both the checkpoint access below and the TUI session.
+    substitute_config_vars(&mut merged_config, &secrets);
 
     // Inject secrets into process env for ${VAR} substitution in config.
     inject_secrets_into_env(&secrets);
