@@ -775,13 +775,17 @@ impl Session {
 
         tokio::spawn(async move {
             let base = "Output a session handoff briefing in at most 300 lines. \
-                 Do NOT use any tools. Include: the FULL ABSOLUTE PATH of every \
+                 Do NOT use any tools. The FIRST line must be exactly: \
+                 \"Session Title: <a concise descriptive title of this work, maximum 50 characters>\" \
+                 — nothing else on that line. The rest of the briefing must include: \
+                 the FULL ABSOLUTE PATH of every \
                  project/repository being worked on (e.g. /Projects/Foo/bar — never \
                  omit the leading path), all project/task/workstream UUIDs referenced, \
                  every file created or modified with its full absolute path, all \
                  commands run and their outcomes, the current state of the work, any \
                  blockers, and the exact next action to take. \
-                 Output ONLY the briefing text — no preamble, headers, or closing remarks.";
+                 Output ONLY the briefing text — the title line first, then the body, \
+                 with no other headers, preamble, or closing remarks.";
             let prompt = if hint.is_empty() {
                 base.to_string()
             } else {
