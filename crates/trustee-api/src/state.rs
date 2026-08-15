@@ -56,6 +56,11 @@ pub struct SessionListItem {
     pub workflow_state: String,
     pub created_at: String,
     pub last_active: String,
+    /// Number of handoff rotations this session has performed (Bug 5). The
+    /// in-memory registry key never changes across a rotation — only the
+    /// checkpoint-chain name does — so a card whose name changed without this
+    /// hint looks like it silently renamed. 0 = never rotated.
+    pub handoff_count: u32,
 }
 
 /// Errors from multi-session operations.
@@ -369,6 +374,7 @@ impl ServerState {
                 workflow_state: workflow_state.to_string(),
                 created_at: entry.created_at.to_rfc3339(),
                 last_active: last_active.to_rfc3339(),
+                handoff_count: session.handoff_count,
             });
         }
         drop(user_sessions);
@@ -713,6 +719,12 @@ impl ServerState {
         ws_tx: broadcast::Sender<String>,
         mut workflow_rx: mpsc::UnboundedReceiver<TuiMessage>,
     ) {
+        // Bug 6: broadcast StateChanged only on actual transitions. Without
+        // this, every WS message was accompanied by a duplicate StateChanged,
+        // doubling traffic and re-triggering frontend updateState on hot
+        // StreamDelta/ReasoningDelta bursts. New subscribers learn the current
+        // state from the WS snapshot, so the initial None is safe.
+        let mut last_broadcast_state: Option<String> = None;
         tokio::spawn(async move {
             while let Some(msg) = workflow_rx.recv().await {
                 {
@@ -724,11 +736,14 @@ impl ServerState {
                         trustee_core::types::WorkflowState::Running => "Running",
                         trustee_core::types::WorkflowState::Cancelling => "Cancelling",
                     };
-                    let state_msg = serde_json::json!({
-                        "type": "StateChanged",
-                        "state": state_str
-                    });
-                    let _ = ws_tx.send(state_msg.to_string());
+                    if last_broadcast_state.as_deref() != Some(state_str) {
+                        last_broadcast_state = Some(state_str.to_string());
+                        let state_msg = serde_json::json!({
+                            "type": "StateChanged",
+                            "state": state_str
+                        });
+                        let _ = ws_tx.send(state_msg.to_string());
+                    }
                 }
 
                 let json =
@@ -758,6 +773,10 @@ impl ServerState {
         drop(first_entry);
         drop(default_user);
 
+        // Bug 6: transition-only StateChanged broadcasts (see
+        // spawn_user_drain_task). The task starts in Running state because
+        // spawn_drain_task is only called after a command began executing.
+        let mut last_broadcast_state = Some("Running".to_string());
         tokio::spawn(async move {
             while let Some(msg) = workflow_rx.recv().await {
                 {
@@ -769,11 +788,14 @@ impl ServerState {
                         trustee_core::types::WorkflowState::Running => "Running",
                         trustee_core::types::WorkflowState::Cancelling => "Cancelling",
                     };
-                    let state_msg = serde_json::json!({
-                        "type": "StateChanged",
-                        "state": state_str
-                    });
-                    let _ = ws_tx.send(state_msg.to_string());
+                    if last_broadcast_state.as_deref() != Some(state_str) {
+                        last_broadcast_state = Some(state_str.to_string());
+                        let state_msg = serde_json::json!({
+                            "type": "StateChanged",
+                            "state": state_str
+                        });
+                        let _ = ws_tx.send(state_msg.to_string());
+                    }
                 }
 
                 let json =
@@ -920,6 +942,13 @@ impl<'a> serde::Serialize for SerializableMessage<'a> {
                 s.serialize_field("type", "HandoffReady")?;
                 s.serialize_field("state", "Idle")?;
                 s.serialize_field("briefing", briefing)?;
+                s.end()
+            }
+            TuiMessage::SessionRotated { old, new } => {
+                let mut s = serializer.serialize_struct("msg", 3)?;
+                s.serialize_field("type", "SessionRotated")?;
+                s.serialize_field("old", old)?;
+                s.serialize_field("new", new)?;
                 s.end()
             }
             TuiMessage::HandoffFailed => {
