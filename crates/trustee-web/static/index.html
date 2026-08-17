@@ -2428,6 +2428,10 @@ function renderModelOptions() {
     modelsBody.appendChild(d);
   };
 
+  // isDefault nulls the override ONLY for the active provider's default —
+  // an alternative provider's default model must still be selectable
+  // (Case 2/3 in server-side inject_model: a literal model string that a
+  // named provider offers swaps that provider in).
   const mkOption = (modelName, isDefault) => {
     const card = document.createElement('div');
     card.className = 'model-option' + (selectedModel === modelName ? ' selected' : '');
@@ -2456,17 +2460,20 @@ function renderModelOptions() {
     modelsBody.appendChild(d);
   }
 
-  // Alternative providers
+  // Alternative providers — default here is a LABEL, not a clearing action
   for (const alt of (modelsData.providers || [])) {
     if (alt.name) mkSection(alt.name + (alt.base_url ? ' · ' + alt.base_url : ''));
     for (const m of (alt.models || [])) {
-      mkOption(m, m === alt.default_model);
+      mkOption(m, false);
     }
   }
 }
 
 function selectModel(modelName, isDefault) {
-  // Selecting the default = clear override (send no model field)
+  // Selecting the ACTIVE provider's default = clear override (send no model
+  // field). Any other model — including an alternative provider's default —
+  // is sent as a literal model string; the server's inject_model resolves it
+  // to the provider that offers it (or sets it literally on the current one).
   selectedModel = isDefault ? null : modelName;
   localStorage.setItem('trustee_model', JSON.stringify(selectedModel));
   renderModelOptions();
