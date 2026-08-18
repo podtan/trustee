@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.20] - 2026-08-18
+
+### Changed (deps)
+- **abk 0.13.0** — Checkpoint Storage Optimization: append-only `conversation.jsonl` + `agent_state.jsonl` replace the per-checkpoint `{NNN}_conversation.json` / `{NNN}_agent.json` files (O(N²) → O(N) storage); session-constant fields (task description, configuration, working directory, max iterations) move to `session_metadata.json`. Includes FIX A (true-max iteration so a legacy/mixed resume no longer restarts numbering and overwrites existing checkpoints) and the idempotent `agent_state.jsonl` append (one line per checkpoint). Each session is now exactly 4 files.
+- trustee-core 0.6.14
+- trustee-tui 0.3.7
+
 ## [0.9.16] - 2026-08-14
 
 ### Changed
