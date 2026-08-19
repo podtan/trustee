@@ -9,6 +9,40 @@ All notable changes to this project will be documented in this file.
 - trustee-core 0.6.14
 - trustee-tui 0.3.7
 
+## [0.9.19] - 2026-08-17
+
+### Fixed
+- **fix(web): alternative provider's default model was unselectable** — Alternative provider model cards passed `isDefault = (model === alt.default_model)`, and `selectModel` nulls the override for `isDefault`, so a provider whose only model is its default (e.g. unsloth `Qwen3.8-27B-Ridge-GGUF`) was a silent no-op on click. Now only the ACTIVE provider's default clears the override; alternative providers send the literal model string, resolved server-side by `inject_model` (exact-string match). Verified end-to-end against a tunneled llama-server.
+
+### Changed (deps)
+- trustee-web 0.1.20
+
+## [0.9.18] - 2026-08-15
+
+### Fixed
+- **fix(tui): TUI 401 on every LLM call — `${VAR}` placeholders never substituted** — `substitute_config_vars()` now runs in `run_tui_mode()` and `run_resume_tui_mode()`. The TUI was sending the literal `${OPENAI_API_KEY}` string as the bearer token (401 on every call) because ABK skips env-var injection when a `RunContext` is present. Verified live via pty.
+- **Handoff briefing prompt now requires a "Session Title: <≤50 chars>" first line** — so the downstream title generator and the pre-LLM fallback name both see a high-quality summary (wording change only).
+
+### Changed (deps)
+- trustee-core 0.6.13
+
+## [0.9.17] - 2026-08-15
+
+### Fixed
+- **Fix 6 post-handoff bugs** (session identity rotation, transcript wipe, stale-resume race, re-handoff loop, card rename, WS chatter):
+  - `SessionRotated {old,new}` WS event — clients no longer infer chain-identity rotation from `ResumeInfo` (Bug 1).
+  - Preserve `output_lines` across handoff rotation — briefing run and later non-continuation runs of a rotated session keep the visible transcript (Bug 2).
+  - Ignore stale client `session_id` while a rotation is pending its first checkpoint — the old chain cannot be resurrected (Bug 3).
+  - `briefing_born` marker: manual + auto handoff blocked until a user command has run in the briefing chain; auto-handoff gate in `ContextTokensUpdated` (Bug 4).
+  - `handoff_count` in the live session list + ↻N lineage badge on cards in both trustee-web and torpi agent detail (Bug 5).
+  - `StateChanged` broadcast only on real state transitions (Bug 6).
+- torpi agent-console.html adopts `SessionRotated`/`ResumeInfo` chain ids for title + history loads (persists `?history=` in URL for correct reload); `actionUrl` stays on the live registry key; fixed latent const-reassign of `sessionId`.
+
+### Changed (deps)
+- trustee-core 0.6.12
+- trustee-api 0.7.23
+- trustee-web 0.1.19
+
 ## [0.9.16] - 2026-08-14
 
 ### Changed
