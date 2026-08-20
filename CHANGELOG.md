@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.21] - 2026-08-20
+
+### Fixed
+- **abk 0.13.1** — Divergent-resume fork fix: resuming a non-latest checkpoint and continuing from it forks the conversation; the branch was previously silently lost (the shared `conversation.jsonl` cursor pointed at the mainline). Forks are now persisted as a full `{NNN}_conversation.json` snapshot (cursor_seq=0) in both local and remote storage, so a resumed branch reloads its exact diverged messages. Trustee's web/remote resume paths consume this.
+- trustee-core 0.6.15
+- trustee-tui 0.3.8
+
 ## [0.9.20] - 2026-08-18
 
 ### Changed (deps)
