@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.22] - 2026-08-21
+
+### Changed (deps)
+- **abk 0.13.2** — Fork lineage check: a fork that OUTGROWS the mainline (resumed from an earlier checkpoint and kept appending) was misclassified as linear by the 0.13.1 length-only heuristic and appended its branch messages over the mainline's own sequence numbers (silent corruption of the shared `conversation.jsonl`); the `total == hwm` tie also defaulted to linear. Now fork detection compares message LINEAGE (first `hwm` messages must be identical to the mainline prefix), in both local and remote storage. Trustee's web/remote resume paths consume this.
+- trustee-core 0.6.16
+- trustee-tui 0.3.9
+
 ## [0.9.21] - 2026-08-20
 
 ### Fixed
