@@ -572,16 +572,53 @@ trustee run --mode human "Help me debug this issue interactively"
 
 ### Session Management
 
+Sessions use an append-only storage layout (one shared `conversation.jsonl`
+per session, cursor-addressed checkpoints — see the `abk` checkpoint module
+docs). Storage mode is set by `[checkpointing.storage_backend] storage_mode`
+in `trustee.toml`: `local`, `mirror` (local + remote), or `remote`.
+
 ```bash
 # List previous sessions
 trustee sessions --list
 
-# Resume a specific session
-trustee resume --session abc123
+# Show a session's checkpoints
+trustee sessions --show <session_id>
+
+# Delete a session (local storage; see known-issue note below)
+trustee sessions --delete <session_id>
+
+# Resume a specific session (latest checkpoint)
+trustee run --resume <session_id> "continue this task"
 
 # Resume the latest session
 trustee resume --latest
 ```
+
+**Migrating legacy sessions.** Sessions created before the append-only
+format store a full conversation snapshot per checkpoint
+(`{NNN}_conversation.json`, `{NNN}_agent.json`, `session_agent.json`).
+`trustee sessions migrate` folds them into the current layout:
+
+```bash
+# Convert legacy sessions (keeps the original files)
+trustee sessions migrate
+
+# Convert and delete the legacy artifacts afterwards
+trustee sessions migrate --prune
+```
+
+The migration is idempotent (safe to re-run), verifies each folded session
+(checkpoint cursors and the longest conversation snapshot are re-read and
+compared after conversion), and normalizes legacy `checkpoints.json` entries
+to the current schema. Resuming a migrated session works exactly like a
+native one.
+
+> **Known issue (remote storage):** `sessions --delete` currently removes
+> only the local directory; remote copies under `projects/{hash}/sessions/…`
+> are left behind and the session may re-appear in listings. Tracked as
+> nghr c561e911-7285-4389-85d8-4b0d42c40725 (fix planned for the next
+> release train alongside the remote-only fixes in
+> 67163136-6ec1-4586-883d-ced3259f9177).
 
 ### Configuration Management
 
