@@ -7,6 +7,8 @@ use figment::providers::{Format, Toml};
 use figment::Figment;
 use getmyconfig::{ConfigReader, StorageConfig};
 
+mod migrate;
+
 /// Embedded default configuration - compiled into the binary
 const DEFAULT_CONFIG: &str = include_str!("../config/trustee_default.toml");
 
@@ -821,6 +823,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_upgrade = args.get(1).map(|s| s.as_str()) == Some("upgrade");
     if is_upgrade {
         return run_upgrade_command(&args[2..]).await;
+    }
+
+    // Intercept "sessions migrate [--prune]" — one-shot legacy → append-only
+    // migration (task bcdcdd25 §D). Handled here, not by ABK's sessions command.
+    if args.get(1).map(|s| s.as_str()) == Some("sessions") {
+        if args.get(2).map(|s| s.as_str()) == Some("migrate") {
+            let prune = args.iter().any(|a| a == "--prune");
+            // Migration walks the STORAGE ROOT (~/.trustee), covering all
+            // user namespaces (users/<hash>/projects/...) and the global
+            // projects/ tree — not just the current user hash.
+            let home_dir = dirs::home_dir()
+                .map(|h| h.join(".trustee"))
+                .unwrap_or_else(|| {
+                    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
+                        .join(".trustee")
+                });
+            let report = migrate::run(&home_dir, prune)?;
+            println!("📦 Session migration (home: {})", home_dir.display());
+            println!("   scanned:   {} sessions", report.sessions_scanned);
+            println!("   migrated:  {} sessions ({} checkpoints, {} messages folded)",
+                report.sessions_migrated, report.checkpoints_migrated, report.messages_folded);
+            println!("   skipped:   {} (already new-format or no legacy blobs)", report.sessions_skipped);
+            if prune {
+                println!("   pruned:    {} legacy files", report.files_pruned);
+            }
+            if !report.errors.is_empty() {
+                println!("   errors:");
+                for e in &report.errors {
+                    println!("     - {}", e);
+                }
+            }
+            return Ok(());
+        }
     }
 
     // Check if this is the init command (special case - use project config)
