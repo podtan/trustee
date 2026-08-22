@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.24] - 2026-08-22
+
+### Changed (deps)
+- **abk 0.14.1** — lineage identity now includes the `tool_calls` payload. `messages_same_lineage` (the shared helper behind both the local and remote fork checks in `save_checkpoint`) omitted `ChatMessage.tool_calls`, so a fork whose ONLY divergence is the tool-call `arguments` was classified linear — the same silent-corruption family as abk 0.13.1/0.13.2 (tie reloaded the mainline prefix; outgrow appended the branch over the mainline's seqs). The new private `tool_calls_same_lineage()` compares `id` + `r#type` + `function.name` + `function.arguments`; strictly widening identity can only flip linear→fork (conservative), so no existing behavior regresses. Trustee consumes the fork logic via web/remote resume paths.
+- trustee-core 0.6.18
+- trustee-tui 0.3.11
+
 ## [0.9.23] - 2026-08-22
 
 ### Changed (deps)
