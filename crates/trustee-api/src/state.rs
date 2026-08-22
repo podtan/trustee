@@ -199,6 +199,7 @@ impl ServerState {
         user_key: &str,
         session_name: Option<String>,
         identity: Option<String>,
+        activate: bool,
     ) -> Result<String, SessionError> {
         // Get or create the user's UserSessions entry
         let user_sessions = self
@@ -268,8 +269,17 @@ impl ServerState {
             },
         );
 
-        // Set as active session
-        *user_sessions.active_session_id.lock().await = session_id.clone();
+        // Set as active session only when the caller opts in.
+        //
+        // `resume_session` passes `activate: false` so resuming an arbitrary
+        // checkpoint never hijacks the caller's current active live session
+        // pointer. `new_session` / `create_session` (fresh-start paths) pass
+        // `activate: true` to keep the existing "new session becomes active"
+        // behavior. This keeps the per-user active pointer under UI control
+        // rather than letting any authenticated client overwrite it.
+        if activate {
+            *user_sessions.active_session_id.lock().await = session_id.clone();
+        }
 
         // Spawn drain task
         let session_arc = user_sessions
@@ -504,7 +514,7 @@ impl ServerState {
 
         // Create a brand new session
         let session_id = self
-            .create_session(user_key, None, None)
+            .create_session(user_key, None, None, true)
             .await
             .unwrap_or_else(|_| "default".to_string());
 

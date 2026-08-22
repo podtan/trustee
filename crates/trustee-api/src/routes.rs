@@ -616,7 +616,7 @@ pub async fn resume_session(
     .unwrap_or_else(|| format!("Resumed: {}", checkpoint_session_id));
 
     let new_sid = state
-        .create_session(&user_key, Some(session_name), None)
+        .create_session(&user_key, Some(session_name), None, false)
         .await
         .map_err(|e| match e {
             crate::state::SessionError::MaxSessionsReached(n) => {
@@ -775,7 +775,7 @@ pub async fn new_session(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let session_id = state
-        .create_session(&user_key, req.session_name.clone(), req.identity.clone())
+        .create_session(&user_key, req.session_name.clone(), req.identity.clone(), true)
         .await
         .map_err(|e| match e {
             SessionError::MaxSessionsReached(n) => (
@@ -817,7 +817,7 @@ pub async fn create_session(
         .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let session_id = state
-        .create_session(&user_key, req.session_name.clone(), req.identity.clone())
+        .create_session(&user_key, req.session_name.clone(), req.identity.clone(), true)
         .await
         .map_err(|e| match e {
             SessionError::MaxSessionsReached(n) => (
