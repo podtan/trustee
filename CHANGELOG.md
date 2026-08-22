@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.23] - 2026-08-22
+
+### Changed (deps)
+- **abk 0.14.0** — Removal of the dead `abk::checkpoint::v2` split-file module (~1.4k LOC, never wired into the production write path) and fixes to stale storage-format documentation (the module header advertised a "V2 Storage Format" that no production code ever wrote; `save_checkpoint`'s doc advertised `session_agent.json` / per-checkpoint `{checkpoint_id}_conversation.json`, not written since abk 0.13.0). No runtime behavior changes for trustee — trustee never referenced the v2 types (verified by grep). Storage-format docs now describe the actual append-only layout (local `conversation.jsonl` / `agent_state.jsonl` / `checkpoints.json` cursor index / fork-only snapshots; remote `messages/{seq:05}.json` / `state/{seq:05}.json` path-keyed in a single collection).
+- trustee-core 0.6.17
+- trustee-tui 0.3.10
+
 ## [0.9.22] - 2026-08-21
 
 ### Changed (deps)
