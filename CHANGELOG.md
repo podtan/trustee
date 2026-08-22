@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.25] - 2026-08-22
+
+### Added
+
+- **`trustee sessions migrate [--prune]`** — one-shot legacy → append-only migration. Folds legacy `{NNN}_conversation.json` cumulative snapshots into `conversation.jsonl` (INDEX + content-signature matching: the same occurrence across snapshots reuses its sequence number; legitimately repeated messages keep their own entries), backfills checkpoint cursors, writes `agent_state.jsonl` (one line per checkpoint), and normalizes `checkpoints.json` entries to the current schema. Verifies every fold (cursors ≤ log length; longest blob content-equal to the log prefix); `--prune` removes the legacy artifacts; idempotent (re-run migrates/prunes 0). Validated on a full copy of the real legacy tree (26 sessions / 214 checkpoints / 1194 messages, 0 errors, 373 files pruned, content-identical) and E2E — a migrated legacy session resumes exactly like a native one.
+
+### Fixed (via abk 0.14.2)
+
+- Mirror-mode remote write failures no longer swallowed (retry + gap reconcile + honest `MIRRORED` reporting; Remote-only fails loudly) — nghr 450e00d4.
+- Remote-only `sessions --list` and `run --resume` (CLI dropped the remote backend when a per-user home dir was set; remote checkpoint index was never loaded) — nghr 67163136.
+- `sessions --delete` and checkpoint deletion now clean the remote copy too — nghr c561e911.
+
+### Docs
+
+- README "Session Management" rewritten for the append-only layout; `sessions migrate` documented; known-issue note for the remote delete gap superseded by the 0.14.2 fix.
+
 ## [0.9.24] - 2026-08-22
 
 ### Changed (deps)
