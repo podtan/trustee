@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.26] - 2026-08-22
+
+### Fixed
+
+- **`trustee-api 0.7.25` — resume no longer hijacks the caller's active live session pointer** (nghr c65d5039). `POST /api/v1/sessions/{id}/resume` created a new live session and, via `state.create_session()`, unconditionally flipped the caller's per-user `active_session_id`. Any authenticated client (curl / Torpi / API script) could therefore silently displace the live session the caller was actually working in — resuming an arbitrary session B overwrote the pointer away from A. Fixed by adding an explicit `activate: bool` param to `create_session()` (private state API): `resume_session` passes `false` (the fix), while `new_session`, `POST /api/v1/sessions`, and `ensure_active_session` pass `true` (fresh-start behavior unchanged). The web UI still switches sessions client-side via `currentSessionId`, so the server pointer is no longer authoritatively overwritable by an arbitrary client. No wire-API change.
+
+### Changed (deps)
+
+- **trustee-api 0.7.25** — see Fixed above.
+
 ## [0.9.25] - 2026-08-22
 
 ### Added
