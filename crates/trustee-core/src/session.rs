@@ -19,6 +19,30 @@ use crate::types::{
     TuiMessage, WorkflowState,
 };
 
+/// Truncate a first-command string into a display session name.
+///
+/// Never slices by raw byte index: non-ASCII scripts (Persian, Arabic, CJK,
+/// emoji, …) are multi-byte in UTF-8 and a fixed byte cut can land mid-
+/// character, which PANICS ("byte index is not a char boundary") inside the
+/// tokio worker and poisons the session mutex (nghr 811ed903).
+///
+/// Semantics: ≤ 80 CHARS → returned unchanged (pure-ASCII behavior is
+/// byte-for-byte identical to the original implementation); > 80 chars →
+/// truncated at the last char boundary at or before byte 77, plus "...".
+pub fn truncate_session_name(command: &str) -> String {
+    if command.chars().count() <= 80 {
+        command.to_string()
+    } else {
+        let end = command
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i <= 77)
+            .last()
+            .unwrap_or(0);
+        format!("{}...", &command[..end])
+    }
+}
+
 /// Core session state for the Trustee agent.
 ///
 /// Holds all state that is independent of the presentation layer (TUI, API, Web).
@@ -410,7 +434,7 @@ impl Session {
             self.briefing_born = false;
         }
 
-        // Transcript gate (Bug 2): never wipe the visible transcript for a
+// Transcript gate (Bug 2): never wipe the visible transcript for a
         // session that has rotated its chain identity. This covers the
         // briefing run itself (rotating_from_handoff) AND any later command
         // that lands on the non-continuation path (e.g. after a failed
@@ -435,12 +459,7 @@ impl Session {
                 self.session_id = Some(format!("session_{}_{}", timestamp, uuid8));
             }
             if self.session_name.is_none() {
-                let derived = if command.len() > 80 {
-                    format!("{}...", &command[..77])
-                } else {
-                    command.clone()
-                };
-                self.session_name = Some(derived);
+                self.session_name = Some(truncate_session_name(&command));
             }
         }
 

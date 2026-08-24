@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.28] - 2026-08-24
+
+### Fixed
+
+- **Persian/non-ASCII first command no longer kills the session** (nghr 811ed903, core 0.6.20 / api 0.7.26). Auto-derived session names sliced the first command by raw byte index (`&command[..77]`, `trustee-core/src/session.rs:439`); Persian/Arabic (2-byte), CJK and emoji (3–4-byte) characters made byte 77 land mid-character → `panic: byte index is not a char boundary` in a `tokio-rt-worker` → poisoned `Arc<Mutex<Session>>` → the session stopped responding until server restart. Replaced with `truncate_session_name` (char-boundary-safe, first tests in trustee-core: 8/8). Pure-ASCII behavior is byte-for-byte identical to before (≤ 80 bytes/chars unchanged; > 80 → first 77 bytes + `...`). Non-ASCII: > 80 chars → last char boundary at or before byte 77 + `...`; ≤ 80 chars now returned unchanged (previously > 80 BYTES could truncate unnecessarily). Latent since 0.6.2-era (dfb8119e, 2026-07-27).
+
 ## [0.9.27] - 2026-08-24
 
 ### Changed (deps)
