@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.27] - 2026-08-24
+
+### Changed (deps)
+
+- **abk 0.14.3** — Remote-only checkpoint saves are O(1) instead of O(hwm): `save_checkpoint` now verifies mainline lineage with a rolling per-checkpoint fingerprint (same identity components as the content check) instead of range-reading the entire mainline prefix, so linear saves perform zero remote prefix reads on a fingerprint hit and fall back to the range-read only on legacy/first-save or mismatch (nghr 3c0dba81). All three abk pins bumped (root `0.14.2`, `trustee-core` `0.14.2`, `trustee-tui` stale `0.14.1` → `0.14.3`).
+
 ## [0.9.26] - 2026-08-22
 
 ### Fixed
