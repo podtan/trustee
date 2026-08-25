@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.29] - 2026-08-25
+
+### Changed (deps)
+
+- **abk 0.14.3 → 0.14.4, cats 0.1.29 → 0.1.30** — deterministic `tools` array for prefix-cache reuse (nghr 1494b6fe). The OpenAI request's `tools` array was ordered by cats' `HashMap` iteration, which is per-process random in Rust: two agent runs sent the same 98 tools in a different order, changing the first system-prompt tokens and forcing a full prefill (cache miss, ~90s TTFT on qwen3.8-27b) on the first call of every run. `cats::ToolRegistry::list_tools()/get_all_schemas()` now return sorted names and `abk::provider::openai::tools::tools_to_openai()` sorts before serializing, so the `tools` payload is byte-identical across runs and processes. All three abk pins bumped (root `0.14.3`, `trustee-core` `0.14.3`, `trustee-tui` `0.14.3` → `0.14.4`); crate bumps: core `0.6.20`→`0.6.21`, tui `0.3.12`→`0.3.13`, api `0.7.26`→`0.7.27` (api re-exports core).
+
 ## [0.9.28] - 2026-08-24
 
 ### Fixed
