@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.30] - 2026-08-25
+
+### Changed (deps)
+
+- **abk 0.14.4 → 0.14.5, umf 0.2.6 → 0.2.7** — assistant `reasoning_content` (thinking) is now preserved end-to-end in conversation history (nghr 1494b6fe follow-up). Previously the reasoning was captured from responses but dropped when re-serializing history for the next request; under the NInfer engine (`--preserve-thinking`) the re-rendered prompt then diverged from the resident prefix on every assistant message, so the engine fell back to `restore_turn_checkpoint` and re-prefilled the entire previous turn on the first call after each new user message (15–22s TTFT at 40–70k context). With reasoning round-tripped, the rendered prompt is byte-stable and the engine can append at its frontier. Crate bumps: core `0.6.21`→`0.6.22`, tui `0.3.13`→`0.3.14`, api `0.7.27`→`0.7.28`.
+
 ## [0.9.29] - 2026-08-25
 
 ### Changed (deps)
