@@ -1,6 +1,6 @@
 [package]
 name = "trustee-tui"
-version = "0.3.14"
+version = "0.3.15"
 edition = "2021"
 description = "TUI interface for Trustee agent"
 license = "MIT OR Apache-2.0"
@@ -25,4 +25,4 @@ unicode-width = "0.2"
 # Core shared types and workflow logic (brings in abk transitively)
 trustee-core = { version = "0.6.22", path = "../trustee-core" }
 # ABK for ResumeInfo type (used in run() resume_info parameter)
-abk = { version = "0.14.5", features = ["cli"] }
+abk = { version = "0.15.0", features = ["cli"] }

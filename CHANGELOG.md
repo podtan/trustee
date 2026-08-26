@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.31] - 2026-08-26
+
+### Changed (deps)
+
+- **abk 0.14.5 → 0.15.0 (BREAKING in abk)** — abk removed its dead orchestration paths: the deprecated trait-based `AgentSession` (including the history→request conversion that silently dropped assistant `tool_calls`) and the unused `AgentRuntime` "Simple Orchestration" (nghr 9f84f51d). No trustee code used either path — all entry points (CLI/TUI/web) run `Agent` + `agent_orchestration` — so this is a dependency-only change with zero behavioral impact.
+- **umf requirement aligned to 0.2.7** — the manifest now declares the version the 0.9.30 release actually shipped with (`Cargo.lock` already resolved 0.2.7); closes the manifest/lockfile/changelog mismatch.
+- Packaging hygiene: `HANDOFF*.md` added to `.gitignore` so working handoff notes can never ship in a published crate tarball again.
+
+Crate bumps: core `0.6.22`→`0.6.23`, tui `0.3.14`→`0.3.15`, api `0.7.28`→`0.7.29`.
+
 ## [0.9.30] - 2026-08-25
 
 ### Changed (deps)
