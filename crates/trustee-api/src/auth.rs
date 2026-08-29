@@ -308,7 +308,7 @@ impl AuthState {
     ///
     /// Returns Ok(()) if allowed (or if Cedar is not configured).
     /// Returns Err(()) if denied — caller should return 403 Forbidden.
-    fn check_cedar_authorized(&self, claims: &JwtClaims) -> Result<(), ()> {
+    fn check_cedar_authorized(&self, claims: &JwtClaims, action: &str) -> Result<(), ()> {
         let Some(ref authorizer) = self.cedar_authorizer else {
             return Ok(()); // Cedar not configured — allow
         };
@@ -363,7 +363,7 @@ impl AuthState {
             }
         };
 
-        let action_uid = match EntityUid::from_str(r#"Action::"Access""#) {
+        let action_uid = match EntityUid::from_str(&format!("Action::\"{action}\"")) {
             Ok(uid) => uid,
             Err(e) => {
                 tracing::error!("Cedar: failed to build action uid: {}", e);
@@ -412,6 +412,28 @@ impl AuthState {
 // ---------------------------------------------------------------------------
 // Auth checking — called by protected route handlers
 // ---------------------------------------------------------------------------
+
+/// Cedar action names (P2, nghr 645809c3).
+///
+/// Keep in sync with `policies/trustee_schema.cedarschema` — the schema and
+/// the embedded policy ship atomically with these constants; a filesystem
+/// policy override referencing removed actions will deny everything (loud,
+/// by design).
+pub mod actions {
+    pub const LIST_MODELS: &str = "ListModels";
+    pub const LIST_SESSIONS: &str = "ListSessions";
+    pub const VIEW_SESSION: &str = "ViewSession";
+    pub const VIEW_HISTORY: &str = "ViewHistory";
+    pub const CREATE_SESSION: &str = "CreateSession";
+    pub const COMMAND_SESSION: &str = "CommandSession";
+    pub const CANCEL_SESSION: &str = "CancelSession";
+    pub const HANDOFF_SESSION: &str = "HandoffSession";
+    pub const RESUME_SESSION: &str = "ResumeSession";
+    pub const UPDATE_SESSION: &str = "UpdateSession";
+    pub const DELETE_SESSION: &str = "DeleteSession";
+    pub const VIEW_MCP_CREDENTIALS: &str = "ViewMcpCredentials";
+    pub const UPDATE_MCP_CREDENTIALS: &str = "UpdateMcpCredentials";
+}
 
 /// Principal kind (16D). `Agent` iff the enriched `role` claim contains
 /// "agent" — the exact value mapped by Kanidm's `pdt-api-agents` group
@@ -558,6 +580,7 @@ fn dev_user_key(token: &str) -> Option<String> {
 pub async fn check_auth(
     auth: &Option<Arc<AuthState>>,
     headers: &axum::http::HeaderMap,
+    action: &str,
 ) -> Result<(Option<String>, String), StatusCode> {
     let Some(auth) = auth.as_ref() else {
         return Ok((None, "default".to_string())); // Auth not configured — allow
@@ -584,7 +607,7 @@ pub async fn check_auth(
 
         return match auth.validate_token(&token).await {
             Ok(claims) => {
-                if auth.check_cedar_authorized(&claims).is_err() {
+                if auth.check_cedar_authorized(&claims, action).is_err() {
                     return Err(StatusCode::FORBIDDEN);
                 }
                 Ok((None, jwt_user_key(&claims)))
@@ -624,7 +647,7 @@ pub async fn check_auth(
         Ok(access_token) => match auth.validate_token(&access_token).await {
             Ok(claims) => {
                 // Cedar authorization check
-                if auth.check_cedar_authorized(&claims).is_err() {
+                if auth.check_cedar_authorized(&claims, action).is_err() {
                     return Err(StatusCode::FORBIDDEN);
                 }
                 // Roll the cookie — reset max-age so active users stay logged in
@@ -645,7 +668,7 @@ pub async fn check_auth(
                     Ok(new_token) => match auth.validate_token(&new_token).await {
                         Ok(claims) => {
                             // Cedar authorization check
-                            if auth.check_cedar_authorized(&claims).is_err() {
+                            if auth.check_cedar_authorized(&claims, action).is_err() {
                                 return Err(StatusCode::FORBIDDEN);
                             }
                             let secure = auth.client_config.redirect_uri.starts_with("https");
@@ -1052,9 +1075,13 @@ async fn mcp_login_handler(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, AuthError> {
     // Require authentication — user must be logged into trustee-web
-    let (_cookie, _user_key) = crate::auth::check_auth(&state.auth, &headers)
-        .await
-        .map_err(|_| AuthError::AuthNotConfigured)?;
+    let (_cookie, _user_key) = crate::auth::check_auth(
+        &state.auth,
+        &headers,
+        crate::auth::actions::UPDATE_MCP_CREDENTIALS,
+    )
+    .await
+    .map_err(|_| AuthError::AuthNotConfigured)?;
 
     let auth = state.auth.as_ref().ok_or(AuthError::AuthNotConfigured)?;
 
@@ -1262,7 +1289,13 @@ async fn mcp_status_handler(
     use pep::{FileTokenStore, TokenStore};
 
     // Require auth
-    let (_cookie, user_key) = match crate::auth::check_auth(&state.auth, &headers).await {
+    let (_cookie, user_key) = match crate::auth::check_auth(
+        &state.auth,
+        &headers,
+        crate::auth::actions::VIEW_MCP_CREDENTIALS,
+    )
+    .await
+    {
         Ok(result) => result,
         Err(code) => return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response(),
     };
@@ -1392,7 +1425,13 @@ async fn mcp_logout_handler(
     use pep::{FileTokenStore, TokenStore};
 
     // Require auth
-    let (_cookie, user_key) = match crate::auth::check_auth(&state.auth, &headers).await {
+    let (_cookie, user_key) = match crate::auth::check_auth(
+        &state.auth,
+        &headers,
+        crate::auth::actions::UPDATE_MCP_CREDENTIALS,
+    )
+    .await
+    {
         Ok(result) => result,
         Err(code) => return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response(),
     };
@@ -1693,5 +1732,162 @@ mod principal_tests {
         assert_eq!(u.role.as_deref(), Some("agent"));
         assert_eq!(u.kind, PrincipalKind::Agent);
         assert_eq!(u.username.as_deref(), Some("farzan"));
+    }
+}
+
+#[cfg(test)]
+mod cedar_p2_tests {
+    use super::*;
+    use cedar_policy::{Context, Entities, EntityUid, Request};
+    use pep::cedar::{CedarAuthorizer, CedarConfig};
+    use std::collections::HashMap;
+
+    const POLICY: &str = include_str!("../policies/trustee_default.cedar");
+    const SCHEMA: &str = include_str!("../policies/trustee_schema.cedarschema");
+
+    async fn authorizer() -> CedarAuthorizer {
+        // Unique per call: tests run concurrently and must not share files.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("trustee-cedar-p2-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let policy_path = dir.join("trustee_default.cedar");
+        let schema_path = dir.join("trustee_schema.cedarschema");
+        std::fs::write(&policy_path, POLICY).expect("write policy");
+        std::fs::write(&schema_path, SCHEMA).expect("write schema");
+        let cfg = CedarConfig {
+            policy_path,
+            schema_path: Some(schema_path),
+            entities_path: None,
+            default_decision: pep::cedar::DefaultDecision::Deny,
+            validate_on_load: true,
+            policy_store_url: None,
+            policy_store_token: None,
+            embedded_policy: Some(POLICY),
+            embedded_schema: Some(SCHEMA),
+        };
+        CedarAuthorizer::new_with_policy_store(cfg)
+            .await
+            .expect("Cedar init from shipped sources")
+    }
+
+    fn claims_with_role(role: Option<&str>) -> JwtClaims {
+        let mut c = JwtClaims::default();
+        c.sub = "test-sub".to_string();
+        if let Some(r) = role {
+            c.extra.insert("role".to_string(), serde_json::json!(r));
+        }
+        c
+    }
+
+    /// Mirrors check_cedar_authorized's request construction exactly.
+    async fn allowed(auth: &CedarAuthorizer, role: Option<&str>, action: &str) -> bool {
+        let claims = claims_with_role(role);
+        let principal_entity = pep::cedar::build_principal_entity(&claims).unwrap();
+        let app_entity = cedar_policy::Entity::new(
+            EntityUid::from_str(r#"TrusteeApp::"default""#).unwrap(),
+            HashMap::new(),
+            std::collections::HashSet::new(),
+        )
+        .unwrap();
+        let entities = Entities::from_entities(vec![principal_entity, app_entity], None).unwrap();
+        let request = Request::new(
+            pep::cedar::build_principal_uid(&claims).unwrap(),
+            EntityUid::from_str(&format!("Action::\"{action}\"")).unwrap(),
+            EntityUid::from_str(r#"TrusteeApp::"default""#).unwrap(),
+            Context::empty(),
+            None,
+        )
+        .unwrap();
+        auth.is_allowed_with_entities(&request, &entities).allowed()
+    }
+
+    #[tokio::test]
+    async fn admin_allowed_including_destructive() {
+        let auth = authorizer().await;
+        for action in [
+            actions::VIEW_SESSION,
+            actions::COMMAND_SESSION,
+            actions::DELETE_SESSION,
+            actions::UPDATE_MCP_CREDENTIALS,
+        ] {
+            assert!(
+                allowed(&auth, Some("admin"), action).await,
+                "admin {action}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn user_full_session_management() {
+        let auth = authorizer().await;
+        for action in [
+            actions::CREATE_SESSION,
+            actions::COMMAND_SESSION,
+            actions::DELETE_SESSION,
+            actions::VIEW_HISTORY,
+            actions::UPDATE_MCP_CREDENTIALS,
+        ] {
+            assert!(allowed(&auth, Some("user"), action).await, "user {action}");
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_working_set_but_delete_denied() {
+        let auth = authorizer().await;
+        for action in [
+            actions::CREATE_SESSION,
+            actions::COMMAND_SESSION,
+            actions::CANCEL_SESSION,
+            actions::RESUME_SESSION,
+            actions::VIEW_HISTORY,
+            actions::UPDATE_MCP_CREDENTIALS,
+        ] {
+            assert!(
+                allowed(&auth, Some("agent"), action).await,
+                "agent {action}"
+            );
+        }
+        assert!(
+            !allowed(&auth, Some("agent"), actions::DELETE_SESSION).await,
+            "agent must NOT delete sessions (fail-closed start; revisit at task F)"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_read_only() {
+        let auth = authorizer().await;
+        for action in [
+            actions::VIEW_SESSION,
+            actions::LIST_SESSIONS,
+            actions::VIEW_HISTORY,
+        ] {
+            assert!(allowed(&auth, Some("service"), action).await, "service {action}");
+        }
+        for action in [actions::COMMAND_SESSION, actions::DELETE_SESSION] {
+            assert!(
+                !allowed(&auth, Some("service"), action).await,
+                "service {action} denied"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_or_unknown_role_denied_everything() {
+        let auth = authorizer().await;
+        for role in [None, Some("intern"), Some("Admin")] {
+            assert!(
+                !allowed(&auth, role, actions::VIEW_SESSION).await,
+                "role={role:?} must be denied (fail-closed default)"
+            );
+        }
+    }
+
+    #[test]
+    fn boot_decision_is_fail_closed() {
+        assert!(crate::cedar_boot_decision(true, false, false).is_err());
+        assert!(crate::cedar_boot_decision(true, false, true).is_ok());
+        assert!(crate::cedar_boot_decision(true, true, false).is_ok());
+        assert!(crate::cedar_boot_decision(false, false, false).is_ok());
     }
 }

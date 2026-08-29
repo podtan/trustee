@@ -54,11 +54,21 @@ pub async fn run(
             cfg.issuer_url
         );
 
-        // Parse optional Cedar authorization config
-        let cedar_authorizer = parse_cedar_config(&config_toml).await;
+        // Parse Cedar authorization config (P2: fail-closed on init failure)
+        let cedar_boot = parse_cedar_config(&config_toml)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        cedar_boot_decision(
+            true,
+            cedar_boot.authorizer.is_some(),
+            cedar_boot.allow_disabled,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        Some(Arc::new(AuthState::with_cedar(cfg, cedar_authorizer)))
+        Some(Arc::new(AuthState::with_cedar(cfg, cedar_boot.authorizer)))
     } else {
+        // Open mode — loud, by design (local/dev posture preserved).
+        tracing::warn!("AUTH NOT CONFIGURED: trustee-web is running WITHOUT authentication or Cedar authorization (no [oidc]/[dev] section). Never expose this to a network.");
         None
     };
 
@@ -238,13 +248,53 @@ pub async fn run(
 /// - `[cedar] policy_store_url = "https://..."` (remote policy store)
 ///
 /// When enabled without filesystem paths, uses embedded defaults.
-async fn parse_cedar_config(config_toml: &str) -> Option<Arc<pep::cedar::CedarAuthorizer>> {
-    let table: toml::Table = match toml::from_str(config_toml) {
-        Ok(t) => t,
-        Err(_) => return None,
-    };
+/// P2 boot result for Cedar (nghr 645809c3).
+struct CedarBoot {
+    authorizer: Option<Arc<pep::cedar::CedarAuthorizer>>,
+    /// Explicit per-environment escape hatch: `[cedar] allow_disabled = true`
+    /// opts THIS deployment into identity-only mode (Cedar absent). The
+    /// DEFAULT is fail-closed: web mode with auth configured refuses to
+    /// boot without a working Cedar authorizer.
+    allow_disabled: bool,
+}
 
-    let cedar_section = table.get("cedar")?.as_table()?;
+/// Pure decision for the P2 fail-closed posture — unit-tested.
+pub(crate) fn cedar_boot_decision(
+    auth_configured: bool,
+    cedar_present: bool,
+    allow_disabled: bool,
+) -> Result<(), String> {
+    if !auth_configured {
+        // Open mode (no [oidc]/[dev]) — preserved for local/dev usage; the
+        // absence of auth is logged loudly at boot.
+        return Ok(());
+    }
+    if cedar_present || allow_disabled {
+        Ok(())
+    } else {
+        Err(
+            "Cedar authorization is REQUIRED in web mode (fail-closed, nghr 645809c3). \
+             Either configure it: [cedar] enabled = true (policies ship embedded), \
+             or explicitly opt out per environment: [cedar] allow_disabled = true."
+                .to_string(),
+        )
+    }
+}
+
+async fn parse_cedar_config(config_toml: &str) -> Result<CedarBoot, String> {
+    let parsed: Option<toml::Table> = toml::from_str(config_toml).ok();
+    let cedar_table = parsed.as_ref().and_then(|t| t.get("cedar"));
+    let allow_disabled = cedar_table
+        .and_then(|c| c.get("allow_disabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let Some(cedar_section) = cedar_table.and_then(|c| c.as_table().cloned()) else {
+        return Ok(CedarBoot {
+            authorizer: None,
+            allow_disabled,
+        });
+    };
     let enabled = cedar_section
         .get("enabled")
         .and_then(|v| v.as_bool())
@@ -252,15 +302,19 @@ async fn parse_cedar_config(config_toml: &str) -> Option<Arc<pep::cedar::CedarAu
 
     if !enabled {
         tracing::debug!("Cedar authorization disabled (default)");
-        return None;
+        return Ok(CedarBoot {
+            authorizer: None,
+            allow_disabled,
+        });
     }
 
     tracing::info!("Cedar authorization enabled — initializing authorizer");
 
     // Default policy/schema paths point to ~/{agent_name}/policies/ (created by trustee init).
     // Agent name is read from [agent] name in config, defaulting to "trustee".
-    let agent_name = table
-        .get("agent")
+    let agent_name = parsed
+        .as_ref()
+        .and_then(|t| t.get("agent"))
         .and_then(|a| a.as_table())
         .and_then(|a| a.get("name"))
         .and_then(|n| n.as_str())
@@ -312,12 +366,22 @@ async fn parse_cedar_config(config_toml: &str) -> Option<Arc<pep::cedar::CedarAu
     match pep::cedar::CedarAuthorizer::new_with_policy_store(cedar_config).await {
         Ok(auth) => {
             tracing::info!("Cedar authorizer initialized successfully");
-            Some(Arc::new(auth))
+            Ok(CedarBoot {
+                authorizer: Some(Arc::new(auth)),
+                allow_disabled,
+            })
         }
+        // FAIL-CLOSED (nghr 645809c3): the v0.1.0–0.1.1 fame bug class —
+        // enabled-but-broken Cedar used to silently disable authorization.
+        // Now the boot dies loudly instead.
         Err(e) => {
-            tracing::error!("Failed to initialize Cedar authorizer: {}", e);
-            tracing::warn!("Cedar was enabled but initialization failed — auth will proceed WITHOUT Cedar");
-            None
+            let msg = format!(
+                "Cedar authorization is enabled but FAILED to initialize: {e}. \
+                 Refusing to boot (fail-closed). Fix the policy/schema configuration \
+                 or explicitly set [cedar] allow_disabled = true to run identity-only."
+            );
+            tracing::error!("{msg}");
+            Err(msg)
         }
     }
 }

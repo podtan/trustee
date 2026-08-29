@@ -1,8 +1,13 @@
-// Cedar Schema for Trustee API Authorization
+// Cedar Schema for Trustee API Authorization (P2 — nghr 645809c3).
 //
-// Defines the entity model used by Trustee's authorization layer.
-// Principal is always a User (built from JWT claims), action is Access,
-// and resource is the Trustee API itself.
+// Empty namespace (fame/nghr lesson: no Podtan:: prefix, no spaces/hyphens
+// in entity type names). The principal is a User entity built from JWT
+// claims (pep build_principal_entity: type "User", id = sub, attributes
+// email/name/username/role/groups — role first value when Kanidm sends an
+// array). Resource is the TrusteeApp singleton "default".
+//
+// Actions are slug-derived PascalCase, one per real route semantics.
+// Roles (Kanidm claim maps — facts doc 42977cb7): admin | user | service | agent.
 
 entity User = {
     email?: String,
@@ -11,13 +16,18 @@ entity User = {
     groups?: Set<String>,
 };
 
-// The Trustee API service — acts as the resource for all requests.
 entity TrusteeApp;
 
-// Single action for API access.
-// Trustee uses Cedar as an identity-level gate (authenticated users can
-// access the API). Resource-level policies can be added per deployment.
-action Access appliesTo {
-    principal: [User],
-    resource: [TrusteeApp],
-};
+action ListModels appliesTo { principal: [User], resource: [TrusteeApp] };
+action ListSessions appliesTo { principal: [User], resource: [TrusteeApp] };
+action ViewSession appliesTo { principal: [User], resource: [TrusteeApp] };
+action ViewHistory appliesTo { principal: [User], resource: [TrusteeApp] };
+action CreateSession appliesTo { principal: [User], resource: [TrusteeApp] };
+action CommandSession appliesTo { principal: [User], resource: [TrusteeApp] };
+action CancelSession appliesTo { principal: [User], resource: [TrusteeApp] };
+action HandoffSession appliesTo { principal: [User], resource: [TrusteeApp] };
+action ResumeSession appliesTo { principal: [User], resource: [TrusteeApp] };
+action UpdateSession appliesTo { principal: [User], resource: [TrusteeApp] };
+action DeleteSession appliesTo { principal: [User], resource: [TrusteeApp] };
+action ViewMcpCredentials appliesTo { principal: [User], resource: [TrusteeApp] };
+action UpdateMcpCredentials appliesTo { principal: [User], resource: [TrusteeApp] };
