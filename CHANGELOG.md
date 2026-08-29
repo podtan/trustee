@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.0] - 2026-08-29
+
+### ⚠ UPGRADE REQUIREMENT — READ BEFORE DEPLOYING
+
+Web mode is now **fail-closed on Cedar** (nghr 645809c3). After upgrading, the web **refuses to boot** unless ONE of these is in `trustee.toml`:
+
+- `[cedar] enabled = true` — **recommended**; the role-based policies ship embedded, no extra files needed. Roles flow automatically from Kanidm claims via userinfo enrichment (admin | user | service | agent per the pdt-api-* / tocpi-services group maps).
+- `[cedar] allow_disabled = true` — explicit per-environment opt-out preserving the old identity-only posture.
+
+Additionally, a `[cedar] enabled = true` whose policy/schema fails to initialize now **hard-exits at boot** (previously it silently disabled authorization — the fame v0.1.0–0.1.1 bug class).
+
+### Breaking
+
+- **JWT principal user_key pinned to `preferred_username || sub`** (16D, never email). Human web users were previously keyed by JWT `sub`: on first login after upgrading, the namespace hash changes and prior checkpoints/history under the old hash are orphaned (not deleted). Dev-mode keys unchanged.
+- Single Cedar `Action::"Access"` replaced by 13 per-action permits. Deployments with a filesystem policy override (`[cedar] policy_path`) referencing `Action::"Access"` will **deny everything** — update override files to the shipped action names.
+
+### Added
+
+- **Cedar per-action authorization** — every protected route (22 HTTP + 3 MCP-credential endpoints) now evaluates a route-specific action against role policies: `admin` = everything; `user` = full session management; `agent` = the agents-as-users working set **except DeleteSession** (fail-closed start, revisit at cutover); `service` = read-only; missing/unknown role = denied. Schema (`trustee_schema.cedarschema`) + policy (`trustee_default.cedar`) ship embedded via `include_str!`; filesystem overrides remain supported.
+- **Agent principals** (16D): `PrincipalKind { Human, Agent }` classified from the enriched `role` claim (string or array); `AuthUser.role`/`AuthUser.kind`; dev-mode agent tokens `dev:agent:<name>` → `agent-<name>` namespace (gated by `local_dev_mode`) so per-user cache/THQ E2E runs without Kanidm accounts.
+- `scripts/check_policies.sh` — cedar CLI validate + 9 runtime-faithful allow/deny controls as a release gate (mirrors fame's post-v0.1.2 workflow).
+
+Crate bumps: api `0.8.0`→`0.9.0` (auth behavior = minor under 0.x), root `0.10.0`→`0.11.0` (core 0.7.0 / tui 0.4.0 unchanged). Tests: 51/51 (+6 Cedar enforcement tests incl. boot-decision fail-closed; +10 16D principal tests; +1 agent-namespace isolation). fmt flat at 272. Policy gate: `scripts/check_policies.sh` PASSED.
+
 ## [0.10.0] - 2026-08-29
 
 ### Added
