@@ -1463,6 +1463,39 @@ mod tests {
         }
         // dirs::home_dir() unavailable in sandbox → covered by core tests.
     }
+
+    /// 16D integration guard: dev-agent principals (user_key `agent-<name>`)
+    /// get their OWN session bucket and home-dir namespace — one agent can
+    /// never see another's sessions, and both go through the same
+    /// user_hash isolation path as humans.
+    #[tokio::test]
+    async fn agent_principals_get_isolated_session_buckets() {
+        let state = test_state();
+        let key_a = "agent-farzan";
+        let key_b = "agent-paydar";
+
+        let (sid_a, session_a, _tx_a, _ts_a) = state.ensure_active_session(key_a).await;
+        let (_sid_b, _session_b, _tx_b, _ts_b) = state.ensure_active_session(key_b).await;
+
+        // Each agent resolves its own session; B cannot see A's by id.
+        assert!(
+            state.get_session_by_any_id(key_a, &sid_a).await.is_some(),
+            "owner bucket resolves its own session"
+        );
+        assert!(
+            state.get_session_by_any_id(key_b, &sid_a).await.is_none(),
+            "cross-agent session access must be 404/None"
+        );
+        assert!(Arc::strong_count(&session_a) >= 1);
+
+        // Same isolation path as humans: home dir = users_root/user_hash(key).
+        if let Some(home) = state.get_user_home_dir(key_a) {
+            assert_eq!(
+                home.file_name().and_then(|n| n.to_str()),
+                Some(trustee_core::user_hash(key_a)).as_deref()
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

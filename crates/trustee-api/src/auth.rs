@@ -413,6 +413,44 @@ impl AuthState {
 // Auth checking — called by protected route handlers
 // ---------------------------------------------------------------------------
 
+/// Principal kind (16D). `Agent` iff the enriched `role` claim contains
+/// "agent" — the exact value mapped by Kanidm's `pdt-api-agents` group
+/// (role vocabulary: admin | user | service | agent, facts doc 42977cb7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrincipalKind {
+    Human,
+    Agent,
+}
+
+impl PrincipalKind {
+    /// Classify from the primary role. Anything that is not exactly
+    /// "agent" is Human — fail-toward-human keeps the default posture
+    /// identical to pre-16D behavior.
+    pub fn from_role(role: Option<&str>) -> Self {
+        match role {
+            Some("agent") => Self::Agent,
+            _ => Self::Human,
+        }
+    }
+}
+
+/// Extract the primary role from enriched JWT claims.
+///
+/// PEP merges userinfo into `extra` (flattened claims). Kanidm delivers
+/// `role` as a STRING or an ARRAY (pep 366e8ed lesson) — accept both,
+/// first value wins.
+fn claim_role(claims: &JwtClaims) -> Option<String> {
+    match claims.extra.get("role") {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .next()
+            .map(|s| s.to_string()),
+        _ => None,
+    }
+}
+
 /// Authenticated user info extracted from the token.
 #[derive(Debug, Clone)]
 pub struct AuthUser {
@@ -421,16 +459,24 @@ pub struct AuthUser {
     pub name: Option<String>,
     pub username: Option<String>,
     pub is_dev: bool,
+    /// Primary role from enriched claims (16D).
+    pub role: Option<String>,
+    /// Principal classification (16D): Agent iff role == "agent".
+    pub kind: PrincipalKind,
 }
 
 impl From<JwtClaims> for AuthUser {
     fn from(claims: JwtClaims) -> Self {
+        let role = claim_role(&claims);
+        let kind = PrincipalKind::from_role(role.as_deref());
         Self {
             sub: claims.sub,
             email: claims.email,
             name: claims.name,
             username: claims.preferred_username,
             is_dev: false,
+            role,
+            kind,
         }
     }
 }
@@ -466,9 +512,21 @@ fn jwt_user_key(claims: &JwtClaims) -> String {
     }
 }
 
-/// Extract a user key from a dev-mode token string (`dev:email:name:username`).
-/// Returns `dev:{email}` on success.
+/// Extract a user key from a dev-mode token string.
+///
+/// Two formats (BOTH gated by `local_dev_mode` at every call site):
+/// - `dev:agent:<name>` → `agent-{name}` (16D: agent namespace in dev —
+///   unblocks per-user cache + THQ E2E without Kanidm accounts; distinct
+///   prefix so dev agents can never collide with dev humans)
+/// - `dev:email:name:username` → `dev:{email}` (dev humans, legacy)
 fn dev_user_key(token: &str) -> Option<String> {
+    if let Some(name) = token.strip_prefix("dev:agent:") {
+        let name = name.trim();
+        if name.is_empty() || name.contains(':') {
+            return None;
+        }
+        return Some(format!("agent-{name}"));
+    }
     let parts: Vec<&str> = token.splitn(4, ':').collect();
     if parts.len() >= 4 {
         Some(format!("dev:{}", parts[1]))
@@ -1520,5 +1578,120 @@ impl IntoResponse for AuthError {
             AuthError::AuthNotConfigured => (StatusCode::NOT_IMPLEMENTED, "Authentication not configured"),
         };
         Redirect::temporary(&format!("/?error={}", urlencoding::encode(msg))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod principal_tests {
+    use super::*;
+    use pep::oidc::types::JwtClaims;
+    use std::collections::HashMap;
+
+    fn claims_with_role(role: serde_json::Value) -> JwtClaims {
+        let mut c = JwtClaims::default();
+        c.sub = "sub-uuid".to_string();
+        c.preferred_username = Some("farzan".to_string());
+        c.extra.insert("role".to_string(), role);
+        c
+    }
+
+    // -- dev_user_key (16D dev:agent namespace) ------------------------------
+
+    #[test]
+    fn dev_agent_token_yields_agent_namespaced_key() {
+        assert_eq!(
+            dev_user_key("dev:agent:farzan"),
+            Some("agent-farzan".to_string())
+        );
+        assert_eq!(
+            dev_user_key("dev:agent:paydar"),
+            Some("agent-paydar".to_string())
+        );
+    }
+
+    #[test]
+    fn dev_agent_token_rejects_empty_and_colon_names() {
+        assert_eq!(dev_user_key("dev:agent:"), None);
+        assert_eq!(dev_user_key("dev:agent:  "), None);
+        assert_eq!(
+            dev_user_key("dev:agent:a:b"),
+            None,
+            "name must not contain ':'"
+        );
+    }
+
+    #[test]
+    fn dev_human_token_format_unchanged() {
+        assert_eq!(
+            dev_user_key("dev:a@b.c:Some Name:someuser"),
+            Some("dev:a@b.c".to_string())
+        );
+        assert_eq!(dev_user_key("dev:only:two"), None);
+    }
+
+    // -- claim_role / PrincipalKind (string OR array role) --------------------
+
+    #[test]
+    fn role_as_string_classifies_agent() {
+        let c = claims_with_role(serde_json::json!("agent"));
+        assert_eq!(claim_role(&c).as_deref(), Some("agent"));
+        assert_eq!(AuthUser::from(c).kind, PrincipalKind::Agent);
+    }
+
+    #[test]
+    fn role_as_array_takes_first_value() {
+        // Kanidm may deliver role as an array (pep 366e8ed lesson).
+        let c = claims_with_role(serde_json::json!(["agent", "other"]));
+        assert_eq!(claim_role(&c).as_deref(), Some("agent"));
+        assert_eq!(AuthUser::from(c).kind, PrincipalKind::Agent);
+    }
+
+    #[test]
+    fn non_agent_roles_classify_human() {
+        for role in ["user", "admin", "service"] {
+            let c = claims_with_role(serde_json::json!(role));
+            assert_eq!(claim_role(&c).as_deref(), Some(role));
+            assert_eq!(AuthUser::from(c).kind, PrincipalKind::Human, "role={role}");
+        }
+    }
+
+    #[test]
+    fn missing_or_nonstring_role_classifies_human() {
+        let mut c = JwtClaims::default();
+        c.sub = "sub-uuid".to_string();
+        assert_eq!(claim_role(&c), None);
+        assert_eq!(AuthUser::from(c.clone()).kind, PrincipalKind::Human);
+        c.extra.insert("role".to_string(), serde_json::json!(42));
+        assert_eq!(claim_role(&c), None, "non-string non-array role ignored");
+    }
+
+    // -- jwt_user_key (PINNED: preferred_username || sub, never email) --------
+
+    #[test]
+    fn user_key_prefers_preferred_username() {
+        let mut c = JwtClaims::default();
+        c.sub = "sub-uuid".to_string();
+        c.preferred_username = Some("farzan".to_string());
+        c.email = Some("rebindable@example.com".to_string());
+        assert_eq!(jwt_user_key(&c), "farzan", "email must never be the key");
+    }
+
+    #[test]
+    fn user_key_falls_back_to_sub_on_blank_username() {
+        let mut c = JwtClaims::default();
+        c.sub = "sub-uuid".to_string();
+        c.preferred_username = Some("   ".to_string());
+        assert_eq!(jwt_user_key(&c), "sub-uuid");
+        c.preferred_username = None;
+        assert_eq!(jwt_user_key(&c), "sub-uuid");
+    }
+
+    #[test]
+    fn authuser_carries_role_and_kind() {
+        let c = claims_with_role(serde_json::json!("agent"));
+        let u = AuthUser::from(c);
+        assert_eq!(u.role.as_deref(), Some("agent"));
+        assert_eq!(u.kind, PrincipalKind::Agent);
+        assert_eq!(u.username.as_deref(), Some("farzan"));
     }
 }
