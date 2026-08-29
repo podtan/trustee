@@ -241,10 +241,21 @@ impl AuthState {
             .map_err(|e| anyhow::anyhow!("Token validation failed: {}", e))?;
 
         // Enrich with userinfo for role/groups (cached, no-op if already present)
-        let _ = self
+        // 2de5d1eb: this used to be `let _ =` — a silent role-less principal
+        // that Cedar then fail-closed DENIED with `matched policies: []` and
+        // zero diagnosis. Enrichment failure must SCREAM.
+        if let Err(e) = self
             .resource_server
             .enrich_claims_with_userinfo(&mut claims, token, &self.config.issuer_url, None)
-            .await;
+            .await
+        {
+            tracing::error!(
+                "userinfo enrichment FAILED for sub {}: {} — principal carries NO role/groups; \
+                 with Cedar enabled every request will be DENIED until enrichment succeeds",
+                claims.sub,
+                e
+            );
+        }
 
         // PEP only merges groups/role from userinfo. If name/email are missing
         // (Kanidm JWTs only contain sub), fetch them from userinfo directly.
@@ -506,22 +517,26 @@ impl From<JwtClaims> for AuthUser {
 /// Cookie max-age for session cookies (1 hour, matching the server-side idle timeout).
 const SESSION_COOKIE_MAX_AGE: StdDuration = StdDuration::from_secs(3600);
 
-/// PINNED (16D): user_key for JWT principals.
+/// PINNED (16D) + AGENT CARVE-OUT (16E): user_key for JWT principals.
 ///
-/// `preferred_username` first, falling back to `sub`. NEVER email — email is
-/// rebindable in Kanidm and would silently re-home a principal's namespace.
+/// Humans: `preferred_username` first, falling back to `sub`. NEVER email —
+/// email is rebindable in Kanidm and would silently re-home a principal's
+/// namespace.
 ///
-/// Kanidm service accounts carry a stable, human-readable
-/// `preferred_username` (the agent name: "farzan", "paydar"), so agent
-/// principals land in `~/.trustee/users/{sha256(agent_name)[:8Bhex]}/` —
-/// the same isolation path as humans. This rule is pinned in the approved
-/// Kanidm identity facts doc (42977cb7): `preferred_username || sub`.
+/// Agents: `sub` — ALWAYS. Exchanged agent tokens carry no
+/// `preferred_username` today, but a future scope change (e.g. adding
+/// `profile` to the exchange) would add it and silently re-home every
+/// agent's namespace — the exact migration bug class 0.10→0.11 inflicted on
+/// humans. Agents are pinned to `sub` for the lifetime of the namespace.
 ///
-/// MIGRATION NOTE: this changed the key for existing JWT humans too (they
-/// were keyed by `sub` before 0.11.0). Kanidm humans have a
+/// MIGRATION NOTE (humans): the 16D rule changed the key for existing JWT
+/// humans (they were keyed by `sub` before 0.11.0). Kanidm humans have a
 /// `preferred_username`, so their namespace hash changes on first login —
 /// pre-web-production history under the old hash is orphaned, not deleted.
 fn jwt_user_key(claims: &JwtClaims) -> String {
+    if PrincipalKind::from_role(claim_role(claims).as_deref()) == PrincipalKind::Agent {
+        return claims.sub.clone();
+    }
     match claims.preferred_username.as_deref() {
         Some(u) if !u.trim().is_empty() => u.trim().to_string(),
         _ => {
@@ -1723,6 +1738,16 @@ mod principal_tests {
         assert_eq!(jwt_user_key(&c), "sub-uuid");
         c.preferred_username = None;
         assert_eq!(jwt_user_key(&c), "sub-uuid");
+    }
+
+    #[test]
+    fn user_key_agent_pinned_to_sub_even_with_username() {
+        // 16E: agent principals NEVER use preferred_username — a future
+        // token-scope change must not re-home agent namespaces.
+        let mut c = claims_with_role(serde_json::json!("agent"));
+        c.sub = "agent-sub-uuid".to_string();
+        c.preferred_username = Some("farzan".to_string());
+        assert_eq!(jwt_user_key(&c), "agent-sub-uuid");
     }
 
     #[test]

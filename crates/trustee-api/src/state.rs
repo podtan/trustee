@@ -725,8 +725,14 @@ impl ServerState {
             .ok()?;
         let overlay = user_config_toml.parse::<toml::Value>().ok()?;
 
-        let allowed =
-            |section: &str| section == "mcp" || (self.allow_llm_overlay && section == "llm");
+        let allowed = |section: &str| {
+            section == "mcp"
+                // 16E: [thq] is per-user identity config (read from the overlay
+                // file at boot); keeping it in the merged session config is
+                // inert but avoids a false "dropping" warn on every dispatch.
+                || section == "thq"
+                || (self.allow_llm_overlay && section == "llm")
+        };
         // Mask the user in logs: user_home's dir name IS the hash — never
         // log the raw key (keys may be emails). Log a short hash prefix.
         let dir_name = user_home

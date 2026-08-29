@@ -130,12 +130,10 @@ pub async fn run(
     // Start background message drain task (owns workflow_rx directly — no deadlock)
     state.clone().spawn_drain_task(workflow_rx);
 
-    // THQ auto-registration with Torpi (if [thq] section is present in config)
-    if let Some(cfg) = thq_config {
-        thq_register::spawn(cfg);
-    } else {
-        tracing::debug!("THQ registration not configured (no [thq] section)");
-    }
+    // THQ auto-registration with Torpi (16E): every agent-user with a
+    // per-user [thq] overlay registers as its own agent; the process-level
+    // [thq] is only a legacy single-registration fallback.
+    thq_register::spawn_all(thq_config, state.clone());
 
     // Build router
     //

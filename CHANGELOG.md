@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.0] - 2026-08-29
+
+### Added
+
+- **THQ per-agent-user registration (16E — agents-as-users)**: one trustee process registers EVERY agent-user with a per-user `[thq]` section (`~/.trustee/users/{hash}/config/trustee.toml`) as its own agent in Torpi THQ — stable per-user ids (`users/{hash}/agent_id`), identity Bearer from that user's `.env` (attribution; the THQ registration route remains open), and heartbeats whose `status` reflects live session state (`idle`/`running`, keyed by the THQ `owner_id` = the agent's `sub`). The process-level `[thq]` is now ONLY a legacy single-registration fallback used when no per-user entries exist: legacy installs keep their exact behavior; agents-as-users installs never double-register a machine entry.
+- Overlay allowlist accepts `[thq]` (inert in session config; prevents a false "dropping non-allowlisted section" warn on every dispatch for agent users).
+
+### Changed
+
+- **Agent principals are keyed by `sub` — always (16E pin on 16D)**: the JWT `user_key` rule `preferred_username || sub` now applies to HUMANS only. Agents (role=agent) are pinned to `sub` for the lifetime of the namespace, so a future token-scope change (e.g. adding `profile` to the Kanidm exchange) can never re-home an agent's `users/{hash}/` namespace.
+
+### Fixed
+
+- **Loud userinfo-enrichment failure** (2de5d1eb): enrichment errors were swallowed (`let _ =`) at token validation, producing a silent role-less principal that Cedar then fail-closed DENIED with `matched policies: []` and no diagnosis. Failures now log at ERROR with the consequence stated.
+
 ## [0.11.0] - 2026-08-29
 
 ### ⚠ UPGRADE REQUIREMENT — READ BEFORE DEPLOYING
