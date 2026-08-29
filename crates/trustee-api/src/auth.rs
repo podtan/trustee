@@ -438,6 +438,34 @@ impl From<JwtClaims> for AuthUser {
 /// Cookie max-age for session cookies (1 hour, matching the server-side idle timeout).
 const SESSION_COOKIE_MAX_AGE: StdDuration = StdDuration::from_secs(3600);
 
+/// PINNED (16D): user_key for JWT principals.
+///
+/// `preferred_username` first, falling back to `sub`. NEVER email — email is
+/// rebindable in Kanidm and would silently re-home a principal's namespace.
+///
+/// Kanidm service accounts carry a stable, human-readable
+/// `preferred_username` (the agent name: "farzan", "paydar"), so agent
+/// principals land in `~/.trustee/users/{sha256(agent_name)[:8Bhex]}/` —
+/// the same isolation path as humans. This rule is pinned in the approved
+/// Kanidm identity facts doc (42977cb7): `preferred_username || sub`.
+///
+/// MIGRATION NOTE: this changed the key for existing JWT humans too (they
+/// were keyed by `sub` before 0.11.0). Kanidm humans have a
+/// `preferred_username`, so their namespace hash changes on first login —
+/// pre-web-production history under the old hash is orphaned, not deleted.
+fn jwt_user_key(claims: &JwtClaims) -> String {
+    match claims.preferred_username.as_deref() {
+        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
+        _ => {
+            tracing::debug!(
+                "user_key: preferred_username missing/empty for sub {} — falling back to sub",
+                claims.sub
+            );
+            claims.sub.clone()
+        }
+    }
+}
+
 /// Extract a user key from a dev-mode token string (`dev:email:name:username`).
 /// Returns `dev:{email}` on success.
 fn dev_user_key(token: &str) -> Option<String> {
@@ -458,9 +486,10 @@ fn dev_user_key(token: &str) -> Option<String> {
 /// Returns `Err(StatusCode)` if auth is configured but no valid token is found.
 ///
 /// The returned `user_key` is the identity string used for session isolation
-/// (JWT `sub` claim for real users, `dev:{email}` for dev mode, `"default"`
-/// when auth is not configured). This avoids the need for handlers to call
-/// `resolve_user_key()` which would re-validate the JWT a second time.
+/// (JWT principals: `preferred_username || sub` — PINNED, see [`jwt_user_key`];
+/// `dev:{email}` for dev-mode humans, `agent-{name}` for `dev:agent:` tokens,
+/// `"default"` when auth is not configured). This avoids the need for handlers
+/// to call `resolve_user_key()` which would re-validate the JWT a second time.
 ///
 /// Token sources (in order):
 /// 1. `Authorization: Bearer <token>` header (raw JWT — validated directly)
@@ -500,7 +529,7 @@ pub async fn check_auth(
                 if auth.check_cedar_authorized(&claims).is_err() {
                     return Err(StatusCode::FORBIDDEN);
                 }
-                Ok((None, claims.sub))
+                Ok((None, jwt_user_key(&claims)))
             }
             Err(e) => {
                 tracing::warn!("Bearer token validation failed: {}", e);
@@ -548,7 +577,7 @@ pub async fn check_auth(
                     SESSION_COOKIE_MAX_AGE,
                     secure,
                 );
-                Ok((Some(cookie.to_string()), claims.sub))
+                Ok((Some(cookie.to_string()), jwt_user_key(&claims)))
             }
             Err(e) => {
                 // Token was returned but JWT validation failed (e.g. ExpiredSignature
@@ -568,7 +597,7 @@ pub async fn check_auth(
                                 SESSION_COOKIE_MAX_AGE,
                                 secure,
                             );
-                            Ok((Some(cookie.to_string()), claims.sub))
+                            Ok((Some(cookie.to_string()), jwt_user_key(&claims)))
                         }
                         Err(e2) => {
                             tracing::warn!("Session token still invalid after force-refresh: {}", e2);
