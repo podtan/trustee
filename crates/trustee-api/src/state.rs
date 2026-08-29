@@ -95,6 +95,30 @@ pub type SessionRegistry = Arc<DashMap<String, UserSessions>>;
 // ServerState
 // ---------------------------------------------------------------------------
 
+/// Cached per-user MCP tool loader (16C).
+///
+/// One entry per user hash. `loader: None` means the user's effective
+/// config has MCP disabled — agents run MCP-less via abk's
+/// `McpSource::Prebuilt(None)` (semantically identical to
+/// `[mcp] enabled = false` today, but with zero config re-parsing).
+pub struct McpLoaderEntry {
+    /// Built loader; `None` = MCP disabled for this user.
+    pub loader: Option<std::sync::Arc<abk::agent::McpToolLoader>>,
+    /// Content fingerprint of the effective `[mcp]` config (SHA-256, first
+    /// 8 bytes as u64). Content, never mtime — overlays are rewritten in place.
+    pub fingerprint: u64,
+    pub built_at: chrono::DateTime<chrono::Utc>,
+    /// Set when the last build failed; the message surfaces to the user's
+    /// next dispatch (fail loud). Other users are never affected.
+    pub degraded: Option<String>,
+    /// When `degraded` was set. Rebuilds are held back for
+    /// [`MCP_BUILD_RETRY_BACKOFF`] — a poison entry never sticks forever.
+    pub failed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Minimum delay before retrying a failed MCP loader build (16C).
+pub const MCP_BUILD_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Shared state accessible by all axum handlers.
 #[derive(Clone)]
 pub struct ServerState {
@@ -118,6 +142,10 @@ pub struct ServerState {
     /// Whether per-user config overlays may override the `[llm]` section.
     /// Default: `false` — overlays are limited to `[mcp]`.
     pub allow_llm_overlay: bool,
+    /// Per-user McpToolLoader cache (16C), keyed by user hash (never the raw key).
+    pub mcp_loaders: Arc<DashMap<String, McpLoaderEntry>>,
+    /// Single-flight build locks per user hash (16C).
+    mcp_build_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl ServerState {
@@ -160,6 +188,8 @@ impl ServerState {
             workflow_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
             max_sessions_per_user: 4,
             allow_llm_overlay: false,
+            mcp_loaders: Arc::new(DashMap::new()),
+            mcp_build_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -765,6 +795,162 @@ impl ServerState {
         Some(resolved)
     }
 
+    /// Get or build the per-user MCP tool loader (16C).
+    ///
+    /// Cache semantics:
+    /// - fingerprint = content hash of the effective `[mcp]` section
+    ///   (shared + allowlist-filtered overlay + ${VAR} substitution, i.e.
+    ///   exactly what `resolve_user_config` produces) — stale on ANY change.
+    /// - hit + match → `Arc` clone, zero network I/O.
+    /// - miss/stale → single-flight build (one build per user at a time;
+    ///   late arrivals re-check and reuse the winner's entry).
+    /// - `Ok(None)` = MCP disabled for this user → agent runs MCP-less via
+    ///   abk `McpSource::Prebuilt(None)` (same semantics as
+    ///   `[mcp] enabled = false`, no per-task re-evaluation).
+    /// - build failure → cached degraded entry with
+    ///   [`MCP_BUILD_RETRY_BACKOFF`]; the error is returned so THIS user's
+    ///   dispatch fails loud while other users are unaffected.
+    pub async fn get_or_build_mcp_loader(
+        &self,
+        user_key: &str,
+        token_store: &Arc<pep::MemoryTokenStore>,
+    ) -> Result<Option<std::sync::Arc<abk::agent::McpToolLoader>>, String> {
+        let user_hash = trustee_core::user_hash(user_key);
+
+        // Effective per-user config — the fingerprint source of truth.
+        let resolved = self.resolve_user_config(user_key);
+        let fingerprint = fingerprint_mcp_section(resolved.as_deref());
+
+        // Fast path: fresh, non-degraded entry.
+        if let Some(entry) = self.mcp_loaders.get(&user_hash) {
+            if entry.degraded.is_none() {
+                if entry.fingerprint == fingerprint {
+                    return Ok(entry.loader.clone());
+                }
+            } else if let (Some(err), Some(failed_at)) = (&entry.degraded, entry.failed_at) {
+                let backoff = chrono::Duration::from_std(MCP_BUILD_RETRY_BACKOFF)
+                    .unwrap_or_else(|_| chrono::Duration::seconds(30));
+                if chrono::Utc::now() < failed_at + backoff {
+                    return Err(err.clone());
+                }
+            }
+        }
+
+        // Single-flight: one build per user at a time.
+        let lock = self
+            .mcp_build_locks
+            .entry(user_hash.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+
+        // Double-check: another task may have built while we waited.
+        if let Some(entry) = self.mcp_loaders.get(&user_hash) {
+            if entry.degraded.is_none() && entry.fingerprint == fingerprint {
+                return Ok(entry.loader.clone());
+            }
+        }
+
+        match self
+            .build_mcp_loader(&user_hash, resolved.as_deref(), fingerprint, token_store)
+            .await
+        {
+            Ok(entry) => {
+                self.mcp_loaders.insert(user_hash.clone(), entry);
+                Ok(self.mcp_loaders.get(&user_hash).unwrap().loader.clone())
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "MCP loader build FAILED for user {}; dispatch fails loud, retry after {:?}",
+                    &user_hash[..8.min(user_hash.len())],
+                    MCP_BUILD_RETRY_BACKOFF
+                );
+                self.mcp_loaders.insert(
+                    user_hash,
+                    McpLoaderEntry {
+                        loader: None,
+                        fingerprint,
+                        built_at: chrono::Utc::now(),
+                        degraded: Some(err.clone()),
+                        failed_at: Some(chrono::Utc::now()),
+                    },
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// Build a loader entry from the effective config. No caching here —
+    /// the caller owns insertion and degraded handling.
+    async fn build_mcp_loader(
+        &self,
+        user_hash: &str,
+        resolved: Option<&str>,
+        fingerprint: u64,
+        token_store: &Arc<pep::MemoryTokenStore>,
+    ) -> Result<McpLoaderEntry, String> {
+        let mcp_config: Option<abk::config::McpConfig> = match resolved {
+            Some(toml_str) => {
+                let value = toml_str
+                    .parse::<toml::Value>()
+                    .map_err(|e| format!("config parse failed: {}", e))?;
+                match value.get("mcp") {
+                    Some(section) => {
+                        use serde::Deserialize as _;
+                        Some(
+                            abk::config::McpConfig::deserialize(section.clone())
+                                .map_err(|e| format!("invalid [mcp] config: {}", e))?,
+                        )
+                    }
+                    None => None,
+                }
+            }
+            None => None,
+        };
+
+        let loader = match mcp_config {
+            Some(cfg) if cfg.enabled => {
+                let built = abk::agent::McpToolLoader::with_token_store(
+                    &cfg,
+                    Some(token_store.clone() as std::sync::Arc<dyn pep::token_store::TokenStore>),
+                )
+                .await
+                .map_err(|e| format!("MCP loader build failed: {}", e))?;
+
+                // THE parity-evidence log line (16C acceptance + migration task):
+                // one INFO line per build; a task loop that reuses the cache
+                // shows exactly one line per user per fingerprint.
+                let servers: Vec<String> = built
+                    .server_statuses
+                    .iter()
+                    .map(|s| {
+                        if s.connected {
+                            format!("{}(up,{}tools)", s.name, s.tool_count)
+                        } else {
+                            format!("{}(DOWN)", s.name)
+                        }
+                    })
+                    .collect();
+                tracing::info!(
+                    "MCP loader built for user {}: servers=[{}] total_tools={}",
+                    &user_hash[..8.min(user_hash.len())],
+                    servers.join(", "),
+                    built.tool_count
+                );
+                Some(std::sync::Arc::new(built))
+            }
+            _ => None,
+        };
+
+        Ok(McpLoaderEntry {
+            loader,
+            fingerprint,
+            built_at: chrono::Utc::now(),
+            degraded: None,
+            failed_at: None,
+        })
+    }
+
     /// Spawn a background drain task for a specific session's workflow receiver.
     fn spawn_user_drain_task(
         &self,
@@ -1139,6 +1325,24 @@ fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<Strin
 // Tests (task 16B: overlay allowlist + consolidated user hash)
 // ---------------------------------------------------------------------------
 
+/// Fingerprint the effective `[mcp]` section of a resolved config (16C).
+///
+/// Content hash (SHA-256, first 8 bytes as u64) — never mtime: overlays are
+/// rewritten in place. Configs without `[mcp]` fingerprint to a stable
+/// constant, so the disabled state caches too.
+fn fingerprint_mcp_section(resolved: Option<&str>) -> u64 {
+    use sha2::{Digest, Sha256};
+    let section = resolved
+        .and_then(|s| s.parse::<toml::Value>().ok())
+        .and_then(|v| v.get("mcp").cloned());
+    let bytes = match section {
+        Some(v) => v.to_string().into_bytes(),
+        None => b"<no-mcp>".to_vec(),
+    };
+    let digest = Sha256::digest(&bytes);
+    u64::from_be_bytes(digest[..8].try_into().expect("sha256 digest >= 8 bytes"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1258,5 +1462,169 @@ mod tests {
             assert_eq!(home.parent(), Some(&users_root).map(|p| p.as_path()));
         }
         // dirs::home_dir() unavailable in sandbox → covered by core tests.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 16C — per-user McpToolLoader cache
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod mcp_loader_cache_tests {
+    use super::*;
+
+    fn state_with_shared(shared: &str) -> ServerState {
+        let (session, _rx) = Session::new();
+        let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(16);
+        let mut state = ServerState::new(session, ws_tx, None);
+        state.config_toml = Some(shared.to_string());
+        state
+    }
+
+    /// Deterministic throwaway user: real user-home path under
+    /// ~/.trustee/users/{hash} (that IS the resolution path under test),
+    /// with config/ subdir; caller cleans up.
+    struct TempUser {
+        key: String,
+        home: std::path::PathBuf,
+    }
+
+    impl TempUser {
+        fn new(tag: &str) -> Self {
+            let key = format!("16c-{tag}-{}@test.invalid", std::process::id());
+            let home = dirs::home_dir()
+                .expect("HOME available in test env")
+                .join(".trustee")
+                .join("users")
+                .join(trustee_core::user_hash(&key));
+            std::fs::create_dir_all(home.join("config")).expect("create user home");
+            Self { key, home }
+        }
+
+        fn write_overlay(&self, toml_str: &str) {
+            std::fs::write(self.home.join("config").join("trustee.toml"), toml_str)
+                .expect("write overlay");
+        }
+    }
+
+    impl Drop for TempUser {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
+    }
+
+    #[tokio::test]
+    async fn no_mcp_config_caches_disabled_marker() {
+        let state = state_with_shared("[server]\nport = 8080\n");
+        let user = TempUser::new("nomcp");
+        let ts = Arc::new(pep::MemoryTokenStore::new());
+
+        let first = state.get_or_build_mcp_loader(&user.key, &ts).await.unwrap();
+        assert!(first.is_none(), "no [mcp] anywhere → disabled marker");
+        assert_eq!(state.mcp_loaders.len(), 1, "exactly one cache entry");
+
+        // Second call is a fingerprint hit — same disabled marker, still one entry.
+        let second = state.get_or_build_mcp_loader(&user.key, &ts).await.unwrap();
+        assert!(second.is_none());
+        assert_eq!(state.mcp_loaders.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_cold_builds_single_flight() {
+        let state = Arc::new(state_with_shared("[server]\nport = 8080\n"));
+        let user = TempUser::new("singleflight");
+        let ts = Arc::new(pep::MemoryTokenStore::new());
+
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let state = state.clone();
+            let key = user.key.clone();
+            let ts = ts.clone();
+            handles.push(tokio::spawn(async move {
+                state.get_or_build_mcp_loader(&key, &ts).await
+            }));
+        }
+        for h in handles {
+            h.await.unwrap().expect("all five succeed");
+        }
+        assert_eq!(state.mcp_loaders.len(), 1, "single-flight → one entry");
+    }
+
+    #[tokio::test]
+    async fn fingerprint_change_triggers_rebuild() {
+        let state = state_with_shared("[server]\nport = 8080\n");
+        let user = TempUser::new("fpchange");
+        let ts = Arc::new(pep::MemoryTokenStore::new());
+
+        // v1: an enabled MCP server pointing at a blackhole port — abk keeps
+        // the loader with a DOWN status (connect refused is fast on loopback).
+        user.write_overlay("[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"v1\"\nurl = \"http://127.0.0.1:9/sse\"\n");
+        let v1 = state.get_or_build_mcp_loader(&user.key, &ts).await.unwrap();
+        assert!(v1.is_some(), "enabled [mcp] → real loader");
+        let fp1 = state
+            .mcp_loaders
+            .get(&trustee_core::user_hash(&user.key))
+            .unwrap()
+            .fingerprint;
+
+        // v2: different server URL → different content fingerprint → rebuild.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        user.write_overlay("[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"v2\"\nurl = \"http://127.0.0.1:9/other\"\n");
+        let v2 = state.get_or_build_mcp_loader(&user.key, &ts).await.unwrap();
+        assert!(v2.is_some());
+        let entry = state
+            .mcp_loaders
+            .get(&trustee_core::user_hash(&user.key))
+            .unwrap();
+        assert_ne!(
+            entry.fingerprint, fp1,
+            "fingerprint must change with content"
+        );
+        assert!(entry.degraded.is_none());
+
+        // The old Arc stays valid for in-flight sessions (no panic, no revoke).
+        let _still_usable = v1.as_ref().unwrap().tool_count;
+    }
+
+    #[tokio::test]
+    async fn degraded_entry_fails_loud_within_backoff_and_isolates_users() {
+        let state = state_with_shared("[server]\nport = 8080\n");
+        let bad = TempUser::new("degraded-bad");
+        let good = TempUser::new("degraded-good");
+        let ts = Arc::new(pep::MemoryTokenStore::new());
+
+        // [mcp] present but not a table → McpConfig deserialize fails → Err.
+        bad.write_overlay("[mcp]\nenabled = \"not-a-bool\"\n");
+        let err = match state.get_or_build_mcp_loader(&bad.key, &ts).await {
+            Ok(_) => panic!("invalid [mcp] must fail loud"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("invalid [mcp]"),
+            "surfaces the parse error: {err}"
+        );
+
+        let entry = state
+            .mcp_loaders
+            .get(&trustee_core::user_hash(&bad.key))
+            .unwrap();
+        assert!(entry.degraded.is_some(), "poison entry recorded");
+
+        // Within backoff: fast-fail again (cached error).
+        let err2 = match state.get_or_build_mcp_loader(&bad.key, &ts).await {
+            Ok(_) => panic!("still within backoff"),
+            Err(e) => e,
+        };
+        assert_eq!(err, err2, "same cached error");
+
+        // Other users are completely unaffected.
+        let good_loader = state
+            .get_or_build_mcp_loader(&good.key, &ts)
+            .await
+            .expect("other user unaffected");
+        assert!(
+            good_loader.is_none(),
+            "good user has no [mcp] → disabled marker"
+        );
     }
 }

@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0] - 2026-08-29
+
+### Added
+
+- **Per-user `McpToolLoader` cache** (Agents-as-Users step C, nghr 1247ab00). Trustee previously constructed an abk `Agent` per task, and every construction connected SSE + re-discovered tools against every configured MCP server — reconnect churn on every dispatch. `ServerState` now keeps one loader per user (`mcp_loaders`, keyed by user hash, never the raw key): `get_or_build_mcp_loader()` resolves the effective config (shared + allowlist-filtered overlay + `${VAR}` substitution), fingerprints the `[mcp]` section by content (SHA-256; mtime alone insufficient since overlays are rewritten in place), single-flights builds per user, and hands out `Arc` clones on hit. Users whose effective config has MCP disabled cache a `None` marker (abk `McpSource::Prebuilt(None)` semantics). Failed builds cache a degraded entry with a 30 s retry backoff and fail loud on that user's next dispatch only — other users and boot are unaffected. One INFO line per build (`MCP loader built for user <hash8>: servers=[…] total_tools=N`) is the parity evidence for the migration task. Loader injection flows `Session.mcp_loader → RunContext.with_mcp_loader → abk McpSource::Prebuilt` (abk 0.16 API): Agent construction performs zero MCP network I/O.
+
+### Fixed
+
+- **Dead token-store injection gate** — `trustee-core` gated the `RunContext` token-store injection on feature `registry-mcp-token` but never declared that feature, so the gate was permanently false (flagged all along by the `unexpected_cfgs` lint and an `unused variable: token_store` warning). The feature is now declared and enabled by api/root, activating per-user token-store injection in web mode.
+
+### Changed
+
+- Pins move to pick up the MCP fixes: abk `0.15.0` → `0.16.1` (Arc-shared loader + prebuilt injection + single retry-on-401), pep lock `0.5.5` → `0.5.6` (service-account token cache honors the real JWT `exp` — the root-cause fix for the ~15-min Cedar fail-closed windows, nghr 199c4801/849e7528).
+
+Crate bumps: core `0.6.24`→`0.7.0` (new public `Session` field = minor), api `0.7.30`→`0.8.0`, tui `0.3.16`→`0.4.0` (core pin), root `0.9.32`→`0.10.0` (0.x convention: step C is feature work; the pins-only-vs-full-ship call was delegated to Farzan). Tests: 34/34 (+4 loader-cache guards: disabled-marker caching, 5-way single-flight, fingerprint-change rebuild with old-`Arc` validity, degraded isolation + backoff). Warnings at parity — core improved 2→0 (both dead-gate warnings eliminated by the fix). fmt complaints flat at 272.
+
 ## [0.9.32] - 2026-08-29
 
 ### Changed (hardening)

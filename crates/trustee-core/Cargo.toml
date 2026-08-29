@@ -1,12 +1,19 @@
 [package]
 name = "trustee-core"
-version = "0.6.24"
+version = "0.7.0"
 edition = "2021"
 description = "Core types, session state, and workflow logic for Trustee agent"
 license = "MIT OR Apache-2.0"
 authors = ["Podtan Team"]
 keywords = ["agent", "core"]
 categories = ["command-line-utilities"]
+
+[features]
+# Declared 16C: the RunContext token-store injection (session.rs) was gated on
+# this feature since its introduction but the feature was never declared —
+# the gate was permanently false (silent dead code, unexpected_cfgs warning).
+# Declaring it ACTIVATES per-user token-store injection in web mode.
+registry-mcp-token = ["abk/registry-mcp-token"]
 
 [dependencies]
 # Async runtime support
@@ -20,7 +27,7 @@ serde_json = "1"
 # Date/time (comes transitively from abk but we need it directly)
 chrono = { version = "0.4", features = ["serde"] }
 # ABK for workflow execution
-abk = { version = "0.15.0", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb"] }
+abk = { version = "0.16.1", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb"] }
 # PEP for TokenStore trait (per-user token isolation)
 # PEP for TokenStore trait (per-user token isolation)
 pep = { version = "0.5", features = ["token-provider"] }

@@ -96,6 +96,15 @@ pub struct Session {
     /// When set, MCP credential flows use this instead of file-based storage.
     pub token_store: Option<Arc<dyn pep::token_store::TokenStore>>,
 
+    /// Per-user MCP loader (16C), resolved lazily by trustee-api at dispatch
+    /// time and injected into the workflow's RunContext so abk constructs the
+    /// Agent with `McpSource::Prebuilt` — zero per-task MCP reconnects.
+    /// `None` = not resolved (legacy per-task construction) or MCP disabled.
+    #[cfg(feature = "registry-mcp-token")]
+    pub mcp_loader: Option<std::sync::Arc<abk::agent::McpToolLoader>>,
+    #[cfg(not(feature = "registry-mcp-token"))]
+    pub mcp_loader: Option<()>,
+
     // --- Project/Session Identity (backward compatible, all None = old behavior) ---
     /// Storage partition key (replaces path hash). None = hash(working_dir)
     pub project_id: Option<String>,
@@ -174,6 +183,7 @@ impl Session {
             auto_scroll: true,
             agent_name: "trustee".to_string(),
             token_store: None,
+            mcp_loader: None,
             project_id: None,
             project_name: None,
             session_id: None,
@@ -494,6 +504,7 @@ impl Session {
         let session_id = self.session_id.clone();
         let session_name = self.session_name.clone();
         let home_dir = self.home_dir.clone();
+        let mcp_loader = self.mcp_loader.clone();
 
         self.backup_resume_info = self.resume_info.clone();
         let resume_info = self.resume_info.take();
@@ -547,6 +558,13 @@ impl Session {
                 if let Some(ref ts) = token_store {
                     run_ctx = run_ctx.with_token_store(ts.clone());
                 }
+            }
+
+            // 16C: inject the shared per-user MCP loader so Agent
+            // construction performs ZERO MCP network I/O (abk 0.16 McpSource::Prebuilt).
+            #[cfg(feature = "registry-mcp-token")]
+            if let Some(loader) = &mcp_loader {
+                run_ctx = run_ctx.with_mcp_loader(loader.clone());
             }
 
             // Run the entire workflow inside a TUI-mode scope and a

@@ -361,7 +361,16 @@ pub async fn post_command(
 
     let (_sid, session_arc, ws_tx, token_store) = state.ensure_active_session(&user_key).await;
 
-    execute_command_inner(&state, &headers, &session_arc, &ws_tx, &token_store, req).await?;
+    execute_command_inner(
+        &state,
+        &headers,
+        &session_arc,
+        &ws_tx,
+        &token_store,
+        &user_key,
+        req,
+    )
+    .await?;
 
     let resp = Json(CommandResponse { accepted: true });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
@@ -900,7 +909,16 @@ pub async fn post_command_session(
         user_sessions.token_store.clone()
     };
 
-    execute_command_inner(&state, &headers, &session_arc, &ws_tx, &token_store, req).await?;
+    execute_command_inner(
+        &state,
+        &headers,
+        &session_arc,
+        &ws_tx,
+        &token_store,
+        &user_key,
+        req,
+    )
+    .await?;
 
     // Set this session as active (most recently used) — use the LIVE key
     state.set_active_session(&user_key, &live_key).await;
@@ -1098,6 +1116,7 @@ async fn execute_command_inner(
     session_arc: &std::sync::Arc<tokio::sync::Mutex<trustee_core::session::Session>>,
     ws_tx: &broadcast::Sender<String>,
     token_store: &Arc<pep::MemoryTokenStore>,
+    user_key: &str,
     req: CommandRequest,
 ) -> Result<(), (StatusCode, String)> {
     let agent_name = {
@@ -1177,6 +1196,20 @@ async fn execute_command_inner(
             .acquire_owned()
             .await
             .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".to_string()))?;
+
+        // 16C: resolve the per-user MCP loader lazily at dispatch start so
+        // overlay edits apply without session recreation; the fingerprint
+        // check rebuilds on change and swaps the session's Arc.
+        let mcp_loader = state
+            .get_or_build_mcp_loader(user_key, token_store)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("MCP loader unavailable: {}", e),
+                )
+            })?;
+        session.mcp_loader = mcp_loader;
 
         session.token_store = Some(token_store.clone());
         session.workflow_permit = Some(permit);
