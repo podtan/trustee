@@ -246,15 +246,16 @@ async fn load_remote_config(
 ///
 /// Returns SHA-256(username)[:16] as a hex string.
 /// Used for per-user checkpoint isolation: ~/.trustee/users/{user_hash}/
+///
+/// Delegates to the single consolidated implementation
+/// ([`trustee_core::user_hash`]). The CLI path hashes the OS username while
+/// the web/API path hashes the authenticated user key — two input domains,
+/// same function, one algorithm.
 fn compute_user_hash() -> String {
-    use sha2::{Digest, Sha256};
     let username = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "unknown".to_string());
-    let mut hasher = Sha256::new();
-    hasher.update(username.as_bytes());
-    let result = hasher.finalize();
-    format!("{:016x}", u64::from_be_bytes(result[..8].try_into().unwrap()))
+    trustee_core::user_hash(&username)
 }
 
 /// Get the per-user home directory for checkpoint storage.

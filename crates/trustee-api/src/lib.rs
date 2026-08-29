@@ -88,17 +88,25 @@ pub async fn run(
     let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(256);
 
     // Wrap session in shared state (with shared config/secrets/build_info for per-user sessions)
-    // Parse max_sessions_per_user from [web] section
-    let max_sessions: usize = {
+    // Parse knobs: [web].max_sessions_per_user, [users].allow_llm_overlay
+    let (max_sessions, allow_llm_overlay) = {
         let config_str: &str = &config_toml_for_state;
         match toml::from_str::<toml::Value>(config_str) {
-            Ok(v) => v
-                .get("web")
-                .and_then(|w| w.as_table())
-                .and_then(|w| w.get("max_sessions_per_user").and_then(|v| v.as_integer()))
-                .map(|v| v as usize)
-                .unwrap_or(4),
-            Err(_) => 4,
+            Ok(v) => {
+                let max_sessions = v
+                    .get("web")
+                    .and_then(|w| w.as_table())
+                    .and_then(|w| w.get("max_sessions_per_user").and_then(|v| v.as_integer()))
+                    .map(|v| v as usize)
+                    .unwrap_or(4);
+                let allow_llm_overlay = v
+                    .get("users")
+                    .and_then(|u| u.as_table())
+                    .and_then(|u| u.get("allow_llm_overlay").and_then(|v| v.as_bool()))
+                    .unwrap_or(false);
+                (max_sessions, allow_llm_overlay)
+            }
+            Err(_) => (4, false),
         }
     };
 
@@ -106,7 +114,8 @@ pub async fn run(
         .with_config_toml(config_toml_for_state)
         .with_secrets(secrets_for_state)
         .with_build_info(build_info_for_state)
-        .with_max_sessions_per_user(max_sessions);
+        .with_max_sessions_per_user(max_sessions)
+        .with_allow_llm_overlay(allow_llm_overlay);
 
     // Start background message drain task (owns workflow_rx directly — no deadlock)
     state.clone().spawn_drain_task(workflow_rx);

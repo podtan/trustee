@@ -1,6 +1,6 @@
 [package]
 name = "trustee"
-version = "0.9.31"
+version = "0.9.32"
 edition = "2021"
 description = "A general-purpose agent that can morph into different specialized agents using WASM lifecycle plugins"
 license = "MIT OR Apache-2.0"
@@ -18,7 +18,7 @@ path = "src/main.rs"
 [features]
 default = []  # No TUI/Web by default - keeps binary small
 tui = ["dep:ratatui", "dep:crossterm", "dep:tokio-util", "dep:trustee-tui"]
-web = ["dep:trustee-api", "dep:trustee-core", "dep:tracing", "dep:tracing-subscriber"]
+web = ["dep:trustee-api", "dep:tracing", "dep:tracing-subscriber"]
 wasm = ["abk/wasm"]
 
 [dependencies]
@@ -34,8 +34,9 @@ getmyconfig = "0.1.1"
 tokio = { version = "1.0", features = ["full"] }
 # Clap for command-line argument parsing in main.rs
 clap = { version = "4.6", features = ["derive"] }
-# SHA-256 for user hash computation (per-user namespace isolation)
-sha2 = "0.10"
+# Consolidated per-user directory hash (trustee_core::user_hash, used by CLI path)
+# and core session types
+trustee-core = { version = "0.6.24", path = "crates/trustee-core" }
 # Home directory resolution
 dirs = "5"
 # JSON handling + errors for `sessions migrate` (bin target)
@@ -49,8 +50,7 @@ crossterm = { version = "0.29", optional = true }
 tokio-util = { version = "0.7", optional = true }
 trustee-tui = { version = "0.3.14", path = "crates/trustee-tui", optional = true }
 # Web/API dependencies (optional)
-trustee-core = { version = "0.6.22", path = "crates/trustee-core", optional = true }
-trustee-api = { version = "0.7.28", path = "crates/trustee-api", optional = true }
+trustee-api = { version = "0.7.30", path = "crates/trustee-api", optional = true }
 # Tracing for web server logging (optional, used by trustee-api)
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }

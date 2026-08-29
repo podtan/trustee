@@ -115,6 +115,9 @@ pub struct ServerState {
     pub workflow_semaphore: Arc<tokio::sync::Semaphore>,
     /// Maximum number of concurrent sessions per user. Default: 4.
     pub max_sessions_per_user: usize,
+    /// Whether per-user config overlays may override the `[llm]` section.
+    /// Default: `false` — overlays are limited to `[mcp]`.
+    pub allow_llm_overlay: bool,
 }
 
 impl ServerState {
@@ -156,6 +159,7 @@ impl ServerState {
             build_info: None,
             workflow_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
             max_sessions_per_user: 4,
+            allow_llm_overlay: false,
         }
     }
 
@@ -182,6 +186,13 @@ impl ServerState {
     /// Set the max sessions per user.
     pub fn with_max_sessions_per_user(mut self, max: usize) -> Self {
         self.max_sessions_per_user = max;
+        self
+    }
+
+    /// Allow per-user config overlays to override the `[llm]` section.
+    /// Default: `false` (overlays limited to `[mcp]`).
+    pub fn with_allow_llm_overlay(mut self, allow: bool) -> Self {
+        self.allow_llm_overlay = allow;
         self
     }
 
@@ -556,15 +567,8 @@ impl ServerState {
     /// checkpoint data from disk (history, session list, session detail)
     /// and must NOT create ghost sessions as a side effect.
     pub fn get_user_home_dir(&self, user_key: &str) -> Option<std::path::PathBuf> {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(user_key.as_bytes());
-        let hash_bytes = hasher.finalize();
-        let user_hash = format!(
-            "{:016x}",
-            u64::from_be_bytes(hash_bytes[..8].try_into().unwrap())
-        );
-        dirs::home_dir().map(|home| home.join(".trustee").join("users").join(&user_hash))
+        let hash = trustee_core::user_hash(user_key);
+        dirs::home_dir().map(|home| home.join(".trustee").join("users").join(&hash))
     }
 
     /// Resolve config_toml and home_dir without creating an in-memory session.
@@ -580,15 +584,11 @@ impl ServerState {
     // -----------------------------------------------------------------------
 
     /// Apply per-user isolation: SHA-256 hash → home_dir + project_id.
+    ///
+    /// Hashing goes through the single consolidated [`trustee_core::user_hash`]
+    /// so the web path and the CLI path can never drift apart.
     fn apply_user_isolation(&self, session: &mut Session, user_key: &str) {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(user_key.as_bytes());
-        let hash_bytes = hasher.finalize();
-        let user_hash = format!(
-            "{:016x}",
-            u64::from_be_bytes(hash_bytes[..8].try_into().unwrap())
-        );
+        let user_hash = trustee_core::user_hash(user_key);
 
         // Set per-user home directory for checkpoint isolation
         let user_home = if let Some(home) = dirs::home_dir() {
@@ -667,6 +667,18 @@ impl ServerState {
 
     /// Deep-merge a user's per-user config overlay on top of the shared
     /// config. Returns the merged TOML string, or None if no overlay exists.
+    ///
+    /// Overlay allowlist (task 16B): only allowlisted top-level sections of
+    /// the user overlay are merged; anything else is dropped loudly.
+    /// - `[mcp]` is always allowed — per-user MCP tool sets are the point of
+    ///   the overlay convention.
+    /// - `[llm]` is allowed only when the instance opted in via the
+    ///   `[users].allow_llm_overlay` knob (default **false**).
+    ///
+    /// Everything else (`[server]`, `[auth]`, `[storage]`, `[web]`, …) is
+    /// boot-time, instance-level config and must not be rewritable through a
+    /// per-user file. This is predictability hardening, not a security
+    /// boundary: those sections were never re-read from session config.
     fn merge_user_config(
         &self,
         user_home: &std::path::Path,
@@ -682,6 +694,38 @@ impl ServerState {
             .parse::<toml::Value>()
             .ok()?;
         let overlay = user_config_toml.parse::<toml::Value>().ok()?;
+
+        let allowed =
+            |section: &str| section == "mcp" || (self.allow_llm_overlay && section == "llm");
+        // Mask the user in logs: user_home's dir name IS the hash — never
+        // log the raw key (keys may be emails). Log a short hash prefix.
+        let dir_name = user_home
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("<unknown>");
+        let masked_user = dir_name.get(..8).unwrap_or(dir_name);
+
+        let mut filtered_overlay = toml::map::Map::new();
+        if let Some(table) = overlay.as_table() {
+            for (section, value) in table {
+                if allowed(section) {
+                    filtered_overlay.insert(section.clone(), value.clone());
+                } else {
+                    tracing::warn!(
+                        "user config overlay: dropping non-allowlisted section [{}] for user {}",
+                        section,
+                        masked_user
+                    );
+                }
+            }
+        }
+
+        if filtered_overlay.is_empty() {
+            // Nothing survived the allowlist — no-op, keep shared config as-is.
+            return None;
+        }
+        let overlay = toml::Value::Table(filtered_overlay);
+
         let mut shared = shared;
         deep_merge_toml(&mut shared, &overlay);
         let merged = toml::to_string(&shared).ok()?;
@@ -1089,4 +1133,130 @@ fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<Strin
     }
 
     *s = result;
+}
+
+// ---------------------------------------------------------------------------
+// Tests (task 16B: overlay allowlist + consolidated user hash)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Default-knob ServerState for overlay tests.
+    fn test_state() -> ServerState {
+        let (session, _rx) = Session::new();
+        let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(16);
+        ServerState::new(session, ws_tx, None)
+    }
+
+    /// Unique temp dir with a `config/` subdir (std-only; no tempfile dep).
+    fn temp_user_home(tag: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "trustee-state-test-{}-{}-{}",
+            tag,
+            std::process::id(),
+            n
+        ));
+        std::fs::create_dir_all(dir.join("config")).expect("create temp user home");
+        dir
+    }
+
+    fn parse(toml_str: &str) -> toml::Value {
+        toml_str.parse::<toml::Value>().expect("valid test TOML")
+    }
+
+    /// (a) Overlay with [mcp] + [server] + [auth]: [mcp] applied (user wins),
+    /// shared [server] preserved untouched, overlay [auth] dropped entirely.
+    #[test]
+    fn overlay_allowlist_drops_non_allowlisted_sections() {
+        let state = test_state();
+        let home = temp_user_home("allowlist");
+        std::fs::write(
+            home.join("config").join("trustee.toml"),
+            "[server]\nport = 1\n\n[auth]\nmode = \"kanidm\"\n\n[mcp]\nmode = \"user\"\n",
+        )
+        .expect("write overlay");
+
+        let shared = "[server]\nport = 8080\n\n[mcp]\nmode = \"shared\"\n";
+        let merged = state
+            .merge_user_config(&home, Some(shared))
+            .expect("overlay has allowlisted content");
+
+        let merged_val = parse(&merged);
+        let expected = parse("[server]\nport = 8080\n\n[mcp]\nmode = \"user\"\n");
+        assert_eq!(merged_val, expected, "merged config must be shared + [mcp] overlay only");
+        assert!(merged_val.get("auth").is_none(), "overlay [auth] must be dropped");
+    }
+
+    /// (b) No overlay file → merge is a no-op (None), shared config untouched.
+    #[test]
+    fn no_overlay_file_returns_none() {
+        let state = test_state();
+        let home = temp_user_home("empty");
+        assert!(state
+            .merge_user_config(&home, Some("[server]\nport = 8080\n"))
+            .is_none());
+    }
+
+    /// Overlay whose sections are ALL non-allowlisted → no-op (None).
+    #[test]
+    fn overlay_with_no_allowlisted_sections_is_noop() {
+        let state = test_state();
+        let home = temp_user_home("all-dropped");
+        std::fs::write(
+            home.join("config").join("trustee.toml"),
+            "[server]\nport = 1\n\n[storage]\npath = \"/tmp/x\"\n",
+        )
+        .expect("write overlay");
+        assert!(state
+            .merge_user_config(&home, Some("[server]\nport = 8080\n"))
+            .is_none());
+    }
+
+    /// (c) [llm] dropped when allow_llm_overlay=false (default), applied when
+    /// the instance opted in via with_allow_llm_overlay(true).
+    #[test]
+    fn llm_overlay_dropped_by_default_and_kept_when_enabled() {
+        let shared = "[llm]\nprovider = \"openai\"\n\n[mcp]\nmode = \"shared\"\n";
+        let overlay = "[llm]\nprovider = \"anthropic\"\n";
+
+        // Default: knob false → [llm]-only overlay is a no-op.
+        let state = test_state();
+        assert!(!state.allow_llm_overlay);
+        let home = temp_user_home("llm-off");
+        std::fs::write(home.join("config").join("trustee.toml"), overlay).expect("write overlay");
+        assert!(state.merge_user_config(&home, Some(shared)).is_none());
+
+        // Opted in: [llm] kept, user value wins; shared [mcp] untouched.
+        let state = test_state().with_allow_llm_overlay(true);
+        assert!(state.allow_llm_overlay);
+        let home = temp_user_home("llm-on");
+        std::fs::write(home.join("config").join("trustee.toml"), overlay).expect("write overlay");
+        let merged = state
+            .merge_user_config(&home, Some(shared))
+            .expect("[llm] overlay applies when opted in");
+        let merged_val = parse(&merged);
+        assert_eq!(merged_val["llm"]["provider"].as_str(), Some("anthropic"));
+        assert_eq!(merged_val["mcp"]["mode"].as_str(), Some("shared"));
+    }
+
+    /// (d) Web-path home dir resolves through the consolidated
+    /// trustee_core::user_hash (determinism/known-vectors covered in
+    /// trustee-core's own tests).
+    #[test]
+    fn user_home_dir_uses_consolidated_hash() {
+        let state = test_state();
+        if let Some(home) = state.get_user_home_dir("farzan@example.com") {
+            assert_eq!(
+                home.file_name().and_then(|n| n.to_str()),
+                Some(trustee_core::user_hash("farzan@example.com")).as_deref()
+            );
+            let users_root = dirs::home_dir().unwrap().join(".trustee").join("users");
+            assert_eq!(home.parent(), Some(&users_root).map(|p| p.as_path()));
+        }
+        // dirs::home_dir() unavailable in sandbox → covered by core tests.
+    }
 }

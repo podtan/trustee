@@ -1,6 +1,6 @@
 [package]
 name = "trustee-core"
-version = "0.6.23"
+version = "0.6.24"
 edition = "2021"
 description = "Core types, session state, and workflow logic for Trustee agent"
 license = "MIT OR Apache-2.0"
@@ -26,6 +26,8 @@ abk = { version = "0.15.0", features = ["cli", "orchestration", "agent", "observ
 pep = { version = "0.5", features = ["token-provider"] }
 # Config parsing
 toml = "0.8"
+# SHA-256 for the consolidated per-user directory hash (trustee_core::user_hash)
+sha2 = "0.10"
 # Structured logging (used by sessions module for debug logging)
 tracing = "0.1"
 # UUID generation for session IDs
