@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.2] - 2026-08-30
+
+### Fixed
+
+- **Agent tokens minted on the service vhost failed inner validation** (the second half of the same split-brain): Kanidm stamps tokens with the vhost they were minted on — exchange must happen on the service issuer (0.13.1), and the RESULTING token carries that issuer, so `check_auth` must also accept it. Primary validation still runs against the `[oidc]` issuer first; on failure, validation retries against the boot-time service-issuer candidates (collected from agent-user overlays + shared `[mcp.credentials.*]`, deduped, never skipping issuer checks — same IdP, same keys, no trust expansion). Fallback hits log at INFO with the issuer used.
+- `fill_userinfo_fields` now enriches against the issuer the token was validated on (name/email for service-vhost tokens would otherwise silently fail).
+- farzan dispatch entry: the PM agent's per-user `.env` is restored so her THQ entry carries a service token.
+
 ## [0.13.1] - 2026-08-30
 
 ### Fixed

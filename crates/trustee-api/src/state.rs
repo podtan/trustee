@@ -144,6 +144,30 @@ pub struct ThqDispatchEntry {
     pub issuer_url: Option<String>,
 }
 
+/// 16F: the service-account issuer declared by the shared config's first
+/// `[mcp.credentials.*]` entry with `type = "service-account"` (see
+/// `ServerState::service_issuer` for why this exists).
+pub fn service_issuers_from_config(config_toml: &str) -> Vec<String> {
+    let Ok(v) = config_toml.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(creds) = v.get("mcp").and_then(|m| m.get("credentials")).and_then(|c| c.as_table())
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (_name, cred) in creds {
+        if cred.get("type").and_then(|t| t.as_str()) == Some("service-account") {
+            if let Some(issuer) = cred.get("issuer_url").and_then(|i| i.as_str()) {
+                if !out.iter().any(|e: &String| e == issuer) {
+                    out.push(issuer.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Shared state accessible by all axum handlers.
 #[derive(Clone)]
 pub struct ServerState {
@@ -240,18 +264,8 @@ impl ServerState {
     /// The exchange therefore takes its issuer from the shared config's
     /// first `service-account` credential; callers fall back to the auth
     /// issuer when absent.
-    pub fn service_issuer(&self) -> Option<String> {
-        let config = self.config_toml.as_deref()?;
-        let v: toml::Value = config.parse().ok()?;
-        let creds = v.get("mcp")?.get("credentials")?.as_table()?;
-        for (_name, cred) in creds {
-            if cred.get("type").and_then(|t| t.as_str()) == Some("service-account") {
-                if let Some(issuer) = cred.get("issuer_url").and_then(|i| i.as_str()) {
-                    return Some(issuer.to_string());
-                }
-            }
-        }
-        None
+    pub fn service_issuers(&self) -> Vec<String> {
+        service_issuers_from_config(self.config_toml.as_deref().unwrap_or(""))
     }
 
     pub fn with_secrets(mut self, secrets: std::collections::HashMap<String, String>) -> Self {

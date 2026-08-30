@@ -66,7 +66,22 @@ pub async fn run(
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        Some(Arc::new(AuthState::with_cedar(cfg, cedar_boot.authorizer)))
+        // 16F: teach auth about the service-account issuer candidates so
+        // agent tokens (minted on service vhosts) validate in check_auth.
+        let mut issuer_fallbacks = crate::state::service_issuers_from_config(&config_toml);
+        for si in crate::thq_register::discover_service_issuers() {
+            if !issuer_fallbacks.contains(&si) {
+                issuer_fallbacks.push(si);
+            }
+        }
+        issuer_fallbacks.retain(|si| *si != cfg.issuer_url);
+        if !issuer_fallbacks.is_empty() {
+            tracing::info!("Auth issuer fallbacks armed: {:?}", issuer_fallbacks);
+        }
+        Some(Arc::new(
+            AuthState::with_cedar(cfg, cedar_boot.authorizer)
+                .with_issuer_fallbacks(issuer_fallbacks),
+        ))
     } else {
         // Open mode — loud, by design (local/dev posture preserved).
         tracing::warn!("AUTH NOT CONFIGURED: trustee-web is running WITHOUT authentication or Cedar authorization (no [oidc]/[dev] section). Never expose this to a network.");

@@ -185,6 +185,12 @@ pub struct AuthState {
     pub pkce_manager: PkceCookieManager,
     /// Web session manager (cookie session_id → server-side token with auto-refresh)
     pub session_manager: Arc<WebSessionManager>,
+    /// 16F: service-account issuer candidates (Kanidm vhosts agent tokens
+    /// are minted on). Tokens carrying one of these fail primary validation
+    /// (the `[oidc]` issuer is a different vhost) — `check_auth` falls back
+    /// to validating against each candidate, never skipping issuer checks.
+    /// Same IdP, same keys, no trust expansion.
+    pub issuer_fallbacks: Vec<String>,
     /// Cedar authorizer for ABAC authorization (None = Cedar disabled)
     pub cedar_authorizer: Option<Arc<pep::cedar::CedarAuthorizer>>,
 }
@@ -219,7 +225,14 @@ impl AuthState {
             session_manager,
             config,
             cedar_authorizer,
+            issuer_fallbacks: Vec::new(),
         }
+    }
+
+    /// 16F: set the service-account issuer fallback candidates.
+    pub fn with_issuer_fallbacks(mut self, issuers: Vec<String>) -> Self {
+        self.issuer_fallbacks = issuers;
+        self
     }
 
     /// Check if development mode is enabled.
@@ -229,11 +242,55 @@ impl AuthState {
 
     /// Validate a JWT token using PEP's ResourceServerClient.
     pub async fn validate_token(&self, token: &str) -> anyhow::Result<JwtClaims> {
+        self.validate_token_on(&self.config.issuer_url, token).await
+    }
+
+    /// 16F: primary validation, then the service issuer if that fails.
+    ///
+    /// Kanidm stamps tokens with the vhost they were minted on: human logins
+    /// carry the `[oidc]` issuer, agent tokens exchanged via the service
+    /// credential carry the service issuer. Each validates only against its
+    /// own — this tries both, never skipping issuer validation.
+    pub async fn validate_token_flexible(&self, token: &str) -> anyhow::Result<JwtClaims> {
+        match self.validate_token(token).await {
+            Ok(claims) => Ok(claims),
+            Err(primary) => {
+                let mut last = primary;
+                for si in &self.issuer_fallbacks {
+                    if *si == self.config.issuer_url {
+                        continue; // primary already tried it
+                    }
+                    match self.validate_token_on(si, token).await {
+                        Ok(claims) => {
+                            tracing::info!(
+                                "token validated via service-issuer fallback (iss={}) — sub {}",
+                                si,
+                                claims.sub
+                            );
+                            return Ok(claims);
+                        }
+                        Err(e) => last = e,
+                    }
+                }
+                Err(anyhow::anyhow!(
+                    "primary: {last}; all service-issuer fallbacks exhausted"
+                ))
+            }
+        }
+    }
+
+    /// Validate against a SPECIFIC issuer — validation AND enrichment must
+    /// both run on the vhost that issued the token.
+    pub async fn validate_token_on(
+        &self,
+        issuer_url: &str,
+        token: &str,
+    ) -> anyhow::Result<JwtClaims> {
         let mut claims = self
             .resource_server
             .validate_jwt_with_options(
                 token,
-                &self.config.issuer_url,
+                issuer_url,
                 &self.config.client_id,
                 &self.config.validation_options,
             )
@@ -246,7 +303,7 @@ impl AuthState {
         // zero diagnosis. Enrichment failure must SCREAM.
         if let Err(e) = self
             .resource_server
-            .enrich_claims_with_userinfo(&mut claims, token, &self.config.issuer_url, None)
+            .enrich_claims_with_userinfo(&mut claims, token, issuer_url, None)
             .await
         {
             tracing::error!(
@@ -260,7 +317,7 @@ impl AuthState {
         // PEP only merges groups/role from userinfo. If name/email are missing
         // (Kanidm JWTs only contain sub), fetch them from userinfo directly.
         if claims.name.is_none() || claims.email.is_none() {
-            self.fill_userinfo_fields(&mut claims, token).await;
+            self.fill_userinfo_fields(&mut claims, token, issuer_url).await;
         }
 
         Ok(claims)
@@ -268,11 +325,12 @@ impl AuthState {
 
     /// Fetch name/email/preferred_username from the OIDC userinfo endpoint
     /// and fill in any that are missing from the JWT claims.
-    async fn fill_userinfo_fields(&self, claims: &mut JwtClaims, token: &str) {
+    async fn fill_userinfo_fields(&self, claims: &mut JwtClaims, token: &str, issuer_url: &str) {
         // Derive userinfo URL from issuer
         // For Kanidm: issuer_url is the discovery endpoint,
-        // userinfo is at {issuer_url}/userinfo
-        let userinfo_url = format!("{}/userinfo", self.config.issuer_url.trim_end_matches('/'));
+        // userinfo is at {issuer_url}/userinfo — the token's OWN vhost
+        // (16F: a token minted on the service vhost must enrich there too).
+        let userinfo_url = format!("{}/userinfo", issuer_url.trim_end_matches('/'));
 
         let client = reqwest::Client::new();
         let resp = client
@@ -608,7 +666,7 @@ pub async fn check_dispatch_admin(
         return Err(StatusCode::FORBIDDEN);
     }
     let claims = auth
-        .validate_token(&token)
+        .validate_token_flexible(&token)
         .await
         .map_err(|e| {
             tracing::warn!("xagent dispatch: caller token validation failed: {}", e);
@@ -713,7 +771,7 @@ pub async fn check_auth(
             };
         }
 
-        return match auth.validate_token(&token).await {
+        return match auth.validate_token_flexible(&token).await {
             Ok(claims) => {
                 if auth.check_cedar_authorized(&claims, action).is_err() {
                     return Err(StatusCode::FORBIDDEN);
@@ -2009,3 +2067,4 @@ mod cedar_p2_tests {
         assert!(crate::cedar_boot_decision(false, false, false).is_ok());
     }
 }
+

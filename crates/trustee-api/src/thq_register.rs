@@ -262,6 +262,20 @@ fn read_overlay_service_issuer(user_home: &std::path::Path) -> Option<String> {
     None
 }
 
+/// 16F: every service-account issuer declared by the discovered agent-user
+/// overlays — the vhosts the deployed agents' tokens are actually minted on.
+pub fn discover_service_issuers() -> Vec<String> {
+    let mut out = Vec::new();
+    for agent in discover_user_agents() {
+        if let Some(issuer) = read_overlay_service_issuer(&agent.user_home) {
+            if !out.contains(&issuer) {
+                out.push(issuer);
+            }
+        }
+    }
+    out
+}
+
 /// Best-effort identity Bearer for a per-agent registration: first matching
 /// key in the user's `.env`. The THQ registration route is OPEN — this is
 /// attribution, not authentication. Unresolved `${VAR}` placeholders are

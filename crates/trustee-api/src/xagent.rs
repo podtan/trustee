@@ -112,12 +112,12 @@ async fn dispatch_context(
 
     // Kanidm accepts a token exchange only on the origin the token was
     // minted for: use the issuer captured from the agent's OWN overlay
-    // credential; fall back to the shared config's service issuer, then the
-    // auth issuer.
+    // credential (16F — verified: same token, 200 on its vhost, 400 on the
+    // auth issuer's vhost). Falls back to the auth issuer only if the
+    // overlay declares none.
     let issuer = entry
         .issuer_url
         .clone()
-        .or_else(|| state.service_issuer())
         .unwrap_or_else(|| auth.config.issuer_url.clone());
     let (token, expires_in) = auth
         .exchange_agent_token(&issuer, service_token)
