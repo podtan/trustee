@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.1] - 2026-08-30
+
+### Fixed
+
+- **xagent token exchange used the wrong issuer** (observed live: `invalid_request` on every dispatch under 0.13.0): Kanidm accepts a token exchange only on the origin the token was minted for — the agent's escrowed token exchanges 200 on its own credential's vhost and 400 elsewhere. The exchange now takes its issuer from the agent's OWN overlay credential (`[mcp.credentials.*].issuer_url`, captured into the dispatch entry at boot), falling back to the shared config's first `service-account` credential issuer, then the `[oidc]` issuer. Diagnosis note: the `[oidc]` auth issuer host serves logins/validation fine — only exchange is origin-bound.
+
 ## [0.13.0] - 2026-08-30
 
 ### Added
