@@ -631,14 +631,22 @@ impl AuthState {
     /// access token carrying `role=agent`, usable as the impersonated Bearer
     /// on the inner dispatch. Same grant the MCP credentials use (verified
     /// RFC 8693 shape); enrichment in `validate_token` resolves the role.
+    ///
+    /// `issuer_url` MUST be the service-account issuer: Kanidm binds token
+    /// exchange to the client origin — the `[oidc]` auth issuer host serves
+    /// logins but rejects exchange with `invalid_request`, while the
+    /// `[mcp.credentials.*]` service issuer (see
+    /// `ServerState::service_issuer`) accepts it (verified live 2026-08-30:
+    /// same token, 200 vs 400).
     pub async fn exchange_agent_token(
         &self,
+        issuer_url: &str,
         service_token: &str,
     ) -> Result<(String, u64), StatusCode> {
         let tr = self
             .oidc_client
             .exchange_token(
-                &self.config.issuer_url,
+                issuer_url,
                 &self.config.client_id,
                 None, // public client — no secret (Kanidm rejects one)
                 service_token,
@@ -648,7 +656,7 @@ impl AuthState {
             .await
             .map_err(|e| {
                 tracing::error!(
-                    "xagent dispatch: agent token exchange FAILED: {} — impersonation unavailable",
+                    "xagent dispatch: agent token exchange FAILED at {issuer_url}: {} — impersonation unavailable",
                     e
                 );
                 StatusCode::BAD_GATEWAY

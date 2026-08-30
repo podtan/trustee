@@ -110,8 +110,17 @@ async fn dispatch_context(
         }
     }
 
+    // Kanidm accepts a token exchange only on the origin the token was
+    // minted for: use the issuer captured from the agent's OWN overlay
+    // credential; fall back to the shared config's service issuer, then the
+    // auth issuer.
+    let issuer = entry
+        .issuer_url
+        .clone()
+        .or_else(|| state.service_issuer())
+        .unwrap_or_else(|| auth.config.issuer_url.clone());
     let (token, expires_in) = auth
-        .exchange_agent_token(service_token)
+        .exchange_agent_token(&issuer, service_token)
         .await
         .map_err(|s| (s, "agent token exchange failed".to_string()))?;
     let buffered = std::time::Duration::from_secs(expires_in.saturating_sub(60))
@@ -366,6 +375,7 @@ mod tests {
             ThqDispatchEntry {
                 user_key: String::new(),
                 service_token: None,
+                issuer_url: None,
             },
         );
         let err = dispatch_context(&state, "ghost", &hdrs(&[]))
@@ -385,6 +395,7 @@ mod tests {
             ThqDispatchEntry {
                 user_key: "f27de518-a647-4ea2-85ec-8ecc4d61e658".to_string(),
                 service_token: None,
+                issuer_url: Some("https://idp.tanbal.ir/oauth2/openid/pdt-api".to_string()),
             },
         );
         let inner = dispatch_context(
@@ -416,6 +427,7 @@ mod tests {
             ThqDispatchEntry {
                 user_key: "1a71c077-b3b3-4581-b605-925c3f276f30".to_string(),
                 service_token: None,
+                issuer_url: None,
             },
         );
         let inner = dispatch_context(&state, "ravand", &hdrs(&[]))

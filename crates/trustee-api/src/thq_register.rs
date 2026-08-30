@@ -245,6 +245,23 @@ fn resolve_agent_id() -> Result<String, std::io::Error> {
     )
 }
 
+/// The issuer declared by the overlay's first `service-account` credential —
+/// the origin the agent's service token was minted for (16F: exchange is
+/// origin-bound, so it must travel with the entry).
+fn read_overlay_service_issuer(user_home: &std::path::Path) -> Option<String> {
+    let overlay = std::fs::read_to_string(user_home.join("config").join("trustee.toml")).ok()?;
+    let v: toml::Value = overlay.parse().ok()?;
+    let creds = v.get("mcp")?.get("credentials")?.as_table()?;
+    for (_name, cred) in creds {
+        if cred.get("type").and_then(|t| t.as_str()) == Some("service-account") {
+            if let Some(issuer) = cred.get("issuer_url").and_then(|i| i.as_str()) {
+                return Some(issuer.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Best-effort identity Bearer for a per-agent registration: first matching
 /// key in the user's `.env`. The THQ registration route is OPEN — this is
 /// attribution, not authentication. Unresolved `${VAR}` placeholders are
@@ -477,6 +494,7 @@ pub fn spawn_all(legacy: Option<ThqConfig>, state: crate::state::ServerState) {
                 crate::state::ThqDispatchEntry {
                     user_key: agent.config.owner_id.clone().unwrap_or_default(),
                     service_token: bearer.clone(),
+                    issuer_url: read_overlay_service_issuer(&agent.user_home),
                 },
             );
         } else {
@@ -777,6 +795,28 @@ owner_id = "1a71c077-b3b3-4581-b605-925c3f276f30"
         std::fs::write(&id_file, format!("  {first}\n")).unwrap();
         let third = resolve_agent_id_at(&id_file).unwrap();
         assert_eq!(first, third);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn read_overlay_service_issuer_picks_service_account_credential() {
+        let base = std::env::temp_dir().join(format!("trustee-thq-issuer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("config");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("trustee.toml"),
+            "[mcp.credentials.fame_service]\ntype = \"service-account\"\nservice_token = \"${FAME_SERVICE_TOKEN}\"\nissuer_url = \"https://idp.tanbal.ir/oauth2/openid/pdt-api\"\n\n[mcp.credentials.interactive]\ntype = \"interactive\"\nissuer_url = \"https://ignored.example/\"\n",
+        )
+        .unwrap();
+        let issuer = read_overlay_service_issuer(&base);
+        assert_eq!(
+            issuer.as_deref(),
+            Some("https://idp.tanbal.ir/oauth2/openid/pdt-api"),
+            "issuer must come from the service-account credential, not another type"
+        );
+        // No overlay file -> None.
+        assert!(read_overlay_service_issuer(&base.join("nope")).is_none());
         let _ = std::fs::remove_dir_all(&base);
     }
 

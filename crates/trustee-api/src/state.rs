@@ -136,6 +136,12 @@ pub struct ThqDispatchEntry {
     /// for a short-lived `role=agent` Bearer at dispatch time. `None` = the
     /// agent has no provisioned credential (dispatch fails loud, 502).
     pub service_token: Option<String>,
+    /// The issuer the token's own credential declares (`[mcp.credentials.*]
+    /// .issuer_url` from the agent's overlay). Kanidm accepts a token
+    /// exchange only on the origin the token was minted for — the issuer
+    /// MUST travel with the credential that owns the token (verified live
+    /// 2026-08-30: same token, 200 on its own vhost, 400 elsewhere).
+    pub issuer_url: Option<String>,
 }
 
 /// Shared state accessible by all axum handlers.
@@ -222,6 +228,30 @@ impl ServerState {
     pub fn with_config_toml(mut self, config_toml: String) -> Self {
         self.config_toml = Some(config_toml);
         self
+    }
+
+    /// 16F: the issuer URL Kanidm accepts SERVICE-ACCOUNT token exchange on.
+    ///
+    /// Kanidm binds exchange to the OAuth2 client's configured origin: the
+    /// `[oidc]` issuer host serves logins/validation fine but REJECTS token
+    /// exchange with `invalid_request`, while the `idp` vhost — the issuer
+    /// every working `[mcp.credentials.*]` service-account entry already
+    /// uses — accepts it (verified live 2026-08-30: same token, 200 vs 400).
+    /// The exchange therefore takes its issuer from the shared config's
+    /// first `service-account` credential; callers fall back to the auth
+    /// issuer when absent.
+    pub fn service_issuer(&self) -> Option<String> {
+        let config = self.config_toml.as_deref()?;
+        let v: toml::Value = config.parse().ok()?;
+        let creds = v.get("mcp")?.get("credentials")?.as_table()?;
+        for (_name, cred) in creds {
+            if cred.get("type").and_then(|t| t.as_str()) == Some("service-account") {
+                if let Some(issuer) = cred.get("issuer_url").and_then(|i| i.as_str()) {
+                    return Some(issuer.to_string());
+                }
+            }
+        }
+        None
     }
 
     pub fn with_secrets(mut self, secrets: std::collections::HashMap<String, String>) -> Self {
