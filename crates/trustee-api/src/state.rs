@@ -119,6 +119,25 @@ pub struct McpLoaderEntry {
 /// Minimum delay before retrying a failed MCP loader build (16C).
 pub const MCP_BUILD_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// 16F: per-agent dispatch target — THQ agent_name → the agent-user that
+/// THQ-dispatched sessions must run AS.
+///
+/// Populated once at boot by the 16E discovery scan
+/// (`thq_register::spawn_all`); restart-only lifecycle, exactly like the
+/// THQ registration itself.
+#[derive(Debug, Clone)]
+pub struct ThqDispatchEntry {
+    /// The agent-user's stable key = its Kanidm `sub` (16E sub-pin). This is
+    /// the identity impersonated on the inner dispatch: session bucket,
+    /// per-user home, MCP loader cache, and Cedar principal all resolve
+    /// through it.
+    pub user_key: String,
+    /// The agent's Kanidm service token from its per-user `.env` — exchanged
+    /// for a short-lived `role=agent` Bearer at dispatch time. `None` = the
+    /// agent has no provisioned credential (dispatch fails loud, 502).
+    pub service_token: Option<String>,
+}
+
 /// Shared state accessible by all axum handlers.
 #[derive(Clone)]
 pub struct ServerState {
@@ -146,6 +165,11 @@ pub struct ServerState {
     pub mcp_loaders: Arc<DashMap<String, McpLoaderEntry>>,
     /// Single-flight build locks per user hash (16C).
     mcp_build_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// 16F: THQ per-agent dispatch table (agent_name → target), boot-populated.
+    pub thq_dispatch: Arc<DashMap<String, ThqDispatchEntry>>,
+    /// 16F: cached impersonation Bearers per agent user_key
+    /// `(token, expires_at)` — expiry-buffered, re-minted on 401.
+    pub agent_dispatch_tokens: Arc<DashMap<String, (String, std::time::Instant)>>,
 }
 
 impl ServerState {
@@ -190,6 +214,8 @@ impl ServerState {
             allow_llm_overlay: false,
             mcp_loaders: Arc::new(DashMap::new()),
             mcp_build_locks: Arc::new(DashMap::new()),
+            thq_dispatch: Arc::new(DashMap::new()),
+            agent_dispatch_tokens: Arc::new(DashMap::new()),
         }
     }
 

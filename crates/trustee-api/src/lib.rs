@@ -12,6 +12,7 @@ pub mod tls;
 mod routes;
 mod state;
 mod thq_register;
+pub mod xagent;
 
 // Embedded Cedar policy defaults (compiled into binary)
 const EMBEDDED_CEDAR_POLICY: &str = include_str!("../policies/trustee_default.cedar");
@@ -174,6 +175,8 @@ pub async fn run(
         // Static files from trustee-web
         .route("/", get(routes::serve_index))
         .route("/{file}", get(routes::serve_static))
+        // 16F: per-agent THQ dispatch surface (impersonation by Bearer swap)
+        .merge(crate::xagent::router())
         .layer(CorsLayer::permissive())
         .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
         .with_state(state);

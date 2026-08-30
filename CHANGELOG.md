@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.0] - 2026-08-30
+
+### Added
+
+- **Per-agent THQ dispatch surface (16F — `/xagent/{agent}/api/v1/...`)**: THQ-proxied sessions now run AS the agent-user instead of the caller. Mechanism: the boot-time 16E dispatch table (`[thq].agent_name → {user_key=sub, service_token}`) resolves `{agent}`; the caller is gate-checked (human admin — agents can never dispatch agents); the agent's own service token is exchanged for a short-lived `role=agent` Bearer (RFC 8693, 60s-buffered cache); the inner standard handler then authenticates and Cedar-gates **as the agent** — session bucket, per-user home, MCP loader (her own fame, never the caller's tools), and the full per-action agent matrix all resolve to her namespace. Zero handler duplication. Sessions created through the surface without an explicit identity get a minimal default ("You are {name}, an agent on the Tanbal platform.") until charters are drafted.
+- **THQ wiring**: point each agent-user's `[thq].advertise_url` at `https://<host>:<port>/xagent/<agent_name>` — torpi appends `/api/v1/...` to the advertised origin, so no torpi change is required. Unknown agents 404 on the health probe (THQ marks them offline — correct for removed entries).
+
 ## [0.12.0] - 2026-08-29
 
 ### Added

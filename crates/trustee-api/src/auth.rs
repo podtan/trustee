@@ -572,6 +572,91 @@ fn dev_user_key(token: &str) -> Option<String> {
     }
 }
 
+/// Pure decision core of [`check_dispatch_admin`] — unit-testable without an IdP.
+pub(crate) fn dispatch_allowed(kind: PrincipalKind, role: Option<&str>) -> bool {
+    kind == PrincipalKind::Human && role == Some("admin")
+}
+
+/// 16F: admin gate for the per-agent dispatch surface (`/xagent/{name}`).
+///
+/// The OUTER dispatch must be performed by a HUMAN ADMIN: agents may never
+/// dispatch agents, and `service` is read-only by design. The impersonated
+/// INNER request is separately authenticated and Cedar-gated AS THE AGENT
+/// (per-action matrix), so this gate answers exactly one question: "may this
+/// principal dispatch agent-users at all".
+///
+/// Open mode (no auth configured) allows dispatch, consistent with the
+/// posture check_auth already applies. Dev-mode human tokens carry no role
+/// and are therefore rejected — dispatch testing requires a real admin JWT.
+pub async fn check_dispatch_admin(
+    auth: &Option<Arc<AuthState>>,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), StatusCode> {
+    let Some(auth) = auth.as_ref() else {
+        return Ok(()); // open mode — same posture as check_auth
+    };
+    let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+    else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    if token.starts_with("dev:") {
+        tracing::warn!("xagent dispatch rejected: dev tokens cannot dispatch agents");
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let claims = auth
+        .validate_token(&token)
+        .await
+        .map_err(|e| {
+            tracing::warn!("xagent dispatch: caller token validation failed: {}", e);
+            StatusCode::UNAUTHORIZED
+        })?;
+    let user = AuthUser::from(claims);
+    if !dispatch_allowed(user.kind, user.role.as_deref()) {
+        tracing::warn!(
+            "xagent dispatch rejected: principal kind={:?} role={:?} — admin required",
+            user.kind,
+            user.role
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
+impl AuthState {
+    /// 16F: exchange an agent-user's Kanidm service token for a short-lived
+    /// access token carrying `role=agent`, usable as the impersonated Bearer
+    /// on the inner dispatch. Same grant the MCP credentials use (verified
+    /// RFC 8693 shape); enrichment in `validate_token` resolves the role.
+    pub async fn exchange_agent_token(
+        &self,
+        service_token: &str,
+    ) -> Result<(String, u64), StatusCode> {
+        let tr = self
+            .oidc_client
+            .exchange_token(
+                &self.config.issuer_url,
+                &self.config.client_id,
+                None, // public client — no secret (Kanidm rejects one)
+                service_token,
+                &self.config.client_id,
+                Some("openid groups"),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "xagent dispatch: agent token exchange FAILED: {} — impersonation unavailable",
+                    e
+                );
+                StatusCode::BAD_GATEWAY
+            })?;
+        Ok((tr.access_token, tr.expires_in.unwrap_or(900)))
+    }
+}
+
 /// Check authentication for a protected endpoint.
 ///
 /// Returns `Ok((None, user_key))` if auth is not configured (open mode), or if

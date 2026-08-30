@@ -468,6 +468,24 @@ pub fn spawn_all(legacy: Option<ThqConfig>, state: crate::state::ServerState) {
         };
         let bearer = read_user_bearer(&agent.user_home);
         let url = format!("{}/thq/api/agents", agent.config.torpi_url);
+
+        // 16F: register the dispatch target so THQ-proxied sessions can be
+        // impersonated AS this agent-user (see crate::xagent).
+        if agent.config.owner_id.as_deref().map(str::len).unwrap_or(0) > 0 {
+            state.thq_dispatch.insert(
+                agent.config.agent_name.clone(),
+                crate::state::ThqDispatchEntry {
+                    user_key: agent.config.owner_id.clone().unwrap_or_default(),
+                    service_token: bearer.clone(),
+                },
+            );
+        } else {
+            tracing::warn!(
+                "THQ: agent-user {} has no [thq].owner_id — NOT dispatchable (16F)",
+                label
+            );
+        }
+
         let entry = AgentEntry {
             id: agent_id.clone(),
             name: agent.config.agent_name.clone(),
