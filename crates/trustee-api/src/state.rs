@@ -801,6 +801,11 @@ impl ServerState {
                 // file at boot); keeping it in the merged session config is
                 // inert but avoids a false "dropping" warn on every dispatch.
                 || section == "thq"
+                // xagent personas: an agent's [lifecycle].system_template IS
+                // her identity — user-owned by design. The WASM extension
+                // switch ([lifecycle].enabled) is stripped below: persona is
+                // user-owned, extension control is not.
+                || section == "lifecycle"
                 || (self.allow_llm_overlay && section == "llm")
         };
         // Mask the user in logs: user_home's dir name IS the hash — never
@@ -814,7 +819,18 @@ impl ServerState {
         let mut filtered_overlay = toml::map::Map::new();
         if let Some(table) = overlay.as_table() {
             for (section, value) in table {
-                if allowed(section) {
+                if section == "lifecycle" {
+                    let mut v = value.clone();
+                    if let Some(t) = v.as_table_mut() {
+                        if t.remove("enabled").is_some() {
+                            tracing::info!(
+                                "user config overlay: [lifecycle].enabled is not user-settable — stripped for user {}",
+                                masked_user
+                            );
+                        }
+                    }
+                    filtered_overlay.insert(section.clone(), v);
+                } else if allowed(section) {
                     filtered_overlay.insert(section.clone(), value.clone());
                 } else {
                     tracing::warn!(
@@ -1538,6 +1554,38 @@ mod tests {
             assert_eq!(home.parent(), Some(&users_root).map(|p| p.as_path()));
         }
         // dirs::home_dir() unavailable in sandbox → covered by core tests.
+    }
+
+    /// xagent personas: [lifecycle] survives the overlay allowlist (persona
+    /// is user-owned) but the WASM extension switch does not.
+    #[test]
+    fn lifecycle_overlay_survives_allowlist_enabled_stripped() {
+        let state = test_state();
+        let home = temp_user_home("lifecycle-persona");
+        std::fs::write(
+            home.join("config").join("trustee.toml"),
+            "[lifecycle]\nsystem_template = \"You are Saman.\"\nenabled = true\n",
+        )
+        .expect("write overlay");
+
+        let merged = state
+            .merge_user_config(
+                &home,
+                Some("[lifecycle]\nsystem_template = \"shared default\"\n"),
+            )
+            .expect("lifecycle overlay is allowlisted");
+
+        let v = merged.parse::<toml::Value>().expect("valid TOML");
+        assert_eq!(
+            v["lifecycle"]["system_template"].as_str(),
+            Some("You are Saman."),
+            "agent persona wins over shared default"
+        );
+        assert_eq!(
+            v["lifecycle"].get("enabled"),
+            None,
+            "WASM extension switch is not user-settable"
+        );
     }
 
     /// 16D integration guard: dev-agent principals (user_key `agent-<name>`)
