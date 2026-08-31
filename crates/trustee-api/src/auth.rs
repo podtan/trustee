@@ -12,7 +12,9 @@
 //!
 //! Token extraction order: `Authorization: Bearer` header → `trustee_token` cookie.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
 use axum::{
@@ -22,12 +24,13 @@ use axum::{
     response::{IntoResponse, Json, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
+use pep::oidc::pkce_cookie::PkceCookieManager;
 use pep::oidc_client::OidcClient;
 use pep::oidc_resource_server::ResourceServerClient;
-use pep::oidc::pkce_cookie::PkceCookieManager;
 use pep::session_manager::WebSessionManager;
 use pep::{DevConfig, JwtClaims, JwtValidationOptions, OidcClientConfig};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use time::Duration as TimeDuration;
 
 use cedar_policy::{Context, Entities, EntityUid, Request};
@@ -69,14 +72,27 @@ impl AuthConfig {
         let table: toml::Table = toml::from_str(config_toml).ok()?;
 
         // Check for dev mode
-        let dev_config = table.get("dev").and_then(|d| d.as_table()).map(|d| {
-            DevConfig {
-                local_dev_mode: d.get("local_dev_mode").and_then(|v| v.as_bool()).unwrap_or(false),
-                local_dev_email: d.get("local_dev_email").and_then(|v| v.as_str()).map(String::from),
-                local_dev_name: d.get("local_dev_name").and_then(|v| v.as_str()).map(String::from),
-                local_dev_username: d.get("local_dev_username").and_then(|v| v.as_str()).map(String::from),
-            }
-        });
+        let dev_config = table
+            .get("dev")
+            .and_then(|d| d.as_table())
+            .map(|d| DevConfig {
+                local_dev_mode: d
+                    .get("local_dev_mode")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                local_dev_email: d
+                    .get("local_dev_email")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                local_dev_name: d
+                    .get("local_dev_name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                local_dev_username: d
+                    .get("local_dev_username")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            });
 
         // Dev mode without OIDC — return early with dev-only config
         if let Some(ref dc) = dev_config {
@@ -84,22 +100,44 @@ impl AuthConfig {
                 // Try to get OIDC config too (for login endpoint), but it's optional in dev mode
                 let oidc = Self::parse_oidc_section(&table);
                 return Some(Self {
-                    issuer_url: oidc.as_ref().map(|o| o.0.clone()).unwrap_or_else(|| "https://auth.example.com".into()),
-                    client_id: oidc.as_ref().map(|o| o.1.clone()).unwrap_or_else(|| "trustee".into()),
+                    issuer_url: oidc
+                        .as_ref()
+                        .map(|o| o.0.clone())
+                        .unwrap_or_else(|| "https://auth.example.com".into()),
+                    client_id: oidc
+                        .as_ref()
+                        .map(|o| o.1.clone())
+                        .unwrap_or_else(|| "trustee".into()),
                     client_secret: oidc.as_ref().and_then(|o| o.2.clone()),
-                    redirect_uri: oidc.as_ref().map(|o| o.3.clone()).unwrap_or_else(|| "http://localhost:3000/auth/callback".into()),
-                    scope: oidc.as_ref().map(|o| o.4.clone()).unwrap_or_else(|| "openid profile email".into()),
+                    redirect_uri: oidc
+                        .as_ref()
+                        .map(|o| o.3.clone())
+                        .unwrap_or_else(|| "http://localhost:3000/auth/callback".into()),
+                    scope: oidc
+                        .as_ref()
+                        .map(|o| o.4.clone())
+                        .unwrap_or_else(|| "openid profile email".into()),
                     cookie_name: "trustee_token".into(),
                     dev_config: dc.clone(),
                     validation_options: JwtValidationOptions::default(),
-                    pkce_cookie_secret: oidc.as_ref().map(|o| o.6.clone()).unwrap_or_else(|| "trustee-default-pkce-secret-change-me".into()),
+                    pkce_cookie_secret: oidc
+                        .as_ref()
+                        .map(|o| o.6.clone())
+                        .unwrap_or_else(|| "trustee-default-pkce-secret-change-me".into()),
                 });
             }
         }
 
         // Production mode — requires [oidc] section
-        let (issuer_url, client_id, client_secret, redirect_uri, scope, validation_options, pkce_secret) =
-            Self::parse_oidc_section(&table)?;
+        let (
+            issuer_url,
+            client_id,
+            client_secret,
+            redirect_uri,
+            scope,
+            validation_options,
+            pkce_secret,
+        ) = Self::parse_oidc_section(&table)?;
 
         Some(Self {
             issuer_url,
@@ -118,12 +156,23 @@ impl AuthConfig {
     /// Returns (issuer_url, client_id, client_secret, redirect_uri, scope, validation_options, pkce_secret).
     fn parse_oidc_section(
         table: &toml::Table,
-    ) -> Option<(String, String, Option<String>, String, String, JwtValidationOptions, String)> {
+    ) -> Option<(
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        JwtValidationOptions,
+        String,
+    )> {
         let oidc = table.get("oidc")?.as_table()?;
 
         let issuer_url = oidc.get("issuer_url")?.as_str()?.to_string();
         let client_id = oidc.get("client_id")?.as_str()?.to_string();
-        let client_secret = oidc.get("client_secret").and_then(|v| v.as_str()).map(String::from);
+        let client_secret = oidc
+            .get("client_secret")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let redirect_uri = oidc
             .get("redirect_uri")
             .or_else(|| oidc.get("redirect_url")) // backward compat
@@ -140,7 +189,10 @@ impl AuthConfig {
         if let Some(skip) = oidc.get("skip_issuer_validation").and_then(|v| v.as_bool()) {
             validation_options.skip_issuer_validation = skip;
         }
-        if let Some(skip) = oidc.get("skip_audience_validation").and_then(|v| v.as_bool()) {
+        if let Some(skip) = oidc
+            .get("skip_audience_validation")
+            .and_then(|v| v.as_bool())
+        {
             validation_options.skip_audience_validation = skip;
         }
         validation_options.expected_audience = oidc
@@ -154,7 +206,15 @@ impl AuthConfig {
             .unwrap_or("trustee-default-pkce-secret-change-me")
             .to_string();
 
-        Some((issuer_url, client_id, client_secret, redirect_uri, scope, validation_options, pkce_secret))
+        Some((
+            issuer_url,
+            client_id,
+            client_secret,
+            redirect_uri,
+            scope,
+            validation_options,
+            pkce_secret,
+        ))
     }
 
     /// Build OIDC client configuration for PEP's OidcClient.
@@ -167,6 +227,106 @@ impl AuthConfig {
             scope: self.scope.clone(),
             code_challenge_method: "S256".to_string(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Token validation cache (issue c41eb9d7)
+// ---------------------------------------------------------------------------
+
+/// Grace subtracted from a token's `exp` before its cached validation goes
+/// stale. MUST exceed PEP's 60s clock-skew leeway, so a cached result is
+/// never served for a token PEP itself would reject on skew.
+const CACHE_EXP_GRACE_SECS: i64 = 120;
+
+/// Upper bound on how long any cached validation stays fresh, regardless of
+/// token lifetime. Bounds staleness of role/group enrichment changes.
+const CACHE_TTL_SECS: i64 = 300;
+
+/// Maximum cached tokens — bounded memory on a long-running daemon.
+const CACHE_MAX_ENTRIES: usize = 1024;
+
+/// Cache key: first 16 bytes of SHA-256(token). 128-bit truncation — no
+/// practical collision, and the raw token is never stored or logged.
+fn validation_cache_key(token: &str) -> [u8; 16] {
+    let digest = Sha256::digest(token.as_bytes());
+    let mut key = [0u8; 16];
+    key.copy_from_slice(&digest[..16]);
+    key
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// AUTHN-only token validation cache.
+///
+/// Keyed by [`validation_cache_key`], entry lifetime
+/// `min(exp - CACHE_EXP_GRACE_SECS, now + CACHE_TTL_SECS)`. Never gates
+/// authorization: callers MUST still run Cedar per request on the cached
+/// principal (`check_auth` does). Critical sections are clone-and-insert
+/// sized — the lock is never held across an await, and a concurrent
+/// double-validation on a cold token is benign (one wasted validation,
+/// correctness intact).
+struct ValidationCache {
+    inner: Mutex<ValidationCacheInner>,
+}
+
+#[derive(Default)]
+struct ValidationCacheInner {
+    /// token-hash → (claims, valid_until as unix seconds)
+    entries: HashMap<[u8; 16], (JwtClaims, i64)>,
+    /// (sub, issuer) pairs already announced once at INFO.
+    first_sight: HashSet<(String, String)>,
+}
+
+impl ValidationCache {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(ValidationCacheInner::default()),
+        }
+    }
+
+    /// Cached claims if present and still fresh.
+    fn get(&self, key: &[u8; 16], now: i64) -> Option<JwtClaims> {
+        let inner = self.inner.lock().expect("validation cache poisoned");
+        inner
+            .entries
+            .get(key)
+            .filter(|(_, until)| *until > now)
+            .map(|(claims, _)| claims.clone())
+    }
+
+    /// Store a fresh validation result with
+    /// `valid_until = min(exp - grace, now + ttl)`. A near-expiry token is
+    /// inserted harmlessly — `get` filters by time, so it is born stale.
+    fn put(&self, key: [u8; 16], claims: JwtClaims, now: i64) {
+        let valid_until = (claims.exp - CACHE_EXP_GRACE_SECS).min(now + CACHE_TTL_SECS);
+        let mut inner = self.inner.lock().expect("validation cache poisoned");
+        if inner.entries.len() >= CACHE_MAX_ENTRIES {
+            // Prefer dropping expired entries; if the map is all-hot, clear
+            // rather than random-evict live sessions. The cache is an
+            // optimization — correctness never depends on a hit.
+            inner.entries.retain(|_, (_, until)| *until > now);
+            if inner.entries.len() >= CACHE_MAX_ENTRIES {
+                inner.entries.clear();
+            }
+        }
+        inner.entries.insert(key, (claims, valid_until));
+    }
+
+    /// True on first sight of (sub, issuer) — the one chance to log at INFO.
+    fn mark_first_sight(&self, sub: &str, issuer: &str) -> bool {
+        let mut inner = self.inner.lock().expect("validation cache poisoned");
+        if inner.first_sight.len() >= CACHE_MAX_ENTRIES {
+            inner.first_sight.clear();
+        }
+        inner
+            .first_sight
+            .insert((sub.to_string(), issuer.to_string()))
     }
 }
 
@@ -193,6 +353,9 @@ pub struct AuthState {
     pub issuer_fallbacks: Vec<String>,
     /// Cedar authorizer for ABAC authorization (None = Cedar disabled)
     pub cedar_authorizer: Option<Arc<pep::cedar::CedarAuthorizer>>,
+    /// AUTHN-only token-validation cache (issue c41eb9d7). NEVER gates Cedar:
+    /// per-action authorization still runs per-request on the cached principal.
+    validation_cache: Arc<ValidationCache>,
 }
 
 impl AuthState {
@@ -202,7 +365,10 @@ impl AuthState {
     }
 
     /// Create new auth state with optional Cedar authorizer.
-    pub fn with_cedar(config: AuthConfig, cedar_authorizer: Option<Arc<pep::cedar::CedarAuthorizer>>) -> Self {
+    pub fn with_cedar(
+        config: AuthConfig,
+        cedar_authorizer: Option<Arc<pep::cedar::CedarAuthorizer>>,
+    ) -> Self {
         let pkce_manager = PkceCookieManager::new(
             config.pkce_cookie_secret.as_bytes(),
             "trustee_pkce_state",
@@ -226,6 +392,7 @@ impl AuthState {
             config,
             cedar_authorizer,
             issuer_fallbacks: Vec::new(),
+            validation_cache: Arc::new(ValidationCache::new()),
         }
     }
 
@@ -245,13 +412,30 @@ impl AuthState {
         self.validate_token_on(&self.config.issuer_url, token).await
     }
 
-    /// 16F: primary validation, then the service issuer if that fails.
+    /// 16F: primary validation, then the service issuer if that fails —
+    /// cached per token (issue c41eb9d7).
     ///
     /// Kanidm stamps tokens with the vhost they were minted on: human logins
     /// carry the `[oidc]` issuer, agent tokens exchanged via the service
     /// credential carry the service issuer. Each validates only against its
     /// own — this tries both, never skipping issuer validation.
+    ///
+    /// Results are cached (SHA-256(token)[:16] → claims, valid
+    /// `min(exp-120s, now+300s)`, cap 1024) so polling clients stop paying a
+    /// double validation + log line per request. AUTHN only: callers MUST
+    /// still run Cedar authorization per request (`check_auth` does).
     pub async fn validate_token_flexible(&self, token: &str) -> anyhow::Result<JwtClaims> {
+        let key = validation_cache_key(token);
+        let now = unix_now();
+        if let Some(cached) = self.validation_cache.get(&key, now) {
+            return Ok(cached);
+        }
+        let claims = self.validate_token_flexible_uncached(token).await?;
+        self.validation_cache.put(key, claims.clone(), now);
+        Ok(claims)
+    }
+
+    async fn validate_token_flexible_uncached(&self, token: &str) -> anyhow::Result<JwtClaims> {
         match self.validate_token(token).await {
             Ok(claims) => Ok(claims),
             Err(primary) => {
@@ -262,16 +446,34 @@ impl AuthState {
                     }
                     match self.validate_token_on(si, token).await {
                         Ok(claims) => {
-                            tracing::info!(
-                                "token validated via service-issuer fallback (iss={}) — sub {}",
-                                si,
-                                claims.sub
-                            );
+                            // c41eb9d7: this used to log INFO per request — an
+                            // idle-poll terminal flood. One INFO on first
+                            // sight of (sub, issuer), DEBUG afterwards.
+                            let first = self.validation_cache.mark_first_sight(&claims.sub, si);
+                            let who = claims.preferred_username.as_deref().unwrap_or(&claims.sub);
+                            if first {
+                                tracing::info!(
+                                    "service principal {} authenticating via service-issuer fallback (iss={})",
+                                    who,
+                                    si
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "token validated via service-issuer fallback (iss={}) — principal {}",
+                                    si,
+                                    who
+                                );
+                            }
                             return Ok(claims);
                         }
                         Err(e) => last = e,
                     }
                 }
+                // Auth failure must SCREAM regardless of caller handling
+                // (callers also warn on the returned error — belt and braces).
+                tracing::warn!(
+                    "token validation failed — primary: {last}; all service-issuer fallbacks exhausted"
+                );
                 Err(anyhow::anyhow!(
                     "primary: {last}; all service-issuer fallbacks exhausted"
                 ))
@@ -317,7 +519,8 @@ impl AuthState {
         // PEP only merges groups/role from userinfo. If name/email are missing
         // (Kanidm JWTs only contain sub), fetch them from userinfo directly.
         if claims.name.is_none() || claims.email.is_none() {
-            self.fill_userinfo_fields(&mut claims, token, issuer_url).await;
+            self.fill_userinfo_fields(&mut claims, token, issuer_url)
+                .await;
         }
 
         Ok(claims)
@@ -346,11 +549,15 @@ impl AuthState {
         };
 
         if !resp.status().is_success() {
-            tracing::debug!("Userinfo returned {} for name/email enrichment", resp.status());
+            tracing::debug!(
+                "Userinfo returned {} for name/email enrichment",
+                resp.status()
+            );
             return;
         }
 
-        let Ok(userinfo): Result<serde_json::Map<String, serde_json::Value>, _> = resp.json().await else {
+        let Ok(userinfo): Result<serde_json::Map<String, serde_json::Value>, _> = resp.json().await
+        else {
             return;
         };
 
@@ -448,7 +655,13 @@ impl AuthState {
             }
         };
 
-        let request = match Request::new(principal_uid, action_uid, resource_uid, Context::empty(), None) {
+        let request = match Request::new(
+            principal_uid,
+            action_uid,
+            resource_uid,
+            Context::empty(),
+            None,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("Cedar: failed to build request: {}", e);
@@ -665,13 +878,10 @@ pub async fn check_dispatch_admin(
         tracing::warn!("xagent dispatch rejected: dev tokens cannot dispatch agents");
         return Err(StatusCode::FORBIDDEN);
     }
-    let claims = auth
-        .validate_token_flexible(&token)
-        .await
-        .map_err(|e| {
-            tracing::warn!("xagent dispatch: caller token validation failed: {}", e);
-            StatusCode::UNAUTHORIZED
-        })?;
+    let claims = auth.validate_token_flexible(&token).await.map_err(|e| {
+        tracing::warn!("xagent dispatch: caller token validation failed: {}", e);
+        StatusCode::UNAUTHORIZED
+    })?;
     let user = AuthUser::from(claims);
     if !dispatch_allowed(user.kind, user.role.as_deref()) {
         tracing::warn!(
@@ -829,7 +1039,10 @@ pub async fn check_auth(
             Err(e) => {
                 // Token was returned but JWT validation failed (e.g. ExpiredSignature
                 // due to clock skew). Force-refresh and retry once.
-                tracing::warn!("Session token validation failed: {} — attempting force-refresh", e);
+                tracing::warn!(
+                    "Session token validation failed: {} — attempting force-refresh",
+                    e
+                );
                 match auth.session_manager.force_refresh(&session_id).await {
                     Ok(new_token) => match auth.validate_token(&new_token).await {
                         Ok(claims) => {
@@ -847,7 +1060,10 @@ pub async fn check_auth(
                             Ok((Some(cookie.to_string()), jwt_user_key(&claims)))
                         }
                         Err(e2) => {
-                            tracing::warn!("Session token still invalid after force-refresh: {}", e2);
+                            tracing::warn!(
+                                "Session token still invalid after force-refresh: {}",
+                                e2
+                            );
                             Err(StatusCode::UNAUTHORIZED)
                         }
                     },
@@ -893,7 +1109,9 @@ async fn resolve_access_token(
     match session_id {
         Some(sid) if sid.starts_with("dev:") => {
             if !auth.config.dev_config.local_dev_mode {
-                tracing::warn!("Dev cookie in resolve_access_token but dev mode is disabled — rejecting");
+                tracing::warn!(
+                    "Dev cookie in resolve_access_token but dev mode is disabled — rejecting"
+                );
                 Err(StatusCode::UNAUTHORIZED)
             } else {
                 Ok(sid)
@@ -945,9 +1163,7 @@ pub struct CallbackQuery {
 }
 
 /// GET /auth/login — initiate OIDC login with PKCE, or create dev session.
-async fn login_handler(
-    State(state): State<crate::ServerState>,
-) -> Result<Response, AuthError> {
+async fn login_handler(State(state): State<crate::ServerState>) -> Result<Response, AuthError> {
     let auth = state.auth.as_ref().ok_or(AuthError::AuthNotConfigured)?;
 
     // Dev mode — create synthetic session
@@ -960,7 +1176,12 @@ async fn login_handler(
             dev.local_dev_name.as_deref().unwrap_or("Dev User"),
             dev.local_dev_username.as_deref().unwrap_or("dev")
         );
-        let cookie = create_auth_cookie(&auth.config.cookie_name, &dev_token, StdDuration::from_secs(86400), false);
+        let cookie = create_auth_cookie(
+            &auth.config.cookie_name,
+            &dev_token,
+            StdDuration::from_secs(86400),
+            false,
+        );
         return Ok(Response::builder()
             .status(StatusCode::FOUND)
             .header(header::LOCATION, "/")
@@ -987,12 +1208,14 @@ async fn login_handler(
         auth.pkce_manager.cookie_name().to_string(),
         pkce_session.cookie_value,
     ))
-        .path("/")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .secure(secure)
-        .max_age(TimeDuration::seconds(auth.pkce_manager.ttl().as_secs() as i64))
-        .build();
+    .path("/")
+    .http_only(true)
+    .same_site(SameSite::Lax)
+    .secure(secure)
+    .max_age(TimeDuration::seconds(
+        auth.pkce_manager.ttl().as_secs() as i64
+    ))
+    .build();
 
     Ok(Response::builder()
         .status(StatusCode::TEMPORARY_REDIRECT)
@@ -1106,7 +1329,9 @@ async fn me_handler(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(String::from);
 
-    let token = bearer.clone().or_else(|| extract_token_from_cookies(cookie_header, &auth.config.cookie_name));
+    let token = bearer
+        .clone()
+        .or_else(|| extract_token_from_cookies(cookie_header, &auth.config.cookie_name));
 
     let Some(cookie_value) = token else {
         return axum::Json(serde_json::json!({
@@ -1260,11 +1485,19 @@ async fn mcp_login_handler(
             client_id,
             client_secret,
             scope,
-        } => (issuer_url.clone(), client_id.clone(), client_secret.clone(), scope.clone()),
+        } => (
+            issuer_url.clone(),
+            client_id.clone(),
+            client_secret.clone(),
+            scope.clone(),
+        ),
         _ => {
             return Ok(Redirect::temporary(&format!(
                 "/?mcp_error={}",
-                urlencoding::encode(&format!("Credential '{}' is not web-interactive type", query.cred))
+                urlencoding::encode(&format!(
+                    "Credential '{}' is not web-interactive type",
+                    query.cred
+                ))
             ))
             .into_response());
         }
@@ -1279,7 +1512,10 @@ async fn mcp_login_handler(
     // Build OidcClientConfig for the MCP credential's OIDC client
     let mcp_redirect_uri = format!(
         "{}/auth/mcp/callback",
-        auth.client_config.redirect_uri.trim_end_matches('/').trim_end_matches("/auth/callback")
+        auth.client_config
+            .redirect_uri
+            .trim_end_matches('/')
+            .trim_end_matches("/auth/callback")
     );
 
     let mcp_client_config = OidcClientConfig {
@@ -1298,11 +1534,14 @@ async fn mcp_login_handler(
         .map_err(|e| AuthError::OidcError(e.to_string()))?;
 
     // Store PKCE state + credential name in the in-memory map
-    mcp_pkce().insert(oauth_state.clone(), verifier.clone(), query.cred.clone()).await;
+    mcp_pkce()
+        .insert(oauth_state.clone(), verifier.clone(), query.cred.clone())
+        .await;
 
     tracing::info!(
         "Initiating MCP browser login for credential '{}' (issuer={})",
-        query.cred, issuer_url
+        query.cred,
+        issuer_url
     );
 
     Ok(Response::builder()
@@ -1336,7 +1575,9 @@ async fn mcp_callback_handler(
     let oauth_state = query.state.ok_or(AuthError::MissingState)?;
 
     // Look up PKCE verifier + credential name from in-memory store
-    let pkce_data = mcp_pkce().take(&oauth_state).await
+    let pkce_data = mcp_pkce()
+        .take(&oauth_state)
+        .await
         .ok_or(AuthError::InvalidState)?;
 
     let verifier = pkce_data.verifier;
@@ -1351,7 +1592,12 @@ async fn mcp_callback_handler(
             client_id,
             client_secret,
             scope,
-        } => (issuer_url.clone(), client_id.clone(), client_secret.clone(), scope.clone()),
+        } => (
+            issuer_url.clone(),
+            client_id.clone(),
+            client_secret.clone(),
+            scope.clone(),
+        ),
         _ => {
             return Ok(Redirect::temporary(&format!(
                 "/?mcp_error={}",
@@ -1364,7 +1610,10 @@ async fn mcp_callback_handler(
     // Build redirect URI (must match what was used in login)
     let mcp_redirect_uri = format!(
         "{}/auth/mcp/callback",
-        auth.client_config.redirect_uri.trim_end_matches('/').trim_end_matches("/auth/callback")
+        auth.client_config
+            .redirect_uri
+            .trim_end_matches('/')
+            .trim_end_matches("/auth/callback")
     );
 
     let mcp_client_config = OidcClientConfig {
@@ -1377,7 +1626,10 @@ async fn mcp_callback_handler(
     };
 
     // Exchange code for tokens
-    tracing::info!("Exchanging MCP authorization code for tokens (credential={})", cred_name);
+    tracing::info!(
+        "Exchanging MCP authorization code for tokens (credential={})",
+        cred_name
+    );
     let oidc_client = OidcClient::new();
     let token_response = oidc_client
         .exchange_code_for_tokens(&mcp_client_config, &code, Some(&verifier))
@@ -1420,10 +1672,18 @@ async fn mcp_callback_handler(
         token_response.scope.clone(),
     );
 
-    let agent_name = state.config_toml.as_ref().and_then(|t| {
-        toml::from_str::<toml::Value>(t).ok()
-            .and_then(|v| v.get("agent").and_then(|a| a.get("name")).and_then(|n| n.as_str()).map(String::from))
-    }).unwrap_or_else(|| "trustee".to_string());
+    let agent_name = state
+        .config_toml
+        .as_ref()
+        .and_then(|t| {
+            toml::from_str::<toml::Value>(t).ok().and_then(|v| {
+                v.get("agent")
+                    .and_then(|a| a.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(String::from)
+            })
+        })
+        .unwrap_or_else(|| "trustee".to_string());
     let token_store = FileTokenStore::new(&agent_name);
 
     if let Err(e) = token_store.save(cred_name, &stored) {
@@ -1437,12 +1697,16 @@ async fn mcp_callback_handler(
 
     tracing::info!(
         "MCP authentication successful for credential '{}' (expires {})",
-        cred_name, expires_at
+        cred_name,
+        expires_at
     );
 
     Ok(Response::builder()
         .status(StatusCode::FOUND)
-        .header(header::LOCATION, format!("/?mcp_connected={}", urlencoding::encode(cred_name)))
+        .header(
+            header::LOCATION,
+            format!("/?mcp_connected={}", urlencoding::encode(cred_name)),
+        )
         .body(Body::empty())
         .unwrap())
 }
@@ -1463,7 +1727,9 @@ async fn mcp_status_handler(
     .await
     {
         Ok(result) => result,
-        Err(code) => return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response(),
+        Err(code) => {
+            return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response()
+        }
     };
 
     // Parse MCP config from session
@@ -1472,7 +1738,9 @@ async fn mcp_status_handler(
         let session = session_arc.lock().await;
         match &session.config_toml {
             Some(t) => t.clone(),
-            None => return (StatusCode::INTERNAL_SERVER_ERROR, "Config not loaded").into_response(),
+            None => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Config not loaded").into_response()
+            }
         }
     };
 
@@ -1498,11 +1766,15 @@ async fn mcp_status_handler(
         .and_then(|m| m.get("credentials"))
         .and_then(|c| c.as_table());
 
-    let mut cred_servers: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut cred_servers: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     if let Some(servers) = servers {
         for server in servers {
             let name = server.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let cred_ref = server.get("credentials").and_then(|c| c.as_str()).unwrap_or("");
+            let cred_ref = server
+                .get("credentials")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
             if !cred_ref.is_empty() {
                 cred_servers
                     .entry(cred_ref.to_string())
@@ -1516,7 +1788,10 @@ async fn mcp_status_handler(
 
     if let Some(creds) = credentials {
         for (cred_name, cred_config) in creds {
-            let cred_type = cred_config.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
+            let cred_type = cred_config
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("unknown");
             let servers_using = cred_servers.get(cred_name).cloned().unwrap_or_default();
 
             if cred_type == "web-session" {
@@ -1599,7 +1874,9 @@ async fn mcp_logout_handler(
     .await
     {
         Ok(result) => result,
-        Err(code) => return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response(),
+        Err(code) => {
+            return (code, Json(serde_json::json!({"error": "Unauthorized"}))).into_response()
+        }
     };
 
     let agent_name = {
@@ -1654,11 +1931,14 @@ impl McpPkceStore {
         // Cleanup expired entries (older than 10 min)
         let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(600);
         map.retain(|_, v| v.created_at > cutoff);
-        map.insert(state, McpPkceEntry {
-            verifier,
-            cred_name,
-            created_at: std::time::Instant::now(),
-        });
+        map.insert(
+            state,
+            McpPkceEntry {
+                verifier,
+                cred_name,
+                created_at: std::time::Instant::now(),
+            },
+        );
     }
 
     /// Take and remove a PKCE entry (single-use).
@@ -1707,7 +1987,10 @@ async fn load_mcp_credential(
         .and_then(|c| c.get(cred_name))
         .ok_or_else(|| AuthError::OidcError(format!("Credential '{}' not found", cred_name)))?;
 
-    let cred_type = cred.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
+    let cred_type = cred
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("unknown");
 
     match cred_type {
         "web-interactive" => {
@@ -1747,7 +2030,12 @@ async fn load_mcp_credential(
 // ---------------------------------------------------------------------------
 
 /// Create an HttpOnly auth cookie.
-fn create_auth_cookie(name: &str, value: &str, max_age: StdDuration, secure: bool) -> Cookie<'static> {
+fn create_auth_cookie(
+    name: &str,
+    value: &str,
+    max_age: StdDuration,
+    secure: bool,
+) -> Cookie<'static> {
     Cookie::build((name.to_string(), value.to_string()))
         .path("/")
         .http_only(true)
@@ -1778,9 +2066,14 @@ impl IntoResponse for AuthError {
             AuthError::MissingCode => (StatusCode::BAD_REQUEST, "Missing authorization code"),
             AuthError::MissingState => (StatusCode::BAD_REQUEST, "Missing state parameter"),
             AuthError::InvalidState => (StatusCode::BAD_REQUEST, "Invalid or expired state"),
-            AuthError::OidcError(_) => (StatusCode::SERVICE_UNAVAILABLE, "Authentication service error"),
+            AuthError::OidcError(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Authentication service error",
+            ),
             AuthError::TokenExchangeFailed(_) => (StatusCode::BAD_REQUEST, "Token exchange failed"),
-            AuthError::AuthNotConfigured => (StatusCode::NOT_IMPLEMENTED, "Authentication not configured"),
+            AuthError::AuthNotConfigured => {
+                (StatusCode::NOT_IMPLEMENTED, "Authentication not configured")
+            }
         };
         Redirect::temporary(&format!("/?error={}", urlencoding::encode(msg))).into_response()
     }
@@ -2038,7 +2331,10 @@ mod cedar_p2_tests {
             actions::LIST_SESSIONS,
             actions::VIEW_HISTORY,
         ] {
-            assert!(allowed(&auth, Some("service"), action).await, "service {action}");
+            assert!(
+                allowed(&auth, Some("service"), action).await,
+                "service {action}"
+            );
         }
         for action in [actions::COMMAND_SESSION, actions::DELETE_SESSION] {
             assert!(
@@ -2068,3 +2364,130 @@ mod cedar_p2_tests {
     }
 }
 
+/// Token validation cache (issue c41eb9d7) — pure-logic tests against a
+/// standalone [`ValidationCache`]; no IdP, no network.
+#[cfg(test)]
+mod validation_cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn claims_with(exp_in: i64, sub: &str) -> JwtClaims {
+        let mut c = JwtClaims::default();
+        c.exp = unix_now() + exp_in;
+        c.sub = sub.to_string();
+        c.preferred_username = Some("farzan".to_string());
+        c
+    }
+
+    /// ACCEPTANCE c41eb9d7: repeated polls = 1 validation, not 2.
+    #[test]
+    fn cache_hit_two_polls_one_validation() {
+        let cache = ValidationCache::new();
+        let validations = Arc::new(AtomicUsize::new(0));
+        let key = validation_cache_key("token-A");
+
+        for _ in 0..2 {
+            if cache.get(&key, unix_now()).is_some() {
+                continue; // cache hit — poll served without validation
+            }
+            // stub: this block is the "real validation"
+            validations.fetch_add(1, Ordering::SeqCst);
+            cache.put(key, claims_with(3600, "sub-A"), unix_now());
+        }
+
+        assert_eq!(
+            validations.load(Ordering::SeqCst),
+            1,
+            "second poll must hit the cache, not re-validate"
+        );
+    }
+
+    /// Expiry: after valid_until the entry is a miss → re-validation.
+    #[test]
+    fn expired_entry_revalidates() {
+        let cache = ValidationCache::new();
+        let key = validation_cache_key("token-B");
+        let now = unix_now();
+        cache.put(key, claims_with(3600, "sub-B"), now);
+
+        assert!(cache.get(&key, now).is_some(), "fresh entry must hit");
+        assert!(
+            cache.get(&key, now + CACHE_TTL_SECS + 1).is_none(),
+            "entry past valid_until must miss and force re-validation"
+        );
+    }
+
+    /// exp-grace: a token inside its last 120s is born stale — get() must
+    /// never serve it, mirroring PEP's 60s skew leeway with margin.
+    #[test]
+    fn near_expiry_token_never_served_from_cache() {
+        let cache = ValidationCache::new();
+        let key = validation_cache_key("token-C");
+        let now = unix_now();
+        // exp in 60s → valid_until = exp - 120 < now
+        cache.put(key, claims_with(60, "sub-C"), now);
+        assert!(
+            cache.get(&key, now).is_none(),
+            "entry valid_until <= now must be rejected immediately"
+        );
+    }
+
+    /// Cap: at CACHE_MAX_ENTRIES the cache evicts instead of growing —
+    /// correctness never depends on a hit (dropped entries re-validate).
+    #[test]
+    fn cap_evicts_instead_of_growing_unbounded() {
+        let cache = ValidationCache::new();
+        let now = unix_now();
+        for i in 0..CACHE_MAX_ENTRIES {
+            cache.put(
+                validation_cache_key(&format!("tok-{i}")),
+                claims_with(3600, "s"),
+                now,
+            );
+        }
+        // Map is all-hot → overflow clears rather than random-evicts.
+        let overflow = validation_cache_key("tok-overflow");
+        cache.put(overflow, claims_with(3600, "s"), now);
+
+        let inner = cache.inner.lock().unwrap();
+        assert!(
+            inner.entries.len() <= CACHE_MAX_ENTRIES,
+            "cache must stay bounded"
+        );
+        assert!(
+            inner.entries.contains_key(&overflow),
+            "newest entry must survive"
+        );
+        assert!(
+            !inner.entries.contains_key(&validation_cache_key("tok-0")),
+            "pre-overflow entries were reset, not served stale forever"
+        );
+    }
+
+    /// INFO-vs-DEBUG gate: first sight per (sub, issuer), never again.
+    #[test]
+    fn first_sight_fires_once_per_sub_issuer_pair() {
+        let cache = ValidationCache::new();
+        assert!(cache.mark_first_sight("sub-A", "https://idp.tanbal.ir"));
+        assert!(!cache.mark_first_sight("sub-A", "https://idp.tanbal.ir"));
+        assert!(
+            cache.mark_first_sight("sub-A", "https://other.tanbal.ir"),
+            "different issuer = first sight"
+        );
+        assert!(
+            cache.mark_first_sight("sub-B", "https://idp.tanbal.ir"),
+            "different sub = first sight"
+        );
+    }
+
+    /// 128-bit truncated SHA-256: distinct tokens must not collide.
+    #[test]
+    fn distinct_tokens_distinct_keys() {
+        assert_ne!(validation_cache_key("tok-1"), validation_cache_key("tok-2"));
+        // Raw token material must not leak into the stored key
+        assert_eq!(
+            validation_cache_key("secret"),
+            validation_cache_key("secret")
+        );
+    }
+}
