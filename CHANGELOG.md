@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.0] - 2026-08-31
+
+### Fixed
+
+- **Hardcoded platform persona removed from dispatched sessions** — the xagent THQ-dispatch create wrapper no longer synthesizes "You are {agent}, an agent on the Tanbal platform." for sessions without an explicit identity. That string baked the platform's identity into the open-source binary and bypassed the user-configurable `system_template` feature. Dispatched sessions now resolve their persona like every other session: agent's own per-user overlay → shared config default → abk neutral fallback. Explicit caller identity still wins.
+
+### Added
+
+- **Per-agent personas via overlay config** — the user-overlay allowlist now admits the `[lifecycle]` section, so each agent's `~/.trustee/users/<hash>/config/trustee.toml` can carry her own `[lifecycle].system_template` (her identity). The WASM extension switch `[lifecycle].enabled` is NOT user-settable: it is stripped from overlays (loud INFO) before the merge — agents own their persona, not extension control.
+
+Crate bumps: api `0.11.2`���`0.12.0` (feat), root `0.13.2`→`0.14.0` (angular: feat → minor). Tests: 67/67 (new: lifecycle-overlay allowlist guard + enabled-strip; xagent create-without-identity contract). fmt flat at 272.
+
 ## [0.13.2] - 2026-08-30
 
 ### Fixed
