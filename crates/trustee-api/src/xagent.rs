@@ -38,13 +38,6 @@ use axum::Json;
 use crate::routes;
 use crate::state::ServerState;
 
-/// Minimum identity for dispatched sessions whose create body carries none.
-/// Charters replace this per agent once drafted (owner-approved content);
-/// until then the agent at least knows its own name.
-fn default_identity(agent: &str) -> String {
-    format!("You are {agent}, an agent on the Tanbal platform.")
-}
-
 /// Resolve the dispatch target and rebuild the inner request headers with
 /// the AGENT's Bearer (cookie stripped). Shared prelude of every wrapper.
 async fn dispatch_context(
@@ -168,9 +161,11 @@ pub async fn x_create_session(
     Json(mut req): Json<routes::CreateSessionRequest>,
 ) -> Result<Response, (StatusCode, String)> {
     let inner = dispatch_context(&state, &agent, &headers).await?;
-    if req.identity.is_none() {
-        req.identity = Some(default_identity(&agent));
-    }
+    // Identity is NOT injected here: an dispatched session's persona comes
+    // from the agent's OWN overlay config ([lifecycle].system_template in
+    // her ~/.trustee/users/<hash>/config/trustee.toml — allowlisted since
+    // the xagent-persona change), falling back to the shared config default.
+    // An explicit identity in the create body still wins (caller override).
     routes::create_session(State(state), inner, Json(req)).await
 }
 
@@ -350,10 +345,16 @@ mod tests {
     }
 
     #[test]
-    fn default_identity_names_the_agent() {
-        assert_eq!(
-            default_identity("saman"),
-            "You are saman, an agent on the Tanbal platform."
+    fn create_without_identity_stays_config_driven() {
+        // Contract: the xagent create wrapper does NOT synthesize an
+        // identity — the agent's own overlay [lifecycle].system_template
+        // flows through the standard config path (verified in state.rs
+        // lifecycle_overlay tests). This test only pins the request shape.
+        let req: routes::CreateSessionRequest =
+            serde_json::from_str(r#"{"session_name": "probe"}"#).unwrap();
+        assert!(
+            req.identity.is_none(),
+            "wrapper must not invent identities — persona is config-owned"
         );
     }
 
