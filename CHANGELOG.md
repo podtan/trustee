@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.1] - 2026-08-31
+
+### Fixed
+
+- **INFO flood from service-issuer fallback validation removed** — polling clients (torpi/THQ service Bearer) paid a double validation + INFO line per request because fallback results were never cached. Validation results now cache per token (SHA-256[:16] key, TTL min(exp−120s, now+300s), cap 1024); one INFO on first sight of a (sub, issuer) pair, DEBUG thereafter, exhaustion still warns. AUTHN-only — Cedar authorization stays per-request. Verified live on the production VM: continuous ~5s flood replaced by 3 one-time first-sight lines; repeated polls silent; idle agents produce no lines. Crate bump: api `0.12.0`→`0.12.1`. Tests: 57/57 (new: 6 validation-cache tests).
+
 ## [0.14.0] - 2026-08-31
 
 ### Fixed
