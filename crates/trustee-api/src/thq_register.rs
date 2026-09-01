@@ -55,6 +55,14 @@ pub struct ThqConfig {
     /// the key used to read live session state for the busy/idle heartbeat,
     /// matching the agent `user_key` pin (agents are keyed by `sub`).
     pub owner_id: Option<String>,
+    /// Issue 8e0a1215: the agent DECLARES which env var holds her Kanidm
+    /// service credential — e.g. `service_token = "${PAYDAR_SERVICE_ACCOUNT}"`.
+    /// Resolved from the agent's per-user `.env` at boot; a bare key name
+    /// (without the `${…}` wrapper) is accepted too. When set, this key
+    /// wins over the legacy hardcoded scan (`THQ_SERVICE_TOKEN`, … — now
+    /// DEPRECATED). Declared but unresolved → loud boot ERROR and the agent
+    /// is NOT dispatchable. Never a silent skip.
+    pub service_token: Option<String>,
 }
 
 impl ThqConfig {
@@ -121,6 +129,11 @@ impl ThqConfig {
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let service_token = thq
+            .get("service_token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         Some(Self {
             torpi_url,
@@ -132,6 +145,7 @@ impl ThqConfig {
             heartbeat_interval,
             registration_token,
             owner_id,
+            service_token,
         })
     }
 }
@@ -280,6 +294,13 @@ pub fn discover_service_issuers() -> Vec<String> {
 /// key in the user's `.env`. The THQ registration route is OPEN — this is
 /// attribution, not authentication. Unresolved `${VAR}` placeholders are
 /// skipped (they mean the secret was never provisioned).
+///
+/// DEPRECATED (issue 8e0a1215): this fixed priority list could not see real
+/// config keys outside the blessed four (the live Paydar incident:
+/// `PAYDAR_SERVICE_ACCOUNT` silently invisible → dispatch 502 two layers
+/// later). Prefer the explicit `[thq].service_token = "${ANY_KEY}"`
+/// declaration in the agent's overlay — this scan remains only as the
+/// backward-compat fallback for agents that declare nothing.
 fn read_user_bearer(user_home: &std::path::Path) -> Option<String> {
     let env = std::fs::read_to_string(user_home.join(".env")).ok()?;
     const KEYS: [&str; 4] = [
@@ -288,6 +309,9 @@ fn read_user_bearer(user_home: &std::path::Path) -> Option<String> {
         "FARZAN_SERVICE_ACCOUNT",
         "KANIDM_SERVICE_TOKEN",
     ];
+    // ^ DEPRECATED (issue 8e0a1215): hardcoded personal-name keys
+    // (FARZAN_SERVICE_ACCOUNT is a persona leak in the open-source binary).
+    // Legacy fallback ONLY — declare `[thq].service_token = "${KEY}"` instead.
     for key in KEYS {
         let prefix = format!("{key}=");
         for line in env.lines() {
@@ -301,6 +325,88 @@ fn read_user_bearer(user_home: &std::path::Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Issue 8e0a1215: outcome of resolving an agent-user's dispatch credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceTokenResolution {
+    /// Credential resolved — from the explicit `[thq].service_token`
+    /// declaration (wins) or the legacy key scan.
+    Resolved(String),
+    /// No `[thq].service_token` declared and the legacy scan found nothing —
+    /// pre-issue legacy posture: entry captured with `service_token = None`,
+    /// dispatch fails loud (502) at request time.
+    LegacyAbsent,
+    /// `[thq].service_token` DECLARED but its variable did not resolve from
+    /// the agent's `.env` (missing file, missing key, or an unresolved
+    /// `${…}` placeholder value). Boot FAILS LOUD naming agent + variable;
+    /// the agent is NOT dispatchable. Never a silent skip.
+    DeclaredUnresolved { var: String },
+}
+
+/// Extract the env-var name from a `[thq].service_token` declaration.
+/// Accepts the canonical `"${KEY}"` wrapper and a bare `"KEY"`. Malformed
+/// input returns the raw trimmed string — the lookup then fails and the
+/// boot error names exactly what the config said.
+fn declared_service_var(decl: &str) -> String {
+    let s = decl.trim();
+    match s.strip_prefix("${").and_then(|r| r.strip_suffix('}')) {
+        Some(inner) => inner.trim().to_string(),
+        None => s.to_string(),
+    }
+}
+
+/// Look up `key` in a `.env` file (`KEY=value`, quotes unwrapped, `#`
+/// comments skipped). A missing key, an empty value, or an unresolved
+/// `${…}` placeholder value (the house "never provisioned" convention,
+/// same as [`read_user_bearer`]) all yield None. The user's `.env` is the
+/// ONLY source — no process-env fallback, so a declared credential must be
+/// provisioned where the agent's identity lives.
+fn lookup_env_value(env_path: &std::path::Path, key: &str) -> Option<String> {
+    if key.is_empty() {
+        return None;
+    }
+    let env = std::fs::read_to_string(env_path).ok()?;
+    let prefix = format!("{key}=");
+    for line in env.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix(&prefix) {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() && !value.starts_with("${") {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Issue 8e0a1215: resolve an agent-user's dispatch credential.
+///
+/// Precedence: an explicit `[thq].service_token = "${ANY_KEY}"`
+/// declaration WINS over the legacy hardcoded scan — the config declares,
+/// the code no longer guesses. Declared-but-unresolved is a loud boot
+/// error ([`ServiceTokenResolution::DeclaredUnresolved`]); an absent
+/// declaration falls back to the deprecated legacy list unchanged.
+pub fn resolve_user_service_token(
+    user_home: &std::path::Path,
+    config: &ThqConfig,
+) -> ServiceTokenResolution {
+    match config.service_token.as_deref() {
+        Some(decl) => {
+            let var = declared_service_var(decl);
+            match lookup_env_value(&user_home.join(".env"), &var) {
+                Some(value) => ServiceTokenResolution::Resolved(value),
+                None => ServiceTokenResolution::DeclaredUnresolved { var },
+            }
+        }
+        None => match read_user_bearer(user_home) {
+            Some(token) => ServiceTokenResolution::Resolved(token),
+            None => ServiceTokenResolution::LegacyAbsent,
+        },
+    }
 }
 
 /// Busy = any of the user's sessions currently running.
@@ -497,20 +603,46 @@ pub fn spawn_all(legacy: Option<ThqConfig>, state: crate::state::ServerState) {
                 continue;
             }
         };
-        let bearer = read_user_bearer(&agent.user_home);
+        // Issue 8e0a1215: credential resolution is config-DECLARED, not
+        // code-guessed. An explicit [thq].service_token wins; absent →
+        // legacy scan; declared-but-unresolved → LOUD error, non-dispatchable.
+        let resolution = resolve_user_service_token(&agent.user_home, &agent.config);
+        let bearer = match &resolution {
+            ServiceTokenResolution::Resolved(token) => Some(token.clone()),
+            ServiceTokenResolution::LegacyAbsent => None,
+            ServiceTokenResolution::DeclaredUnresolved { var } => {
+                tracing::error!(
+                    "THQ: agent {} declared [thq].service_token = \"${{{var}}}\" but {var} is NOT set in {} — \
+                     agent NOT dispatchable. Set the variable in the agent's .env (a placeholder value \
+                     like ${{...}} does not count) or fix the declaration.",
+                    label,
+                    agent.user_home.join(".env").display()
+                );
+                None
+            }
+        };
         let url = format!("{}/thq/api/agents", agent.config.torpi_url);
 
         // 16F: register the dispatch target so THQ-proxied sessions can be
         // impersonated AS this agent-user (see crate::xagent).
         if agent.config.owner_id.as_deref().map(str::len).unwrap_or(0) > 0 {
-            state.thq_dispatch.insert(
-                agent.config.agent_name.clone(),
-                crate::state::ThqDispatchEntry {
-                    user_key: agent.config.owner_id.clone().unwrap_or_default(),
-                    service_token: bearer.clone(),
-                    issuer_url: read_overlay_service_issuer(&agent.user_home),
-                },
-            );
+            if matches!(
+                resolution,
+                ServiceTokenResolution::DeclaredUnresolved { .. }
+            ) {
+                // Already SCREAMED above — the agent stays out of the
+                // dispatch table (non-dispatchable), registration continues
+                // so the THQ UI still shows her. Never a silent skip.
+            } else {
+                state.thq_dispatch.insert(
+                    agent.config.agent_name.clone(),
+                    crate::state::ThqDispatchEntry {
+                        user_key: agent.config.owner_id.clone().unwrap_or_default(),
+                        service_token: bearer.clone(),
+                        issuer_url: read_overlay_service_issuer(&agent.user_home),
+                    },
+                );
+            }
         } else {
             tracing::warn!(
                 "THQ: agent-user {} has no [thq].owner_id — NOT dispatchable (16F)",
@@ -549,6 +681,15 @@ pub fn spawn_all(legacy: Option<ThqConfig>, state: crate::state::ServerState) {
             label,
         ));
     }
+}
+
+/// Shared test fixture: a fresh temp dir standing in for a user home.
+#[cfg(test)]
+fn temp_users_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("trustee-thq-test-{}-{}", tag, std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 #[cfg(test)]
@@ -731,14 +872,6 @@ owner_id = "1a71c077-b3b3-4581-b605-925c3f276f30"
     // ── 16E tests ───────────────────────────────────────────────────────
 
     /// Unique temp dir without the tempfile dev-dependency.
-    fn temp_users_dir(tag: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("trustee-thq-test-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     #[test]
     fn discover_finds_only_users_with_thq() {
         let base = temp_users_dir("discover");
@@ -863,6 +996,152 @@ owner_id = "1a71c077-b3b3-4581-b605-925c3f276f30"
         // Quoted values are unwrapped; fallthrough to FAME works.
         std::fs::write(base.join(".env"), "FAME_SERVICE_TOKEN=\"fame-token\"\n").unwrap();
         assert_eq!(read_user_bearer(&base).as_deref(), Some("fame-token"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Issue 8e0a1215: [thq].service_token declared credential key
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod service_token_declaration_tests {
+    use super::*;
+
+    /// Minimal overlay TOML with an optional service_token declaration.
+    fn thq_toml(service_token: Option<&str>) -> String {
+        let mut s = String::from(
+            "[thq]\ntorpi_url = \"https://torpi.example.com\"\nadvertise_url = \"https://10.0.0.5:3000\"\n",
+        );
+        if let Some(st) = service_token {
+            s.push_str(&format!("service_token = \"{st}\"\n"));
+        }
+        s
+    }
+
+    #[test]
+    fn parse_declared_service_token_field() {
+        let cfg = ThqConfig::from_toml(&thq_toml(Some("${PAYDAR_SERVICE_ACCOUNT}")))
+            .expect("should parse");
+        assert_eq!(
+            cfg.service_token.as_deref(),
+            Some("${PAYDAR_SERVICE_ACCOUNT}"),
+            "declaration is stored verbatim; resolution happens at boot"
+        );
+        assert!(
+            ThqConfig::from_toml(&thq_toml(None))
+                .unwrap()
+                .service_token
+                .is_none(),
+            "absent field = None (legacy path)"
+        );
+    }
+
+    #[test]
+    fn declared_var_accepts_wrapped_and_bare_forms() {
+        assert_eq!(
+            declared_service_var("${PAYDAR_SERVICE_ACCOUNT}"),
+            "PAYDAR_SERVICE_ACCOUNT"
+        );
+        assert_eq!(
+            declared_service_var("  ${ PAYDAR_SERVICE_ACCOUNT }  "),
+            "PAYDAR_SERVICE_ACCOUNT"
+        );
+        assert_eq!(
+            declared_service_var("PAYDAR_SERVICE_ACCOUNT"),
+            "PAYDAR_SERVICE_ACCOUNT"
+        );
+        // Malformed input surfaces verbatim in the loud error, never swallowed.
+        assert_eq!(declared_service_var(""), "");
+        assert_eq!(declared_service_var("${"), "${");
+    }
+
+    /// THE PAYDAR CASE (live incident, issue 8e0a1215): an agent whose
+    /// credential lives under a key OUTSIDE the legacy four dispatches with
+    /// zero source changes — config-declared, not code-guessed.
+    #[test]
+    fn declared_field_wins_over_legacy_scan_with_custom_key_name() {
+        let base = temp_users_dir("declared-wins");
+        std::fs::write(
+            base.join(".env"),
+            "THQ_SERVICE_TOKEN=legacy-token\nPAYDAR_SERVICE_ACCOUNT=paydar-token\n",
+        )
+        .unwrap();
+        let cfg = ThqConfig::from_toml(&thq_toml(Some("${PAYDAR_SERVICE_ACCOUNT}"))).unwrap();
+        assert_eq!(
+            resolve_user_service_token(&base, &cfg),
+            ServiceTokenResolution::Resolved("paydar-token".to_string()),
+            "explicit declaration must win over the legacy priority list"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn declared_but_env_file_missing_is_loud_unresolved() {
+        let base = temp_users_dir("declared-no-env");
+        let cfg = ThqConfig::from_toml(&thq_toml(Some("${PAYDAR_SERVICE_ACCOUNT}"))).unwrap();
+        assert_eq!(
+            resolve_user_service_token(&base, &cfg),
+            ServiceTokenResolution::DeclaredUnresolved {
+                var: "PAYDAR_SERVICE_ACCOUNT".to_string()
+            },
+            ".env missing entirely → same loud path, never a silent skip"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn declared_but_key_missing_from_env_is_loud_unresolved() {
+        let base = temp_users_dir("declared-no-key");
+        std::fs::write(base.join(".env"), "THQ_SERVICE_TOKEN=legacy-token\n").unwrap();
+        let cfg = ThqConfig::from_toml(&thq_toml(Some("${PAYDAR_SERVICE_ACCOUNT}"))).unwrap();
+        assert_eq!(
+            resolve_user_service_token(&base, &cfg),
+            ServiceTokenResolution::DeclaredUnresolved {
+                var: "PAYDAR_SERVICE_ACCOUNT".to_string()
+            },
+            "legacy key presence must NOT satisfy a different declared key"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn declared_but_placeholder_value_is_unresolved() {
+        let base = temp_users_dir("declared-placeholder");
+        // House convention: a ${...} VALUE means the secret was never
+        // provisioned (same rule read_user_bearer applies).
+        std::fs::write(
+            base.join(".env"),
+            "PAYDAR_SERVICE_ACCOUNT=${PAYDAR_SERVICE_ACCOUNT}\n",
+        )
+        .unwrap();
+        let cfg = ThqConfig::from_toml(&thq_toml(Some("${PAYDAR_SERVICE_ACCOUNT}"))).unwrap();
+        assert_eq!(
+            resolve_user_service_token(&base, &cfg),
+            ServiceTokenResolution::DeclaredUnresolved {
+                var: "PAYDAR_SERVICE_ACCOUNT".to_string()
+            }
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// BACKWARD COMPAT: agents declaring nothing keep the exact legacy
+    /// behavior — the 4 existing agents work with zero config changes.
+    #[test]
+    fn absent_declaration_falls_back_to_legacy_scan() {
+        let base = temp_users_dir("legacy-fallback");
+        std::fs::write(base.join(".env"), "THQ_SERVICE_TOKEN=thq-token\n").unwrap();
+        let cfg = ThqConfig::from_toml(&thq_toml(None)).unwrap();
+        assert_eq!(
+            resolve_user_service_token(&base, &cfg),
+            ServiceTokenResolution::Resolved("thq-token".to_string()),
+            "legacy scan regression via the new resolver"
+        );
+        assert_eq!(
+            resolve_user_service_token(&base.join("no-env"), &cfg),
+            ServiceTokenResolution::LegacyAbsent,
+            "no declaration + no .env = legacy absent (entry captured, 502 at dispatch)"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }
