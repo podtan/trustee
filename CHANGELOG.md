@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.0] - 2026-09-01
+
+### Changed
+
+- **BREAKING: the hardcoded service-token key scan is REMOVED** — `[thq].service_token` (introduced in 0.14.2) is now the ONLY credential source. The legacy fallback list (`THQ_SERVICE_TOKEN`, `FAME_SERVICE_TOKEN`, `FARZAN_SERVICE_ACCOUNT`, `KANIDM_SERVICE_TOKEN`) is gone: keeping it meant an agent with an undeclared credential stayed silently invisible — the exact disease issue 8e0a1215 was filed to kill, just wearing a compatibility hat. **ACTION REQUIRED:** every dispatchable agent-user MUST have `service_token = "${YOUR_KEY}"` in her per-user overlay `[thq]` section before restarting on this version. Agents declaring nothing → loud boot ERROR (naming the overlay file), excluded from the dispatch table; declared-but-unresolved → loud boot ERROR naming agent + variable; THQ registration continues in both cases so the UI still shows her. Farewell, `FARZAN_SERVICE_ACCOUNT` — a personal name never belonged in the open-source binary. Crate bump: api `0.12.2`→`0.13.0` (behavior change → minor). Tests: 63/63 (legacy-scan tests replaced by Undeclared-outcome coverage: blessed-four keys in `.env` no longer conjure a credential).
+
 ## [0.14.2] - 2026-09-01
 
 ### Fixed
