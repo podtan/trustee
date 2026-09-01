@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.2] - 2026-09-01
+
+### Fixed
+
+- **Per-agent service token is now config-declared, not code-guessed** (broke Paydar's live 0.10.0→0.14.1 agents-as-users migration): the boot-time dispatch capture scanned a hardcoded priority list of four `.env` keys (`THQ_SERVICE_TOKEN`, `FAME_SERVICE_TOKEN`, `FARZAN_SERVICE_ACCOUNT`, `KANIDM_SERVICE_TOKEN`) — a real key outside the blessed four (`PAYDAR_SERVICE_ACCOUNT`) was silently invisible → `entry.service_token=None` → every THQ dispatch 502'd two layers later with an unparseable non-JSON error in the THQ UI. Agents now DECLARE their credential: `[thq].service_token = "${ANY_KEY_NAME}"` in the per-user overlay, resolved from the agent's `.env` at boot (bare key name accepted too). Declared wins over the legacy list; absent → legacy scan unchanged (the 4 existing agents need zero config changes); declared-but-unresolved → LOUD boot ERROR naming agent + variable, agent NOT dispatchable — never a silent skip. `FARZAN_SERVICE_ACCOUNT` demoted to legacy-only (personal name out of the blessed path). Crate bump: api `0.12.1`→`0.12.2`. Tests: 64/64 (new: 7 declared-credential tests incl. the Paydar case — custom key name resolves with zero source changes).
+
 ## [0.14.1] - 2026-08-31
 
 ### Fixed
