@@ -745,6 +745,11 @@
     }
     .menu-item .menu-chevron { color: #555; font-size: 11px; flex-shrink: 0; }
     .menu-sep { height: 1px; background: #2a2a3a; margin: 4px 6px; }
+    .menu-version {
+      font-size: 11px; color: #555; text-align: center;
+      padding: 6px 10px 3px; user-select: text; cursor: default;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
 
     /* --- Models overlay --- */
     #models-overlay {
@@ -834,6 +839,8 @@
       </div>
       <span class="menu-chevron">▸</span>
     </div>
+    <div class="menu-sep"></div>
+    <div class="menu-version" id="menu-version">trustee v__TRUSTEE_VERSION__</div>
   </div>
   <h1>Trustee</h1>
   <div class="header-right">

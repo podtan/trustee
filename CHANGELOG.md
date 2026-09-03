@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.1] - 2026-09-01
+
+### Added
+
+- **Trustee version shown in the web UI's burger menu (☰)** — a muted footer row (`trustee v0.15.1`) at the bottom of the app menu. The bin injects its own version at startup (`trustee_api::set_bin_version`, what `trustee --version` prints), and `serve_index` replaces the `__TRUSTEE_VERSION__` placeholder at serve time — so the UI always shows the running product version, never trustee-api's crate version, never a stale hardcode. Crate bumps: web `0.1.20`→`0.1.21`, api `0.13.0`→`0.13.1` (additive), root `0.15.0`→`0.15.1`. Tests: 64/64 (new: serve-time placeholder replacement — a literal `v__TRUSTEE_VERSION__` in served HTML is a test failure).
+
 ## [0.15.0] - 2026-09-01
 
 ### Changed

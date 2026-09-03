@@ -14,6 +14,28 @@ mod state;
 mod thq_register;
 pub mod xagent;
 
+/// The BIN's version, injected by the `trustee` binary at startup
+/// ([`set_bin_version`]) — the web UI's burger-menu footer displays it.
+/// Falls back to this crate's version when unset (trustee-api embedded
+/// elsewhere without a bin).
+static BIN_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Called by the `trustee` binary so the web UI can show the real product
+/// version (the binary's — what `trustee --version` prints), not
+/// trustee-api's crate version. First call wins; a restart is a new process.
+pub fn set_bin_version(v: &str) {
+    let _ = BIN_VERSION.set(v.to_string());
+}
+
+/// The version label for the web UI: the bin's version if injected, else
+/// this crate's.
+pub fn bin_version() -> &'static str {
+    BIN_VERSION
+        .get()
+        .map(|s| s.as_str())
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 // Embedded Cedar policy defaults (compiled into binary)
 const EMBEDDED_CEDAR_POLICY: &str = include_str!("../policies/trustee_default.cedar");
 const EMBEDDED_CEDAR_SCHEMA: &str = include_str!("../policies/trustee_schema.cedarschema");

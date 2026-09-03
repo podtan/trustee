@@ -707,6 +707,10 @@ async fn run_resume_tui_mode(args: &[String]) -> Result<(), Box<dyn std::error::
 /// Usage: `trustee web [--addr 0.0.0.0:3000]`
 #[cfg(feature = "web")]
 async fn run_web_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // The web UI's burger menu shows the BIN version (trustee --version),
+    // not trustee-api's crate version.
+    trustee_api::set_bin_version(env!("CARGO_PKG_VERSION"));
+
     // Parse optional arguments
     let mut addr: std::net::SocketAddr = "0.0.0.0:3000".parse().unwrap();
     let mut no_tls = false;

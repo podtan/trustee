@@ -1086,14 +1086,21 @@ pub async fn ws_session_handler(
 // ---------------------------------------------------------------------------
 
 /// GET / — serve index.html
+///
+/// The `__TRUSTEE_VERSION__` placeholder in the burger-menu footer is
+/// replaced at serve time with the bin's version (see [`crate::bin_version`]).
 pub async fn serve_index() -> Response {
     match trustee_web::Asset::get("index.html") {
-        Some(content) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            content.data.to_vec(),
-        )
-            .into_response(),
+        Some(content) => {
+            let html = String::from_utf8_lossy(&content.data)
+                .replace("__TRUSTEE_VERSION__", crate::bin_version());
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                html.into_bytes(),
+            )
+                .into_response()
+        }
         None => (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/plain")],
@@ -1365,4 +1372,29 @@ fn compute_rfc3339(epoch_secs: u64) -> String {
     let mon = if mp < 10 { mp + 3 } else { mp - 9 };
     let yr = if mon <= 2 { y + 1 } else { y };
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", yr, mon, d, h, m, s)
+}
+
+#[cfg(test)]
+mod serve_index_tests {
+    use super::*;
+
+    /// The burger-menu footer must carry the real version, never the
+    /// placeholder (a literal "v__TRUSTEE_VERSION__" in the UI = bug).
+    #[tokio::test]
+    async fn index_serves_real_version_no_placeholder() {
+        let resp = serve_index().await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let html = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(
+            !html.contains("__TRUSTEE_VERSION__"),
+            "placeholder must be replaced at serve time"
+        );
+        assert!(
+            html.contains(&format!("trustee v{}", crate::bin_version())),
+            "burger-menu footer must show the version label"
+        );
+    }
 }
