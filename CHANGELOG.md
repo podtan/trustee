@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.2] - 2026-09-03
+
+### Fixed
+
+- **Agents can now terminate their own sessions from the THQ agent console (Terminate button)** — the console dispatches AS the agent (torpi registers trustees at their `/xagent/{agent}` advertise URL), so every console call lands with the agent's minted `role=agent` Bearer; the Cedar policy granted the agent working set every session action EXCEPT `DeleteSession` (a fail-closed deferral from the agents-as-users rollout, "revisit at task-F cutover"), so Terminate returned 403 while New Session worked. `DeleteSession` is now granted to the agent role: containment holds because an agent token scopes every session route to her OWN namespace — the grant is self-service cleanup of her own sessions and nothing more. The agent-console flow (New Session ✓ / Terminate ✗ → both ✓) is the task-F evidence the policy asked for.
+- `/api/v1/health` now reports the BIN's version (`trustee --version`) instead of trustee-api's crate version — the number torpi's THQ registry and the agent console menu display as THE trustee version. Crate bump: api `0.13.1`→`0.13.2`. Tests: 64/64 (the agent delete test flipped from deny to allow with the containment rationale recorded inline).
+
 ## [0.15.1] - 2026-09-01
 
 ### Added

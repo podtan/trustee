@@ -249,7 +249,10 @@ fn session_to_response(session: &trustee_core::session::Session) -> SessionRespo
 pub async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        // The BIN's version when the bin injected it (set_bin_version) —
+        // what `trustee --version` prints. Consumers (torpi THQ registry,
+        // agent console menu) display this as THE trustee version.
+        version: crate::bin_version().to_string(),
     })
 }
 

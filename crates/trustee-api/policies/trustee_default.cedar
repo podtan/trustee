@@ -34,9 +34,12 @@ permit (
 )
 when { principal has role && principal.role == "user" };
 
-// agent (agents-as-users) — the working set EXCEPT destructive
-// DeleteSession (admin/user territory; revisit with task-F cutover
-// evidence — loosening later is cheaper than un-deleting).
+// agent (agents-as-users) — the working set. DeleteSession was granted
+// 2026-09-01 (trustee 0.15.2): the THQ agent console's Terminate button
+// dispatches AS the agent, so agent-without-delete made every console
+// terminate 403. Containment: an agent token scopes every session route to
+// HER OWN namespace — the grant only enables self-service cleanup of her
+// own sessions, never another principal's.
 permit (
     principal,
     action in [
@@ -50,6 +53,7 @@ permit (
         Action::"HandoffSession",
         Action::"ResumeSession",
         Action::"UpdateSession",
+        Action::"DeleteSession",
         Action::"ViewMcpCredentials",
         Action::"UpdateMcpCredentials",
     ],

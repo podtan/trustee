@@ -2302,7 +2302,7 @@ mod cedar_p2_tests {
     }
 
     #[tokio::test]
-    async fn agent_working_set_but_delete_denied() {
+    async fn agent_working_set_including_delete() {
         let auth = authorizer().await;
         for action in [
             actions::CREATE_SESSION,
@@ -2311,16 +2311,17 @@ mod cedar_p2_tests {
             actions::RESUME_SESSION,
             actions::VIEW_HISTORY,
             actions::UPDATE_MCP_CREDENTIALS,
+            // Granted 2026-09-01 (trustee 0.15.2): the THQ agent console's
+            // Terminate button dispatches AS the agent — agent-without-delete
+            // made every console terminate 403. Containment: the agent token
+            // scopes every session route to her OWN namespace.
+            actions::DELETE_SESSION,
         ] {
             assert!(
                 allowed(&auth, Some("agent"), action).await,
                 "agent {action}"
             );
         }
-        assert!(
-            !allowed(&auth, Some("agent"), actions::DELETE_SESSION).await,
-            "agent must NOT delete sessions (fail-closed start; revisit at task F)"
-        );
     }
 
     #[tokio::test]
