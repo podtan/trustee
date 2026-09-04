@@ -58,11 +58,11 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 # Base64 for JWT payload decoding (MCP session token injection)
 base64 = "0.22"
-umf = { path = "../../../umf", version = "0.3.0" }
+umf = "0.3.0"
 # Concurrent hash map for per-user session registry
 dashmap = "6"
 # 16C: per-user McpToolLoader cache (loader type + McpConfig parsing)
-abk = { path = "../../../abk", version = "0.18.0", features = ["config", "agent", "registry-mcp-token"] }
+abk = { version = "0.18.0", features = ["config", "agent", "registry-mcp-token"] }
 # SHA-256 for user hash computation
 sha2 = "0.10"
 # Home directory resolution

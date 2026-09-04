@@ -27,8 +27,8 @@ serde_json = "1"
 # Date/time (comes transitively from abk but we need it directly)
 chrono = { version = "0.4", features = ["serde"] }
 # ABK for workflow execution
-abk = { path = "../../../abk", version = "0.18.0", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb"] }
-umf = { path = "../../../umf", version = "0.3.0" }
+abk = { version = "0.18.0", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb"] }
+umf = "0.3.0"
 # PEP for TokenStore trait (per-user token isolation)
 # PEP for TokenStore trait (per-user token isolation)
 pep = { version = "0.5", features = ["token-provider"] }
