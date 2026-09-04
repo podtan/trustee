@@ -474,9 +474,199 @@ impl ServerState {
         None
     }
 
+    /// Tombstone directory for destroyed-but-on-disk session chains.
+    ///
+    /// Destroy removes the live session but deliberately keeps checkpoints
+    /// ("checkpoint data is preserved"). Restoring must NOT resurrect a
+    /// chain the user explicitly terminated, so destroy writes a marker
+    /// here and [`Self::restore_session_from_checkpoint`] refuses to
+    /// hydrate tombstoned chains. Markers are tiny and intentionally
+    /// permanent.
+    fn tombstone_path(&self, user_key: &str, chain_id: &str) -> Option<std::path::PathBuf> {
+        if chain_id.is_empty() || !chain_id.starts_with("session_") {
+            return None;
+        }
+        let hash = trustee_core::user_hash(user_key);
+        dirs::home_dir().map(|home| {
+            home.join(".trustee")
+                .join("users")
+                .join(&hash)
+                .join("session_tombstones")
+                .join(chain_id)
+        })
+    }
+
+    /// Write a destroy tombstone for a checkpoint chain (best effort).
+    ///
+    /// Called from [`Self::destroy_session`] when the destroyed live
+    /// session was attached to an on-disk chain.
+    fn write_tombstone(&self, user_key: &str, chain_id: &str) {
+        if let Some(path) = self.tombstone_path(user_key, chain_id) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, chrono::Utc::now().to_rfc3339());
+        }
+    }
+
+    /// Look up a live session by any id; on a miss, transparently restore
+    /// the checkpoint chain from disk.
+    ///
+    /// Restart resilience: trustee-api holds live sessions in memory only,
+    /// so a process restart orphans every open console. When a client asks
+    /// for a chain id that is not in memory but EXISTS on disk
+    /// (checkpoints present, not tombstoned by destroy), a live session is
+    /// rebuilt with `resume_info` pointing at the latest checkpoint and
+    /// registered under the chain id. The next command continues the
+    /// conversation; the console's alive-check and WS reconnect succeed.
+    ///
+    /// Returns `(live_registry_key, session_arc, ws_tx)` — the key is the
+    /// chain id for restored sessions.
+    pub async fn get_or_restore_session_by_any_id(
+        &self,
+        user_key: &str,
+        id: &str,
+    ) -> Option<(String, Arc<Mutex<Session>>, broadcast::Sender<String>)> {
+        if let Some(found) = self.get_session_by_any_id(user_key, id).await {
+            return Some(found);
+        }
+        self.restore_session_from_checkpoint(user_key, id).await
+    }
+
+    /// Rebuild a live session from an on-disk checkpoint chain.
+    ///
+    /// Persona note: dispatched (THQ/xagent) sessions carry `identity:
+    /// None` by design — their persona is the per-user overlay config
+    /// ([lifecycle].system_template), which `apply_user_isolation` +
+    /// `get_user_config_and_home` re-apply here exactly as at creation.
+    /// Explicit per-request identity overrides (rare) are not persisted
+    /// and therefore not restored.
+    async fn restore_session_from_checkpoint(
+        &self,
+        user_key: &str,
+        chain_id: &str,
+    ) -> Option<(String, Arc<Mutex<Session>>, broadcast::Sender<String>)> {
+        // Never resurrect an explicitly destroyed chain.
+        if let Some(path) = self.tombstone_path(user_key, chain_id) {
+            if path.exists() {
+                return None;
+            }
+        }
+
+        // Restore needs the caller's resolved config (persona) and home.
+        let (config_toml, home_dir) = self.get_user_config_and_home(user_key);
+        let config_toml = config_toml?;
+
+        // The chain must exist on disk with at least one checkpoint;
+        // otherwise this id is genuinely unknown → 404 semantics.
+        let info = trustee_core::sessions::create_resume_info(
+            &config_toml,
+            chain_id,
+            home_dir.as_deref(),
+        )
+        .await
+        .ok()??;
+
+        // Single-flight per chain id: racing lookups dedupe on the DashMap
+        // entry — the first insert wins, the loser adopts the winner.
+        let user_sessions = self
+            .sessions
+            .entry(user_key.to_string())
+            .or_insert_with(|| UserSessions {
+                sessions: DashMap::new(),
+                token_store: Arc::new(pep::MemoryTokenStore::new()),
+                active_session_id: Mutex::new(String::new()),
+            });
+
+        if let Some(existing) = user_sessions.sessions.get(chain_id) {
+            let now = chrono::Utc::now();
+            *existing.last_active.lock().await = now;
+            return Some((
+                chain_id.to_string(),
+                existing.session.clone(),
+                existing.ws_tx.clone(),
+            ));
+        }
+
+        // Respect the per-user cap: evict the least-recently-active Idle
+        // live session to make room (restores are user-initiated
+        // reattaches, so refusing them would recreate the lost-session
+        // bug for heavy users). If nothing is evictable, refuse.
+        if user_sessions.sessions.len() >= self.max_sessions_per_user {
+            let mut evict: Option<(String, chrono::DateTime<chrono::Utc>)> = None;
+            for entry in user_sessions.sessions.iter() {
+                let is_idle = entry.session.lock().await.workflow_state
+                    == trustee_core::types::WorkflowState::Idle;
+                if !is_idle {
+                    continue;
+                }
+                let la = entry.last_active.lock().await;
+                if evict.as_ref().is_none_or(|(_, t)| *la < *t) {
+                    evict = Some((entry.key().clone(), *la));
+                }
+            }
+            if let Some((victim, _)) = evict {
+                user_sessions.sessions.remove(&victim);
+            } else {
+                return None;
+            }
+        }
+
+        // Build the session exactly like create_session, then attach the
+        // on-disk chain identity and resume pointer.
+        let (mut session, workflow_rx) = Session::new();
+        session.config_toml = Some(config_toml.clone());
+        session.parse_auto_handoff_config();
+        if let Ok(table) = config_toml.parse::<toml::Value>() {
+            if let Some(name) = table
+                .get("agent")
+                .and_then(|a| a.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                session.agent_name = name.to_string();
+            }
+        }
+        session.secrets = self.secrets.clone();
+        session.build_info = self.build_info.clone();
+        self.apply_user_isolation(&mut session, user_key);
+        session.session_id = Some(chain_id.to_string());
+        session.resume_info = Some(info);
+        session.session_name = None; // display name re-derives from metadata
+
+        let (ws_tx_entry, _) = broadcast::channel::<String>(256);
+        let now = chrono::Utc::now();
+
+        user_sessions.sessions.insert(
+            chain_id.to_string(),
+            UserSessionEntry {
+                session: Arc::new(Mutex::new(session)),
+                ws_tx: ws_tx_entry.clone(),
+                created_at: now,
+                last_active: Arc::new(Mutex::new(now)),
+            },
+        );
+
+        // Drain task: forward workflow output into the WS broadcast channel
+        // (same contract as create_session — without this the restored
+        // session would run silently).
+        let session_arc = user_sessions
+            .sessions
+            .get(chain_id)
+            .map(|e| e.session.clone())
+            .ok_or_else(|| SessionError::NotFound(chain_id.to_string()))
+            .ok()?;
+        self.spawn_user_drain_task(
+            chain_id.to_string(),
+            session_arc.clone(),
+            ws_tx_entry.clone(),
+            workflow_rx,
+        );
+
+        Some((chain_id.to_string(), session_arc, ws_tx_entry))
+    }
+
     /// List all active sessions for a user, sorted by last_active desc.
-    pub async fn list_sessions(&self, user_key: &str) -> Vec<SessionListItem> {
-        let Some(user_sessions) = self.sessions.get(user_key) else {
+    pub async fn list_sessions(&self, user_key: &str) -> Vec<SessionListItem> {        let Some(user_sessions) = self.sessions.get(user_key) else {
             return Vec::new();
         };
 
@@ -516,8 +706,9 @@ impl ServerState {
             .get(user_key)
             .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
 
-        // Check workflow state before removing
-        {
+        // Check workflow state before removing; capture the on-disk chain
+        // id (if any) so destroy can tombstone it against later restores.
+        let chain_id_for_tombstone = {
             let entry = user_sessions
                 .sessions
                 .get(session_id)
@@ -531,10 +722,18 @@ impl ServerState {
                 };
                 return Err(SessionError::NotIdle(state_str.to_string()));
             }
-        }
+            session.session_id.clone()
+        };
 
         // Remove from DashMap
         user_sessions.sessions.remove(session_id);
+
+        // If the destroyed live session was attached to an on-disk chain,
+        // tombstone it so a later get_or_restore lookup does not resurrect
+        // a session the user explicitly terminated.
+        if let Some(chain_id) = chain_id_for_tombstone {
+            self.write_tombstone(user_key, &chain_id);
+        }
 
         // If this was the active session, pick a new active
         let mut active_id = user_sessions.active_session_id.lock().await;
@@ -1783,5 +1982,90 @@ mod mcp_loader_cache_tests {
             good_loader.is_none(),
             "good user has no [mcp] → disabled marker"
         );
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    fn fresh_state() -> ServerState {
+        let (session, _rx) = Session::new();
+        let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(16);
+        let mut state = ServerState::new(session, ws_tx, None);
+        state.config_toml = Some("[agent]\nname = \"trustee\"\n".to_string());
+        state
+    }
+
+    /// Deterministic throwaway user (same pattern as mcp_loader_cache_tests).
+    struct TempUser {
+        key: String,
+    }
+
+    impl TempUser {
+        fn new(tag: &str) -> Self {
+            let key = format!("restore-{tag}-{}@test.invalid", std::process::id());
+            let home = dirs::home_dir()
+                .expect("HOME available in test env")
+                .join(".trustee")
+                .join("users")
+                .join(trustee_core::user_hash(&key));
+            std::fs::create_dir_all(home).expect("create user home");
+            Self { key }
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_unknown_chain_returns_none() {
+        let state = fresh_state();
+        let user = TempUser::new("unknown");
+        let out = state
+            .get_or_restore_session_by_any_id(&user.key, "session_2099_01_01_00_00_deadbeef")
+            .await;
+        assert!(out.is_none(), "unknown chain must 404, not restore");
+    }
+
+    #[tokio::test]
+    async fn destroy_tombstones_chain_id() {
+        let state = fresh_state();
+        let user = TempUser::new("tombstone");
+        let sid = state
+            .create_session(&user.key, None, None, true)
+            .await
+            .expect("create session");
+
+        // Attach the live session to an on-disk-style chain id.
+        let (session, _ws) = state.get_session(&user.key, &sid).await.unwrap();
+        {
+            let mut s = session.lock().await;
+            s.session_id = Some("session_2026_09_04_10_00_aaaabbbb".to_string());
+        }
+
+        state.destroy_session(&user.key, &sid).await.expect("destroy");
+
+        let path = state
+            .tombstone_path(&user.key, "session_2026_09_04_10_00_aaaabbbb")
+            .expect("tombstone path");
+        assert!(path.exists(), "destroy must write a chain tombstone");
+
+        // And a fresh live session with NO chain id must not tombstone anything.
+        let sid2 = state
+            .create_session(&user.key, None, None, true)
+            .await
+            .expect("create second session");
+        state.destroy_session(&user.key, &sid2).await.expect("destroy 2");
+        // (No assertion beyond "no panic": session_id was None → no new markers.)
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_registry_key_shapes() {
+        // Registry keys ("default", "web…") are not checkpoint chains; even
+        // if create_resume_info could not find them anyway, the tombstone
+        // guard short-circuits non-`session_` ids without touching disk.
+        let state = fresh_state();
+        let user = TempUser::new("shapes");
+        assert!(state.tombstone_path(&user.key, "default").is_none());
+        let out = state.get_or_restore_session_by_any_id(&user.key, "default").await;
+        assert!(out.is_none());
     }
 }

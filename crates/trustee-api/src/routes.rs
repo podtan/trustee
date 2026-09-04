@@ -1001,7 +1001,7 @@ pub async fn get_live_session(
             .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let (_live_key, session_arc, _ws_tx) = state
-        .get_session_by_any_id(&user_key, &session_id)
+        .get_or_restore_session_by_any_id(&user_key, &session_id)
         .await
         .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
 
@@ -1023,7 +1023,7 @@ pub async fn post_command_session(
             .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let (live_key, session_arc, ws_tx) = state
-        .get_session_by_any_id(&user_key, &session_id)
+        .get_or_restore_session_by_any_id(&user_key, &session_id)
         .await
         .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
 
@@ -1063,7 +1063,7 @@ pub async fn post_cancel_session(
             .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let (_live_key, session_arc, ws_tx) = state
-        .get_session_by_any_id(&user_key, &session_id)
+        .get_or_restore_session_by_any_id(&user_key, &session_id)
         .await
         .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
 
@@ -1100,7 +1100,7 @@ pub async fn post_handoff_session(
     // (session.session_id). The web frontend holds the checkpoint id from
     // ResumeInfo; Torpi/THQ holds the live key. Both must work.
     let (_live_key, session_arc, _ws_tx) = state
-        .get_session_by_any_id(&user_key, &session_id)
+        .get_or_restore_session_by_any_id(&user_key, &session_id)
         .await
         .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
 
@@ -1124,7 +1124,7 @@ pub async fn set_session_name_session(
             .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let (_live_key, session_arc, _ws_tx) = state
-        .get_session_by_any_id(&user_key, &session_id)
+        .get_or_restore_session_by_any_id(&user_key, &session_id)
         .await
         .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
 
@@ -1150,7 +1150,7 @@ pub async fn destroy_session(
 
     // Resolve to the live registry key first (accepts checkpoint/session id too)
     let (live_key, _session_arc, _ws_tx) = state
-        .get_session_by_any_id(&user_key, &session_id)
+        .get_or_restore_session_by_any_id(&user_key, &session_id)
         .await
         .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
 
@@ -1179,7 +1179,7 @@ pub async fn ws_session_handler(
     let (_cookie, user_key) =
         crate::auth::check_auth(&state.auth, &headers, crate::auth::actions::VIEW_SESSION).await?;
     let (session_arc, ws_tx) = state
-        .get_session_by_any_id(&user_key, &session_id)
+        .get_or_restore_session_by_any_id(&user_key, &session_id)
         .await
         .map(|(_, s, ws)| (s, ws))
         .ok_or(StatusCode::NOT_FOUND)?;

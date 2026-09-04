@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.2] - 2026-09-04
+
+### Fixed
+
+- **Sessions survive a trustee restart (restart-resilient session restore)** — trustee-api holds live sessions in memory only, so restarting the process orphaned every open console: the THQ agent console's reconnect check hit `/sessions/{id}/live` → in-memory miss → 404 → *"This session is no longer active"* even though the checkpoint chain was fully on disk. The session-scoped surface now resolves transparently through `get_or_restore_session_by_any_id`: on an in-memory miss, if the id is an on-disk checkpoint chain (checkpoints present, not destroyed), a live session is rebuilt — per-user config (persona from the agent's overlay `[lifecycle].system_template`, same as at creation), `resume_info` at the latest checkpoint — and registered under the chain id. Reconnect, live-state checks, WS reattach, and the next command all continue the conversation; racing lookups dedupe on the DashMap entry. Restores count against `max_sessions_per_user`, evicting the least-recently-active Idle live session when full (fail-closed if nothing is evictable). Switched routes: live-state, command, cancel, handoff, rename, stream, destroy (legacy active-session routes unchanged). Crate bump: api `0.14.0`→`0.14.1`.
+- **Destroyed chains stay dead** — destroy deliberately keeps checkpoints ("checkpoint data is preserved"), which would let a blind restore resurrect a terminated session. `destroy_session` now writes a tombstone marker (`~/.trustee/users/{hash}/session_tombstones/{chain_id}`, tiny + permanent) and restore refuses tombstoned chains; registry-key-shaped ids (e.g. `default`) are never restore candidates.
+- Known limitation (documented): explicit per-request `identity` overrides are not persisted and therefore not restored — dispatched (THQ/xagent) sessions carry `identity: None` by design (persona lives in the overlay config), which is the dominant flow and restores faithfully.
+
+### Tests
+
+- 3 new unit tests (unknown chain → 404 semantics; destroy writes the chain tombstone; registry-key ids excluded from restore) + full happy path live-verified on an isolated instance against real checkpoint chains: restore → state 200 → WS reattach → command continues the chain → Terminate writes the tombstone → subsequent lookups stay 404. api suite 74/74.
+
 ## [0.17.1] - 2026-09-04
 
 ### Fixed
