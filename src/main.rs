@@ -971,14 +971,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let title_config = merged_config.clone();
         let title_ctx = run_ctx.clone();
         
-        // Extract task text from args for title generation
+        // Extract task text from args for title generation. --attach pairs
+        // (multimodal image files) are not part of the task text.
         let title_task: Option<String> = {
-            let task_args: Vec<&str> = args.iter()
-                .skip_while(|a| a != &"run")
+            let task_args: Vec<String> = args.iter()
+                .skip_while(|a| a.as_str() != "run")
                 .skip(1) // skip "run" itself
-                .map(|s| s.as_str())
+                .cloned()
                 .collect();
-            if task_args.is_empty() { None } else { Some(task_args.join(" ")) }
+            let (title_words, _attach_paths) = abk::cli::attachments::extract_attach_flags(task_args);
+            if title_words.is_empty() { None } else { Some(title_words.join(" ")) }
         };
 
         // Run with merged config (ABK does NOT read files)

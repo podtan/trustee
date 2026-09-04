@@ -586,6 +586,9 @@ impl Session {
                         secrets,
                         build_info,
                         &command,
+                        // Multimodal v1: THQ-dispatched commands are text-only;
+                        // image attachments enter via the CLI --attach path.
+                        Vec::new(),
                         Some(tui_sink),
                         resume_info,
                         Some(resume_tx),

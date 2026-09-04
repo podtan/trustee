@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.0] - 2026-09-04
+
+### Added
+
+- **`trustee run 'task text' --attach img.jpg` (repeatable)** — multimodal image attachments on the CLI run path (nghr workstream 02ce6d5e, task 68b37f99). `--attach <file>` pairs are extracted from the run arguments (before or after the task text; supported types: jpg/jpeg/png/gif/webp), loaded and base64-encoded before the first model call (fail-fast with a clear error on unsupported types or unreadable files), and attached to the initial user turn for the provider to render (OpenAI `image_url` data-URL parts on the native wire path). Session titles no longer include `--attach` flags.
+- **Dev dependency wiring** (task 55a6af8e): abk `0.17.0` and umf `0.3.0` resolved via local `path` deps (root + trustee-api + trustee-core + trustee-tui) with version fields kept — `cargo publish` strips paths, so publishing works unchanged once abk/umf land on crates.io. trustee-tui needed the path dep too: its registry abk with bare `features=["cli"]` cannot compile standalone (pre-existing landmine; it previously rode root's feature unification).
+
+### Unchanged
+
+- tui/web/xagent (THQ-dispatch) paths are text-only for now — THQ command dispatch passes an empty attachment list. WASM (tanbal) provider: image blocks now reach `format_request_from_json` input (verified in abk); tanbal-side wire rendering is a flagged follow-up, not a blocker (native OpenAI is the default wire path).
+- Crate bumps beyond the root: **trustee-core `0.7.0`→`0.7.1`** (session.rs passes the new `attachments` param to abk's `run_task_from_raw_config` — required for abk 0.17.0 compat), **trustee-api `0.13.2`→`0.13.3`** and **trustee-tui `0.4.0`→`0.4.1`** (dependency-compat republishes: their published manifests pin abk `0.16.1`, which conflicts with root's `0.17.0` at crates.io resolution; no API surface change). The earlier plan note "trustee-api stays 0.13.2" does not survive crates.io version resolution — recorded here as the deviation.
+
 ## [0.15.2] - 2026-09-03
 
 ### Fixed
