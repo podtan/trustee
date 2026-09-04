@@ -771,7 +771,15 @@ async fn run_web_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         }
     };
 
-    let merged_config = merge_config(&user_config_toml)?;
+    let mut merged_config = merge_config(&user_config_toml)?;
+
+    // Substitute ${VAR} placeholders in the config TOML using the loaded
+    // secrets — REQUIRED for local-fallback configs whose api_key is written
+    // as `${OPENAI_API_KEY}`: without this the literal placeholder string is
+    // sent to the LLM endpoint and every call fails with 401 (the remote
+    // getmyconfig config carries literal keys, which is why this only bit
+    // the local-fallback web path). Mirrors the CLI run path.
+    substitute_config_vars(&mut merged_config, &secrets);
 
     // Inject shared secrets into process env for ${VAR} substitution in config.
     // Safe: single-threaded, before web server starts accepting connections.

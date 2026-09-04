@@ -19,6 +19,10 @@ All notable changes to this project will be documented in this file.
 
 - trustee-api 71/71 (7 new attachment-validation tests: happy path, MIME normalization/whitelist, data-URL prefix, invalid base64, over-count, over-size, serde backward-compat for old clients). Live-verified end-to-end on an isolated instance: multimodal command through the HTTP API returned a pixel-accurate image description from GLM-5.3-Flash; bad MIME/base64 rejected with 400; data-URL prefix accepted.
 
+### Fixed
+
+- **Web mode + local-fallback config sent literal `${VAR}` placeholders as the LLM API key** (found by the attachment live test's isolated instance, where the remote getmyconfig config was unavailable). The CLI run path calls `substitute_config_vars` before executing, but `run_web_mode` never did — with the local fallback config's `api_key = "${OPENAI_API_KEY}"`, the literal placeholder string was sent to the endpoint and every LLM call failed with 401 "token expired or incorrect" (image or not). Web mode now substitutes `${VAR}` placeholders from the loaded secrets before the server starts, mirroring the CLI. Remote-config deployments (literal keys) were never affected.
+
 ## [0.16.0] - 2026-09-04
 
 ### Added
