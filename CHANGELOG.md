@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.1] - 2026-09-04
+
+### Fixed
+
+- **Ship the `${VAR}` substitution fix** — the 0.17.0 crates.io artifact was cut (14:27) from `9a2a3c5`, an hour before the fix landed in `738055b`. Root-only bump; no member changes. See the 0.17.0 Fixed section: without substitution, web mode + local-fallback config sent the literal `${OPENAI_API_KEY}` placeholder as the LLM API key (401 on every call).
+
 ## [0.17.0] - 2026-09-04
 
 ### Added
