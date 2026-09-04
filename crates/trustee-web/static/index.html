@@ -115,7 +115,58 @@
       padding: 10px 16px;
       background: #1a1a1a;
       border-top: 1px solid #333;
+      align-items: flex-end;
     }
+    #btn-attach {
+      background: #1f2937;
+      padding: 10px 12px;
+      font-size: 15px;
+      line-height: 1;
+      flex: none;
+    }
+    #btn-attach:hover { background: #374151; }
+    #attach-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 6px 16px;
+      background: #1a1a1a;
+      border-top: 1px solid #333;
+    }
+    #attach-chips:empty { display: none; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 3px 6px;
+      font-size: 12px;
+      color: #aaa;
+      max-width: 220px;
+    }
+    .chip img {
+      width: 28px;
+      height: 28px;
+      object-fit: cover;
+      border-radius: 4px;
+    }
+    .chip .chip-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 120px;
+    }
+    .chip .chip-remove {
+      background: none;
+      border: none;
+      color: #888;
+      padding: 0 2px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .chip .chip-remove:hover { color: #ef4444; }
     #input {
       flex: 1;
       background: #111;
@@ -931,7 +982,10 @@
 <!-- Toast -->
 <div id="toast"></div>
 
+<div id="attach-chips"></div>
 <div id="input-bar">
+  <button id="btn-attach" title="Attach images (jpg, png, gif, webp — max 4, 6 MB each)">📎</button>
+  <input type="file" id="file-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
   <textarea id="input" rows="1" dir="auto" placeholder="Type a task and press Enter..." autocomplete="off"></textarea>
   <button id="btn-send">Send</button>
 </div>
@@ -1501,15 +1555,95 @@ function updateState(state) {
   handoffBtn.disabled = (running || cancelling) || !window._handoffAvailable;
   document.getElementById('btn-send').disabled = running || cancelling;
   document.getElementById('input').disabled = running || cancelling;
+  document.getElementById('btn-attach').disabled = running || cancelling;
 }
 
 // --- Actions ---
+// ---------------------------------------------------------------------------
+// Multimodal attachments (client side): pick images, preview as chips, send
+// base64 with the command. Mirrors the server limits in trustee-api
+// (MAX_ATTACHMENTS / MAX_IMAGE_BYTES) so errors surface before upload.
+// ---------------------------------------------------------------------------
+const ATTACH_ALLOWED = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const ATTACH_MAX_COUNT = 4;
+const ATTACH_MAX_BYTES = 6 * 1024 * 1024; // 6 MiB per image (raw, pre-base64)
+let pendingAttachments = []; // {mime, data, filename}
+
+function renderAttachChips() {
+  const holder = document.getElementById('attach-chips');
+  holder.innerHTML = '';
+  for (const [idx, att] of pendingAttachments.entries()) {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    const img = document.createElement('img');
+    img.src = 'data:' + att.mime + ';base64,' + att.data;
+    img.alt = att.filename;
+    const name = document.createElement('span');
+    name.className = 'chip-name';
+    name.textContent = att.filename;
+    name.title = att.filename;
+    const rm = document.createElement('button');
+    rm.className = 'chip-remove';
+    rm.textContent = '✕';
+    rm.title = 'Remove attachment';
+    rm.addEventListener('click', () => {
+      pendingAttachments.splice(idx, 1);
+      renderAttachChips();
+    });
+    chip.appendChild(img);
+    chip.appendChild(name);
+    chip.appendChild(rm);
+    holder.appendChild(chip);
+  }
+}
+
+function addAttachmentFiles(fileList) {
+  for (const file of fileList) {
+    if (pendingAttachments.length >= ATTACH_MAX_COUNT) {
+      showToast('Maximum ' + ATTACH_MAX_COUNT + ' images per message', 'error');
+      break;
+    }
+    if (!ATTACH_ALLOWED.includes(file.type)) {
+      showToast(file.name + ': unsupported type (use jpg, png, gif, webp)', 'error');
+      continue;
+    }
+    if (file.size > ATTACH_MAX_BYTES) {
+      showToast(file.name + ': over the 6 MB limit', 'error');
+      continue;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      const b64 = result.includes('base64,') ? result.split('base64,')[1] : result;
+      pendingAttachments.push({
+        mime: file.type,
+        data: b64,
+        filename: file.name,
+      });
+      renderAttachChips();
+    };
+    reader.onerror = () => showToast(file.name + ': failed to read file', 'error');
+    reader.readAsDataURL(file);
+  }
+}
+
+document.getElementById('btn-attach').addEventListener('click', () => {
+  document.getElementById('file-input').click();
+});
+document.getElementById('file-input').addEventListener('change', (e) => {
+  addAttachmentFiles(e.target.files);
+  e.target.value = ''; // allow re-selecting the same file
+});
+
 async function sendCommand() {
   const input = document.getElementById('input');
   const cmd = input.value.trim();
   if (!cmd) return;
   input.value = '';
   input.style.height = 'auto';
+  const sentAttachments = pendingAttachments;
+  pendingAttachments = [];
+  renderAttachChips();
   // Disable input immediately while server confirms and broadcasts state change
   document.getElementById('btn-send').disabled = true;
   document.getElementById('input').disabled = true;
@@ -1527,6 +1661,7 @@ async function sendCommand() {
       command: cmd,
       session_id: currentSessionId,
       ...(selectedModel ? { model: selectedModel } : {}),
+      ...(sentAttachments.length ? { attachments: sentAttachments } : {}),
     }),
   });
   // State change is now broadcast via WebSocket (StateChanged message)
@@ -1537,13 +1672,27 @@ async function sendCommand() {
     outputEl.innerHTML = '';
     window._hasSession = true;
   }
-  // Render user message as a chat bubble (right-aligned, boxed)
+  // Render user message as a chat bubble (right-aligned, boxed) with
+  // attachment thumbnails when present.
   const wrap = document.createElement('div');
   wrap.className = 'msg-user';
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
   bubble.textContent = cmd;
   wrap.appendChild(bubble);
+  if (sentAttachments.length) {
+    const thumbs = document.createElement('div');
+    thumbs.style.cssText = 'display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;';
+    for (const att of sentAttachments) {
+      const img = document.createElement('img');
+      img.src = 'data:' + att.mime + ';base64,' + att.data;
+      img.alt = att.filename;
+      img.title = att.filename;
+      img.style.cssText = 'width:64px;height:64px;object-fit:cover;border-radius:6px;';
+      thumbs.appendChild(img);
+    }
+    wrap.appendChild(thumbs);
+  }
   outputEl.appendChild(wrap);
   if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
 }

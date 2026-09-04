@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.0] - 2026-09-04
+
+### Added
+
+- **Web attachments: attach button + API support (multimodal via the web/THQ surface)** (nghr workstream f64e98af). The web UI now has a 📎 attach button: pick up to 4 images (jpg/jpeg/png/gif/webp, ≤6 MiB each), preview them as removable chips (with thumbnails, also shown on the sent chat bubble), and they travel with the command as base64 — the server never touches the filesystem for these.
+- **`POST /api/v1/session/command` and `POST /api/v1/sessions/{id}/command` accept `attachments: [{mime, data, filename}]`** — validated fail-closed (MIME whitelist, base64 decode check, ≤6 MiB decoded per image, ≤4 per request, `data:` URL prefix tolerated, whitespace-stripped) with descriptive 400s, then converted to umf sidecar entries and attached to the initial user turn. Both fresh-session and resume paths are multimodal. The xagent (THQ proxy) session-command route accepts the same payload, so THQ consoles can adopt it without protocol changes.
+- **Scoped body limits**: the global 10 MiB limit is unchanged; only the three command routes raise to 40 MiB (`DefaultBodyLimit` per-route) — base64 inflation is 4/3 and the 4×6 MiB worst case must fit.
+- Transcript now shows `📎 N image attachment(s)` on the session output when a command carries images (trustee-core).
+
+### Crate bumps
+
+- trustee **0.17.0** (this release), trustee-core **0.7.1→0.8.0** (Session gains `input_images`; consumed by `execute_command`), trustee-api **0.13.3→0.14.0** (CommandRequest.attachments + validation), trustee-tui **0.4.1→0.4.2**, trustee-web **0.1.21→0.1.22** (attach UI), all pinning **abk 0.18.0** (`RunOptions.images` for in-memory payloads) and **umf 0.3.0** (unchanged).
+
+### Tests
+
+- trustee-api 71/71 (7 new attachment-validation tests: happy path, MIME normalization/whitelist, data-URL prefix, invalid base64, over-count, over-size, serde backward-compat for old clients). Live-verified end-to-end on an isolated instance: multimodal command through the HTTP API returned a pixel-accurate image description from GLM-5.3-Flash; bad MIME/base64 rejected with 400; data-URL prefix accepted.
+
 ## [0.16.0] - 2026-09-04
 
 ### Added

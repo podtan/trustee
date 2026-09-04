@@ -187,7 +187,12 @@ pub async fn run(
         // Protected API routes
         .route("/api/v1/models", get(routes::list_models))
         .route("/api/v1/session", get(routes::get_session))
-        .route("/api/v1/session/command", post(routes::post_command))
+        .route(
+            "/api/v1/session/command",
+            post(routes::post_command).layer(axum::extract::DefaultBodyLimit::max(
+                routes::ATTACH_BODY_LIMIT,
+            )),
+        )
         .route("/api/v1/session/cancel", post(routes::post_cancel))
         .route("/api/v1/session/handoff", post(routes::post_handoff))
         .route("/api/v1/session/stream", get(routes::ws_handler))
@@ -204,7 +209,12 @@ pub async fn run(
         .route("/api/v1/sessions/{id}/resume", post(routes::resume_session))
         .route("/api/v1/sessions/{id}/history", get(routes::get_session_history))
         // MSU: session-scoped live routes
-        .route("/api/v1/sessions/{id}/command", post(routes::post_command_session))
+        .route(
+            "/api/v1/sessions/{id}/command",
+            post(routes::post_command_session).layer(axum::extract::DefaultBodyLimit::max(
+                routes::ATTACH_BODY_LIMIT,
+            )),
+        )
         .route("/api/v1/sessions/{id}/cancel", post(routes::post_cancel_session))
         .route("/api/v1/sessions/{id}/handoff", post(routes::post_handoff_session))
         .route("/api/v1/sessions/{id}/name", post(routes::set_session_name_session))

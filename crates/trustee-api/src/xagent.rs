@@ -304,7 +304,9 @@ pub fn router() -> axum::Router<ServerState> {
         )
         .route(
             "/xagent/{agent}/api/v1/sessions/{id}/command",
-            post(x_post_command_session),
+            post(x_post_command_session).layer(axum::extract::DefaultBodyLimit::max(
+                routes::ATTACH_BODY_LIMIT,
+            )),
         )
         .route(
             "/xagent/{agent}/api/v1/sessions/{id}/cancel",

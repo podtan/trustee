@@ -1,6 +1,6 @@
 [package]
 name = "trustee"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2021"
 description = "A general-purpose agent that can morph into different specialized agents using WASM lifecycle plugins"
 license = "MIT OR Apache-2.0"
@@ -23,7 +23,7 @@ wasm = ["abk/wasm"]
 
 [dependencies]
 # ABK with registry-mcp for MCP tool aggregation
-abk = { version = "0.17.0", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "registry-mcp-token"] }
+abk = { path = "../abk", version = "0.18.0", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "registry-mcp-token"] }
 # UMF with MCP support
 umf = { version = "0.3.0", features = ["streaming", "mcp"] }
 # Layered configuration merging (defaults + user overrides)
@@ -36,7 +36,7 @@ tokio = { version = "1.0", features = ["full"] }
 clap = { version = "4.6", features = ["derive"] }
 # Consolidated per-user directory hash (trustee_core::user_hash, used by CLI path)
 # and core session types
-trustee-core = { version = "0.7.1", path = "crates/trustee-core", features = ["registry-mcp-token"] }
+trustee-core = { version = "0.8.0", path = "crates/trustee-core", features = ["registry-mcp-token"] }
 # Home directory resolution
 dirs = "5"
 # JSON handling + errors for `sessions migrate` (bin target)
@@ -48,9 +48,9 @@ anyhow = "1"
 ratatui = { version = "0.30.2", optional = true }
 crossterm = { version = "0.29", optional = true }
 tokio-util = { version = "0.7", optional = true }
-trustee-tui = { version = "0.4.1", path = "crates/trustee-tui", optional = true }
+trustee-tui = { version = "0.4.2", path = "crates/trustee-tui", optional = true }
 # Web/API dependencies (optional)
-trustee-api = { version = "0.13.3", path = "crates/trustee-api", optional = true }
+trustee-api = { version = "0.14.0", path = "crates/trustee-api", optional = true }
 # Tracing for web server logging (optional, used by trustee-api)
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }

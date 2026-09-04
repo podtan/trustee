@@ -1,6 +1,6 @@
 [package]
 name = "trustee-api"
-version = "0.13.3"
+version = "0.14.0"
 edition = "2021"
 description = "REST + WebSocket API server for Trustee agent"
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,7 @@ categories = ["command-line-utilities", "web-programming"]
 
 [dependencies]
 # Core shared types and workflow logic
-trustee-core = { version = "0.7.1", path = "../trustee-core", features = ["registry-mcp-token"] }
+trustee-core = { version = "0.8.0", path = "../trustee-core", features = ["registry-mcp-token"] }
 # Embedded web frontend
 trustee-web = { version = "0.1.21", path = "../trustee-web" }
 # Web framework (rustls for static Pi/ARM builds)
@@ -58,10 +58,11 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 # Base64 for JWT payload decoding (MCP session token injection)
 base64 = "0.22"
+umf = { path = "../../../umf", version = "0.3.0" }
 # Concurrent hash map for per-user session registry
 dashmap = "6"
 # 16C: per-user McpToolLoader cache (loader type + McpConfig parsing)
-abk = { version = "0.17.0", features = ["config", "agent", "registry-mcp-token"] }
+abk = { path = "../../../abk", version = "0.18.0", features = ["config", "agent", "registry-mcp-token"] }
 # SHA-256 for user hash computation
 sha2 = "0.10"
 # Home directory resolution

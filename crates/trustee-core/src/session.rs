@@ -50,6 +50,10 @@ pub fn truncate_session_name(command: &str) -> String {
 pub struct Session {
     /// Input buffer for user commands
     pub input: String,
+    /// Pre-loaded image attachments (multimodal) for the next command.
+    /// Consumed by `execute_command` and attached to the initial user turn;
+    /// callers (API/web) fill this before invoking `execute_command`.
+    pub input_images: Vec<umf::chatml::ImageAttachment>,
     /// Output log lines
     pub output_lines: Vec<String>,
     /// Sender for messages from async workflows (clone and pass to workflow runners)
@@ -173,6 +177,7 @@ impl Session {
             backup_resume_info: None,
             todo_lines: Vec::new(),
             cancel_token: CancellationToken::new(),
+            input_images: Vec::new(),
             pending_command: None,
             handoff_pending: false,
             pending_tool_lines: Vec::new(),
@@ -475,6 +480,14 @@ impl Session {
 
         self.output_lines.push(format!("> {}", command));
 
+        // Multimodal: take (not clone) pending image attachments — they apply
+        // to THIS command only, like the command text itself.
+        let input_images = std::mem::take(&mut self.input_images);
+        if !input_images.is_empty() {
+            self.output_lines
+                .push(format!("📎 {} image attachment(s)", input_images.len()));
+        }
+
         let config_toml = match &self.config_toml {
             Some(c) => c.clone(),
             None => {
@@ -586,9 +599,11 @@ impl Session {
                         secrets,
                         build_info,
                         &command,
-                        // Multimodal v1: THQ-dispatched commands are text-only;
-                        // image attachments enter via the CLI --attach path.
+                        // Multimodal: web/API callers pass pre-loaded sidecar
+                        // entries here; THQ-dispatched text-only commands
+                        // arrive with an empty vec.
                         Vec::new(),
+                        input_images,
                         Some(tui_sink),
                         resume_info,
                         Some(resume_tx),
