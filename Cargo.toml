@@ -23,9 +23,9 @@ wasm = ["abk/wasm"]
 
 [dependencies]
 # ABK with registry-mcp for MCP tool aggregation
-abk = { path = "../abk", version = "0.17.0", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "registry-mcp-token"] }
+abk = { version = "0.17.0", features = ["cli", "orchestration", "agent", "observability", "storage-documentdb", "registry-mcp-token"] }
 # UMF with MCP support
-umf = { path = "../umf", version = "0.3.0", features = ["streaming", "mcp"] }
+umf = { version = "0.3.0", features = ["streaming", "mcp"] }
 # Layered configuration merging (defaults + user overrides)
 figment = { version = "0.10", features = ["toml"] }
 toml = "0.8"
