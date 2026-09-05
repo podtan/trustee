@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.3] - 2026-09-05
+
+### Fixed
+
+- **UTF-8 char-boundary panic on session history with Persian/multibyte text (nghr f844d2df — the reported `end byte index 10000 is not a char boundary; it is inside 'ب'` crash)** — `trustee-core::sessions::convert_messages` truncated message content with a bytewise `&content[..10_000]`, which panics whenever byte 10,000 falls inside a multi-byte character (Persian/Arabic = 2 bytes, CJK/emoji = 3–4). Serving path: `GET /api/v1/sessions/{id}/history` (web UI + THQ console), also reached on restore-after-restart first touch. Once a session contained such a message, *every* history load panicked — the session was permanently unloadable in the console. Now cuts via `abk::text::truncate_at_boundary` (ASCII output byte-for-byte identical to legacy). Regression tests: Persian >10 KB, emoji 4-byte straddle, ASCII identity, short-message passthrough.
+- **Picked up abk 0.18.1** — the same crash class fixed at the source in abk (session-description build, the "LLM hasn't re-titled yet" probe, LLM-generated title truncation, agent-name capitalization ×3; new always-compiled `abk::text` module with `truncate_str` / `truncate_at_boundary` / `capitalize_first`). umf and cats audited clean. Crate bumps: core `0.8.0`→`0.8.1`, api `0.14.1`→`0.14.2`, tui `0.4.2`→`0.4.3`, trustee `0.17.2`→`0.17.3`. trustee-web (0.1.22) and trustee-upgrade (0.1.2) unchanged.
+
 ## [0.17.2] - 2026-09-04
 
 ### Fixed

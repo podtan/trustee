@@ -483,8 +483,12 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<HistoryMessage> {
             continue;
         }
 
+        // Byte-budget truncation MUST be char-boundary safe: a bytewise
+        // &[..MAX_CONTENT_LEN] panics when the cut lands mid-character
+        // (Persian/Arabic 2-byte, CJK/emoji 3–4) — nghr f844d2df, 3rd
+        // occurrence of this crash class. ASCII output is byte-identical.
         let content = if msg.content.len() > MAX_CONTENT_LEN {
-            format!("{}...\n[truncated]", &msg.content[..MAX_CONTENT_LEN])
+            format!("{}...\n[truncated]", abk::text::truncate_at_boundary(&msg.content, MAX_CONTENT_LEN))
         } else {
             msg.content.clone()
         };
@@ -577,4 +581,65 @@ fn summarize_tool_args(name: &str, args: &str) -> String {
     .chars()
     .take(200)
     .collect()
+}
+
+#[cfg(test)]
+mod history_truncation_tests {
+    use super::*;
+
+    fn msg(role: &str, content: String) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content,
+            reasoning: None,
+            timestamp: chrono::Utc::now(),
+            token_count: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    /// nghr f844d2df: >10 KB Persian message — byte 10,000 landed inside
+    /// 'ب' under the old bytewise slice and panicked the tokio worker on
+    /// every history load for that session.
+    #[test]
+    fn persian_long_message_history_does_not_panic() {
+        let long = "ب".repeat(6_000); // 12,000 bytes
+        let out = convert_messages(&[msg("user", long.clone())]);
+        let first = &out[0].content;
+        assert!(first.ends_with("...\n[truncated]"), "marker missing: {:?}", &first[first.len().saturating_sub(30)..]);
+        let body = &first[..first.len() - "...\n[truncated]".len()];
+        assert!(body.len() <= 10_000, "body over budget: {}", body.len());
+        assert!(long.starts_with(body), "body must be a prefix of the original");
+    }
+
+    /// ASCII behavior stays byte-for-byte identical to the legacy slice.
+    #[test]
+    fn ascii_long_message_truncates_identically_to_legacy() {
+        let out = convert_messages(&[msg("user", "A".repeat(20_000))]);
+        assert_eq!(
+            out[0].content,
+            format!("{}...\n[truncated]", "A".repeat(10_000))
+        );
+    }
+
+    /// Short multibyte messages pass through untouched.
+    #[test]
+    fn short_persian_message_unchanged() {
+        let out = convert_messages(&[msg("user", "سلام دنیا".to_string())]);
+        assert_eq!(out[0].content, "سلام دنیا");
+    }
+
+    /// 4-byte chars (emoji/CJK) straddling the 10,000-byte cut are
+    /// excluded, never sliced through.
+    #[test]
+    fn four_byte_char_straddling_cut_is_excluded() {
+        let long = "\u{1F680}".repeat(3_000); // 12,000 bytes of 4-byte rockets
+        let out = convert_messages(&[msg("user", long.clone())]);
+        let first = &out[0].content;
+        let body = &first[..first.len() - "...\n[truncated]".len()];
+        assert_eq!(body.chars().count(), 2_500); // exactly 10,000 bytes
+        assert!(long.starts_with(body));
+    }
 }
