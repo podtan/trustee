@@ -70,6 +70,26 @@
     @media (max-width: 600px) {
       .msg-agent .bubble { max-width: 90%; font-size: 15px; }
     }
+    /* Per-message action bar (copy) — hover-reveal on desktop, always on touch */
+    .msg-user, .msg-agent { flex-wrap: wrap; }
+    .msg-actions {
+      flex-basis: 100%;
+      display: flex;
+      gap: 4px;
+      padding: 2px 2px 0;
+      opacity: 0;
+      transition: opacity .12s ease;
+    }
+    .msg-user .msg-actions { justify-content: flex-end; }
+    .msg-user:hover .msg-actions, .msg-agent:hover .msg-actions { opacity: 1; }
+    @media (hover: none) { .msg-actions { opacity: 1; } }
+    .copy-btn {
+      background: none; border: none; color: #8a8f98; cursor: pointer;
+      padding: 2px 4px; border-radius: 4px; display: inline-flex; align-items: center;
+    }
+    .copy-btn:hover { color: #e6e6e6; background: rgba(255,255,255,.06); }
+    .copy-btn.copied { color: #4ade80 !important; }
+    .copy-btn.failed { color: #f87171 !important; }
     .error { color: #f87171; }
     .success { color: #4ade80; }
     .info { color: #60a5fa; }
@@ -1097,7 +1117,61 @@ window._handoffAvailable = false;
 const outputEl = document.getElementById('output');
 
 // Lines to hide in web UI (no value, clutter the output)
-function shouldHideLine(text) {
+  // ---- Per-message copy action (hover-reveal, ChatGPT-style) ----
+  const COPY_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+  const CHECK_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+
+  async function copyTextToClipboard(text) {
+    // Prefer async Clipboard API (secure contexts); fall back to the legacy
+    // execCommand path for --no-tls / non-secure dev instances.
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) { /* fall through */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0;';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function addCopyAction(wrap, text) {
+    if (!wrap || !text) return;
+    const bar = document.createElement('div');
+    bar.className = 'msg-actions';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'copy-btn';
+    btn.title = 'Copy';
+    btn.setAttribute('aria-label', 'Copy message');
+    btn.innerHTML = COPY_ICON;
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const ok = await copyTextToClipboard(text);
+      btn.innerHTML = ok ? CHECK_ICON : '\u2715';
+      btn.classList.toggle('copied', ok);
+      btn.classList.toggle('failed', !ok);
+      setTimeout(() => {
+        btn.innerHTML = COPY_ICON;
+        btn.classList.remove('copied', 'failed');
+      }, 1500);
+    });
+    bar.appendChild(btn);
+    wrap.appendChild(bar);
+  }
+
+  function shouldHideLine(text) {
   return text.startsWith('🔥 API Call');
 }
 
@@ -1126,6 +1200,7 @@ function renderLines(lines) {
     applyBidiToMarkdown(bubble);
     highlightCodeIn(bubble);
     wrap.appendChild(bubble);
+    addCopyAction(wrap, pendingAgentText);
     outputEl.appendChild(wrap);
     pendingAgentText = '';
   }
@@ -1141,6 +1216,7 @@ function renderLines(lines) {
       bubble.className = 'bubble';
       bubble.textContent = line.slice(2);
       wrap.appendChild(bubble);
+      addCopyAction(wrap, line.slice(2));
       outputEl.appendChild(wrap);
       continue;
     }
@@ -1416,18 +1492,20 @@ function appendHandoffBriefing(text) {
   applyBidiToMarkdown(bubble);
   highlightCodeIn(bubble);
   wrap.appendChild(bubble);
+  addCopyAction(wrap, text);
   outputEl.appendChild(wrap);
   if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
 }
 
-function closeAgentBubble() {
-  // Render accumulated text as markdown before closing
-  if (agentBubble && agentBubble.isConnected && agentBubbleText) {
-    agentBubble.classList.add('md');
-    agentBubble.innerHTML = renderMarkdown(agentBubbleText);
-    applyBidiToMarkdown(agentBubble);
-    highlightCodeIn(agentBubble);
-  }
+  function closeAgentBubble() {
+    // Render accumulated text as markdown before closing
+    if (agentBubble && agentBubble.isConnected && agentBubbleText) {
+      agentBubble.classList.add('md');
+      agentBubble.innerHTML = renderMarkdown(agentBubbleText);
+      applyBidiToMarkdown(agentBubble);
+      highlightCodeIn(agentBubble);
+      addCopyAction(agentBubble.parentElement, agentBubbleText);
+    }
   agentBubble = null;
   agentBubbleText = '';
 }
@@ -1693,6 +1771,7 @@ async function sendCommand() {
     }
     wrap.appendChild(thumbs);
   }
+  addCopyAction(wrap, cmd);
   outputEl.appendChild(wrap);
   if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
 }
@@ -2339,6 +2418,7 @@ function renderHistory(histData) {
       bubble.className = 'bubble';
       bubble.textContent = msg.content;
       wrap.appendChild(bubble);
+      addCopyAction(wrap, msg.content);
       outputEl.appendChild(wrap);
       continue;
     }
@@ -2383,6 +2463,7 @@ function renderHistory(histData) {
         applyBidiToMarkdown(bubble);
         highlightCodeIn(bubble);
         wrap.appendChild(bubble);
+        addCopyAction(wrap, msg.content);
         outputEl.appendChild(wrap);
       }
 

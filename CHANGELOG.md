@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.4] - 2026-09-06
+
+### Added
+
+- **Per-message copy button in the web UI (ChatGPT-style)** — a quiet copy icon appears under every user and agent message bubble on hover (always visible on touch devices). Copies the raw stored content (markdown source — RTL/ZWNJ/code fences survive pastes intact), async Clipboard API with an `execCommand` fallback for `--no-tls`/non-secure instances, icon-swap feedback (✓ green / ✕ red) for 1.5s. Wired into all 7 bubble paths: transcript render (user + agent), live streaming (on bubble close), user send (with attachments), handoff briefing, and session-history restore (user + agent). Purely client-side — no API changes. Crate bump: web `0.1.22`→`0.1.23`.
+
+### Changed
+
+- **Picked up abk 0.18.2** — fixes silent UTF-8 (U+FFFD) corruption of large Persian/multibyte LLM streaming output (byte-level SSE buffering in all providers; nghr b33d3efc, independently verified). Dep floor bumps across root/core/api/tui; running agents must be **reinstalled + restarted** to load the new streaming path. Crate bumps: core `0.8.1`→`0.8.2`, api `0.14.2`→`0.14.3`, tui `0.4.3`→`0.4.4`, trustee `0.17.3`→`0.17.4`.
+
 ## [0.17.3] - 2026-09-05
 
 ### Fixed
