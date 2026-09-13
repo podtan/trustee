@@ -11,6 +11,7 @@ pub mod auth;
 pub mod tls;
 mod routes;
 mod state;
+mod thq_dispatch;
 mod thq_register;
 pub mod xagent;
 
@@ -91,7 +92,7 @@ pub async fn run(
         // 16F: teach auth about the service-account issuer candidates so
         // agent tokens (minted on service vhosts) validate in check_auth.
         let mut issuer_fallbacks = crate::state::service_issuers_from_config(&config_toml);
-        for si in crate::thq_register::discover_service_issuers() {
+        for si in crate::thq_dispatch::discover_service_issuers() {
             if !issuer_fallbacks.contains(&si) {
                 issuer_fallbacks.push(si);
             }
@@ -110,8 +111,17 @@ pub async fn run(
         None
     };
 
-    // Parse THQ registration config before config_toml is moved into session
-    let thq_config = thq_register::ThqConfig::from_toml(&config_toml);
+    // THQ enrollment (v0.3 runtime lane): parse before config_toml is
+    // moved into the session. No [thq] = lane off; malformed = LOUD +
+    // lane off (never a silent skip; no compat translation of old keys).
+    let thq_enrollment = match thq_register::ThqConfig::from_toml(&config_toml) {
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!("THQ enrollment DISABLED — [thq] is malformed: {e}");
+            None
+        }
+        Ok(Some(cfg)) => Some(thq_register::Enrollment::new(cfg)),
+    };
 
     // Build the session — keep copies of secrets/build_info for per-user sessions
     let config_toml_for_state = config_toml.clone();
@@ -168,10 +178,10 @@ pub async fn run(
     // Start background message drain task (owns workflow_rx directly — no deadlock)
     state.clone().spawn_drain_task(workflow_rx);
 
-    // THQ auto-registration with Torpi (16E): every agent-user with a
-    // per-user [thq] overlay registers as its own agent; the process-level
-    // [thq] is only a legacy single-registration fallback.
-    thq_register::spawn_all(thq_config, state.clone());
+    // 16F: per-agent dispatch table from per-user [thq] overlays — the
+    // dispatch lane is UNCHANGED by the 0.15.0 enrollment rewrite
+    // (different concept: agents-as-users vs the runtime-the-process).
+    thq_dispatch::populate(state.clone());
 
     // Build router
     //
@@ -223,13 +233,28 @@ pub async fn run(
         .route("/", get(routes::serve_index))
         .route("/{file}", get(routes::serve_static))
         // 16F: per-agent THQ dispatch surface (impersonation by Bearer swap)
-        .merge(crate::xagent::router())
+        .merge(crate::xagent::router());
+    // THQ v0.3 enrollment callback lane: THQ POSTs the runtime secret
+    // here (register → /thq/enroll → pull/state loop). No [thq] config
+    // → no route (404 for would-be enroll callers).
+    let app = match &thq_enrollment {
+        Some(enr) => app.merge(thq_register::enroll_route(enr.clone())),
+        None => app,
+    };
+    // state clone for the enrollment loop (with_state below consumes it)
+    let enrollment_state = state.clone();
+    let app = app
         .layer(CorsLayer::permissive())
         .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
         .with_state(state);
 
-    // Start server
+    // Bind BEFORE starting the enrollment loop: register's callback must
+    // land on a live /thq/enroll route (otherwise the first register
+    // wastes its callback and the loop self-heals a cycle later).
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    if let Some(enr) = thq_enrollment {
+        enr.spawn(enrollment_state);
+    }
 
     if use_tls {
         // Install ring as the process-level crypto provider (required when

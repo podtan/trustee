@@ -123,8 +123,8 @@ pub const MCP_BUILD_RETRY_BACKOFF: std::time::Duration = std::time::Duration::fr
 /// THQ-dispatched sessions must run AS.
 ///
 /// Populated once at boot by the 16E discovery scan
-/// (`thq_register::spawn_all`); restart-only lifecycle, exactly like the
-/// THQ registration itself.
+/// (`thq_dispatch::populate`); restart-only lifecycle, exactly like the
+/// enrollment lane itself.
 #[derive(Debug, Clone)]
 pub struct ThqDispatchEntry {
     /// The agent-user's stable key = its Kanidm `sub` (16E sub-pin). This is

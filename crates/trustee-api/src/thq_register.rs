@@ -1,397 +1,696 @@
-//! THQ (Torpi) auto-registration.
+//! THQ v0.3 runtime enrollment — the RUNTIME lane.
 //!
-//! Two registration modes (16E):
+//! Rewrite of the torpi-era auto-registration (owner rulings 2026-09-13,
+//! three-concept model): agent identities, runtimes, and profiles live in
+//! THQ, server-side. THIS module is the runtime half — the trustee PROCESS
+//! itself. Zero coupling to users/agents: no per-user loops, no
+//! per-user enrollment, no `users/{hash}` anything in this lane. One loop
+//! per process reports process-wide health (any live session → running,
+//! else idle).
 //!
-//! 1. **Per-agent-user** (the agents-as-users model): every directory under
-//!    `~/.trustee/users/{hash}/` whose overlay config
-//!    (`users/{hash}/config/trustee.toml`) carries a `[thq]` section is
-//!    registered as its OWN agent in THQ — one process, N agents. Each entry
-//!    gets a stable per-user id (`users/{hash}/agent_id`), an identity
-//!    Bearer from that user's `.env` (attribution; the THQ registration
-//!    route is open), and a heartbeat whose `status` reflects live session
-//!    state (`idle` / `running`).
+//! The 16F dispatch lane (agents-as-users, `xagent` impersonation) is a
+//! DIFFERENT concept and lives in [`crate::thq_dispatch`], unchanged.
 //!
-//! 2. **Legacy single** (pre-0.12 behavior): when NO per-user `[thq]`
-//!    entries exist but the process config has one, the whole process
-//!    registers once under `[thq].agent_name` with id `~/.trustee/agent_id`.
+//! # The lane (contracts pinned from thq v0.3.2 source)
 //!
-//! The per-user `[thq]` sections are read from the overlay FILES at boot.
-//! Changing them requires a restart — MCP tool sets stay hot-reloadable,
-//! THQ identity does not.
+//! 1. **REGISTER** (open, instance-gated — `X-Instance-Id` header, never
+//!    in the path; `thq_url` is origin-only so it survives API prefix
+//!    bumps): `POST {thq_url}/api/v1/runtime/register` with
+//!    `{name, advertise_url}`. The runtime's identity is DETERMINISTIC:
+//!    `runtime_key = sha256(advertise_url)` — stateless re-registration,
+//!    no ids pasted anywhere. THQ mints a random secret, stores only its
+//!    hash, and…
+//! 2. …**CALLS BACK** `POST {advertise_url}/thq/enroll` with
+//!    `{thq_url, runtime_id, instance_id, secret}`. This module SERVES
+//!    that route ([`enroll_route`]). The callback's `thq_url` origin must
+//!    equal the configured origin (rogue-THQ guard — a THQ that is not the
+//!    one in the config must never hand us a secret), and `instance_id` /
+//!    `runtime_id` must match. The secret is persisted to
+//!    `~/.trustee/thq/runtime.json` (0700/0600) — PROCESS-level, its own
+//!    `thq/` namespace, never under `users/`, firewalled from agent/user
+//!    secrets. Self-signed TLS accepted both ways (10s timeouts).
+//! 3. **PULL**: `GET {thq_url}/api/v1/runtime/profiles` with
+//!    `X-Instance-Id` + `X-Runtime-Id` + `X-Runtime-Secret` — every profile
+//!    bound to this runtime with its full identity payload. Scope of THIS
+//!    release: the payload is LOGGED (wire-capture), never applied —
+//!    materialization is the next dispatch.
+//! 4. **STATE**: `POST {thq_url}/api/v1/runtime/profiles/{id}/state` with
+//!    `{observed_state, detail}` per bound profile. Any report flips the
+//!    runtime `pending → active` (verified thq runtime_api.rs).
 //!
-//! Registration payloads match Torpi's `AgentEntry` and re-POST with the
-//! same `id` is an upsert, which is exactly what the heartbeat does.
+//! A **403 anywhere** ⇒ the secret rotated or was revoked ⇒ drop the
+//! credential and re-register (self-heal). Never periodic re-registration:
+//! the loop re-registers exactly when it has no valid credential.
+//!
+//! # Config ([thq], main process trustee.toml ONLY — per-user overlays no
+//! longer drive this lane)
+//!
+//! ```toml
+//! [thq]
+//! thq_url = "https://thq.tanbal.ir"      # origin ONLY (no path/query)
+//! instance_id = "<THQ leaf uuid>"         # the X-Instance-Id value
+//! advertise_url = "https://10.99.0.11:3000"
+//! runtime_name = "nox"                    # THQ entity "Runtime: nox"
+//! heartbeat_interval = 30                 # pull/state cadence, seconds
+//! ```
+//!
+//! Exactly these five keys. No compatibility code (no `torpi_url`, no
+//! dead-key tolerance — configs are migrated, not translated): unknown or
+//! missing keys fail LOUD at boot with the lane disabled.
 
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 
-/// Configuration for THQ registration, parsed from a `[thq]` TOML section.
-#[derive(Debug, Clone)]
-pub struct ThqConfig {
-    /// Base URL of the Torpi instance (e.g. <https://torpi.tanbal.ir>).
-    pub torpi_url: String,
-    /// This agent's externally-reachable URL (e.g. <https://192.168.1.10:3000>).
-    pub advertise_url: String,
-    /// Human-friendly agent name (e.g. "trustee-podtan").
-    pub agent_name: String,
-    /// Agent role (default: "general").
-    pub agent_role: String,
-    /// Hardcoded capabilities list.
-    pub capabilities: Vec<String>,
-    /// Hardcoded tags list.
-    pub tags: Vec<String>,
-    /// Re-registration interval in seconds (default: 30).
-    pub heartbeat_interval: u64,
-    /// Optional Bearer token for authenticating with the THQ API.
-    /// Sent as `Authorization: Bearer <token>` on every registration request.
-    /// When None, registration is unauthenticated (legacy Torpi instances).
-    pub registration_token: Option<String>,
-    /// Owning user's subject identifier (typically their JWT `sub` UUID).
-    /// When set, Torpi associates this agent with the user so they can
-    /// manage it through the THQ UI without admin privileges.
-    /// Set from the `[thq] owner_id` config field.
-    /// 16E: for agent-users this MUST be the agent's Kanidm `sub` — it is
-    /// the key used to read live session state for the busy/idle heartbeat,
-    /// matching the agent `user_key` pin (agents are keyed by `sub`).
-    pub owner_id: Option<String>,
-    /// Issue 8e0a1215: the agent DECLARES which env var holds her Kanidm
-    /// service credential — e.g. `service_token = "${PAYDAR_SERVICE_ACCOUNT}"`.
-    /// Resolved from the agent's per-user `.env` at boot; a bare key name
-    /// (without the `${…}` wrapper) is accepted too. This is the ONLY
-    /// credential source — the legacy hardcoded key scan
-    /// (THQ/FAME/FARZAN/KANIDM_SERVICE_TOKEN) was REMOVED in api 0.13.0,
-    /// so an agent without this field is NOT dispatchable (loud boot error
-    /// when `owner_id` is set). Declared but unresolved → loud boot ERROR
-    /// as well. Never a silent skip.
-    pub service_token: Option<String>,
+use axum::response::IntoResponse;
+use axum::Json;
+
+/// sha256 hex of the advertise URL — the runtime's deterministic identity.
+/// MUST match thq's `runtime_register::runtime_key` byte-for-byte.
+pub fn runtime_key(advertise_url: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(advertise_url.as_bytes());
+    hex(&h.finalize())
 }
 
-impl ThqConfig {
-    /// Parse from a trustee config TOML (shared config or a per-user overlay).
-    ///
-    /// Reads the `[thq]` section. Returns `None` if the section is absent
-    /// (registration disabled).  `torpi_url` and `advertise_url` are required;
-    /// all other fields have defaults.
-    pub fn from_toml(config_toml: &str) -> Option<Self> {
-        let table: toml::Table = toml::from_str(config_toml).ok()?;
-        let thq = table.get("thq")?.as_table()?;
-
-        let torpi_url = thq
-            .get("torpi_url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim_end_matches('/').to_string())?;
-        let advertise_url = thq
-            .get("advertise_url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim_end_matches('/').to_string())?;
-        let agent_name = thq
-            .get("agent_name")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .unwrap_or_else(|| {
-                std::env::var("HOSTNAME")
-                    .or_else(|_| std::env::var("COMPUTERNAME"))
-                    .unwrap_or_else(|_| "trustee".to_string())
-            });
-        let agent_role = thq
-            .get("agent_role")
-            .and_then(|v| v.as_str())
-            .unwrap_or("general")
-            .to_string();
-        let capabilities = thq
-            .get("capabilities")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let tags = thq
-            .get("tags")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let heartbeat_interval = thq
-            .get("heartbeat_interval")
-            .and_then(|v| v.as_integer())
-            .map(|v| v as u64)
-            .unwrap_or(30);
-        let registration_token = thq
-            .get("registration_token")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let owner_id = thq
-            .get("owner_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let service_token = thq
-            .get("service_token")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-
-        Some(Self {
-            torpi_url,
-            advertise_url,
-            agent_name,
-            agent_role,
-            capabilities,
-            tags,
-            heartbeat_interval,
-            registration_token,
-            owner_id,
-            service_token,
-        })
-    }
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Registration payload matching Torpi's `AgentEntry` struct.
-#[derive(Debug, Serialize, Deserialize)]
-struct AgentEntry {
-    id: String,
-    name: String,
-    endpoint: String,
-    role: String,
-    capabilities: Vec<String>,
-    status: String,
-    tags: Vec<String>,
-    last_seen: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    owner_id: Option<String>,
-}
-
-/// One discovered agent-user (16E): a `users/{hash}/` home whose overlay
-/// config carries a `[thq]` section.
-#[derive(Debug, Clone)]
-pub struct DiscoveredAgent {
-    /// Hash directory name under `~/.trustee/users/`.
-    pub user_hash: String,
-    /// The user's home directory (`~/.trustee/users/{hash}/`).
-    pub user_home: std::path::PathBuf,
-    /// Parsed `[thq]` section from the user's overlay config.
-    pub config: ThqConfig,
-}
-
-/// Scan `~/.trustee/users/*/config/trustee.toml` for per-user `[thq]`
-/// sections. Deterministic order (sorted by hash) so startup logs and
-/// heartbeat staggering are reproducible.
-pub fn discover_user_agents() -> Vec<DiscoveredAgent> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    discover_user_agents_in(
-        &std::path::PathBuf::from(home)
-            .join(".trustee")
-            .join("users"),
-    )
-}
-
-/// Testable core of [`discover_user_agents`].
-pub fn discover_user_agents_in(users_dir: &std::path::Path) -> Vec<DiscoveredAgent> {
-    let mut found = Vec::new();
-    let Ok(entries) = std::fs::read_dir(users_dir) else {
-        return found;
-    };
-    for entry in entries.flatten() {
-        let user_home = entry.path();
-        if !user_home.is_dir() {
-            continue;
-        }
-        let overlay = user_home.join("config").join("trustee.toml");
-        let Ok(content) = std::fs::read_to_string(&overlay) else {
-            continue;
-        };
-        if let Some(config) = ThqConfig::from_toml(&content) {
-            found.push(DiscoveredAgent {
-                user_hash: user_home
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                user_home,
-                config,
-            });
-        }
-    }
-    found.sort_by(|a, b| a.user_hash.cmp(&b.user_hash));
-    found
-}
-
-/// Resolve or create a persistent agent ID at an explicit file path (16E).
-///
-/// Reads from the file if present; otherwise generates a UUID v4, persists
-/// it, and returns it. Per-agent identities live at
-/// `users/{hash}/agent_id`; the legacy single identity at
-/// `~/.trustee/agent_id`.
-fn resolve_agent_id_at(id_file: &std::path::Path) -> Result<String, std::io::Error> {
-    // Try existing
-    if id_file.exists() {
-        let id = std::fs::read_to_string(id_file)?;
-        let id = id.trim().to_string();
-        if !id.is_empty() {
-            return Ok(id);
-        }
-    }
-
-    // Generate new
-    let id = uuid::Uuid::new_v4().to_string();
-    if let Some(parent) = id_file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(id_file, &id)?;
-    tracing::info!("Generated new agent ID: {} -> {}", id, id_file.display());
-    Ok(id)
-}
-
-/// Legacy single-process id (`~/.trustee/agent_id`).
-fn resolve_agent_id() -> Result<String, std::io::Error> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    resolve_agent_id_at(
-        &std::path::PathBuf::from(home)
-            .join(".trustee")
-            .join("agent_id"),
-    )
-}
-
-/// The issuer declared by the overlay's first `service-account` credential —
-/// the origin the agent's service token was minted for (16F: exchange is
-/// origin-bound, so it must travel with the entry).
-fn read_overlay_service_issuer(user_home: &std::path::Path) -> Option<String> {
-    let overlay = std::fs::read_to_string(user_home.join("config").join("trustee.toml")).ok()?;
-    let v: toml::Value = overlay.parse().ok()?;
-    let creds = v.get("mcp")?.get("credentials")?.as_table()?;
-    for (_name, cred) in creds {
-        if cred.get("type").and_then(|t| t.as_str()) == Some("service-account") {
-            if let Some(issuer) = cred.get("issuer_url").and_then(|i| i.as_str()) {
-                return Some(issuer.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// 16F: every service-account issuer declared by the discovered agent-user
-/// overlays — the vhosts the deployed agents' tokens are actually minted on.
-pub fn discover_service_issuers() -> Vec<String> {
-    let mut out = Vec::new();
-    for agent in discover_user_agents() {
-        if let Some(issuer) = read_overlay_service_issuer(&agent.user_home) {
-            if !out.contains(&issuer) {
-                out.push(issuer);
-            }
-        }
-    }
-    out
-}
-
-/// Issue 8e0a1215: outcome of resolving an agent-user's dispatch credential.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ServiceTokenResolution {
-    /// `[thq].service_token` declared and resolved from the agent's `.env`.
-    /// The ONLY way an agent becomes dispatchable — the hardcoded key scan
-    /// (THQ/FAME/FARZAN/KANIDM_SERVICE_TOKEN) was removed in api 0.13.0.
-    Resolved(String),
-    /// No `[thq].service_token` declared at all. The agent is NOT
-    /// dispatchable; with an `owner_id` present (dispatch intent) boot
-    /// FAILS LOUD — an undeclared credential is the same silent-skip shape
-    /// this issue was filed to kill.
-    Undeclared,
-    /// `[thq].service_token` DECLARED but its variable did not resolve from
-    /// the agent's `.env` (missing file, missing key, or an unresolved
-    /// `${…}` placeholder value). Boot FAILS LOUD naming agent + variable;
-    /// the agent is NOT dispatchable. Never a silent skip.
-    DeclaredUnresolved { var: String },
-}
-
-/// Extract the env-var name from a `[thq].service_token` declaration.
-/// Accepts the canonical `"${KEY}"` wrapper and a bare `"KEY"`. Malformed
-/// input returns the raw trimmed string — the lookup then fails and the
-/// boot error names exactly what the config said.
-fn declared_service_var(decl: &str) -> String {
-    let s = decl.trim();
-    match s.strip_prefix("${").and_then(|r| r.strip_suffix('}')) {
-        Some(inner) => inner.trim().to_string(),
-        None => s.to_string(),
-    }
-}
-
-/// Look up `key` in a `.env` file (`KEY=value`, quotes unwrapped, `#`
-/// comments skipped). A missing key, an empty value, or an unresolved
-/// `${…}` placeholder value (the house "never provisioned" convention)
-/// all yield None. The user's `.env` is the
-/// ONLY source — no process-env fallback, so a declared credential must be
-/// provisioned where the agent's identity lives.
-fn lookup_env_value(env_path: &std::path::Path, key: &str) -> Option<String> {
-    if key.is_empty() {
+/// The origin (`scheme://host[:port]`) of a URL, or None if it does not
+/// parse / has no host / is not http(s).
+fn origin_of(url: &str) -> Option<String> {
+    let u = url::Url::parse(url.trim()).ok()?;
+    let scheme = u.scheme();
+    if scheme != "http" && scheme != "https" {
         return None;
     }
-    let env = std::fs::read_to_string(env_path).ok()?;
-    let prefix = format!("{key}=");
-    for line in env.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            continue;
+    let host = u.host_str()?;
+    let host = if host.contains(':') {
+        // bare IPv6 literal — re-bracket for a canonical origin string
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let port = u.port().map(|p| format!(":{p}")).unwrap_or_default();
+    Some(format!("{scheme}://{host}{port}"))
+}
+
+/// The process-level runtime credential: `~/.trustee/thq/runtime.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeCredential {
+    /// sha256(advertise_url) — COMPUTED at boot, never pasted. Stored so a
+    /// stale secret (advertise_url changed) is detectable without the
+    /// config at read time.
+    pub runtime_key: String,
+    /// The enrollment secret, delivered out-of-band by THQ's callback.
+    pub secret: String,
+}
+
+/// Default credential location: `~/.trustee/thq/runtime.json`. Process-
+/// level namespace, deliberately NOT under `users/`.
+pub fn default_credential_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".trustee")
+        .join("thq")
+        .join("runtime.json")
+}
+
+/// Write `bytes` to `path` with 0700 on the parent dir and 0600 on the
+/// file (unix). The secret file is process-private, full stop.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
-        if let Some(value) = line.strip_prefix(&prefix) {
-            let value = value.trim().trim_matches('"').trim_matches('\'');
-            if !value.is_empty() && !value.starts_with("${") {
-                return Some(value.to_string());
+    }
+    std::fs::write(path, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Configuration for the enrollment lane, parsed from the MAIN process
+/// `[thq]` section. Exactly five keys; anything else is a config error.
+#[derive(Debug, Clone)]
+pub struct ThqConfig {
+    /// THQ's origin — scheme://host[:port], NOTHING else. (A `?instance=`
+    /// here is the 405 bug that started this rewrite.)
+    pub thq_url: String,
+    /// The THQ leaf instance id (`X-Instance-Id` on every call).
+    pub instance_id: String,
+    /// This runtime's externally-reachable URL — the callback target and
+    /// the identity source (`runtime_key = sha256(advertise_url)`).
+    pub advertise_url: String,
+    /// The runtime's name — vocabulary is RUNTIME (never agent): maps to
+    /// the THQ register body `{name}` and the entity "Runtime: {name}".
+    pub runtime_name: String,
+    /// Pull/state cadence in seconds (default 30).
+    pub heartbeat_interval: u64,
+}
+
+/// Exactly the keys the enrollment lane knows. Anything else in `[thq]` —
+/// including registration-era leftovers (`torpi_url`, `agent_name`, …) —
+/// is a LOUD config error: the no-compat ruling (configs are migrated, not
+/// translated by code).
+const KNOWN_KEYS: [&str; 5] = [
+    "thq_url",
+    "instance_id",
+    "advertise_url",
+    "runtime_name",
+    "heartbeat_interval",
+];
+
+impl ThqConfig {
+    /// Parse the main process `[thq]` section.
+    ///
+    /// - `Ok(None)` — no `[thq]` section: the lane is simply off.
+    /// - `Err(msg)` — `[thq]` is present but malformed: loud at boot, lane
+    ///   disabled (never a silent skip).
+    /// - `Ok(Some(cfg))` — the five-key config, validated and normalized.
+    pub fn from_toml(config_toml: &str) -> Result<Option<Self>, String> {
+        let table: toml::Table = toml::from_str(config_toml)
+            .map_err(|e| format!("config is not valid TOML: {e}"))?;
+        let Some(thq) = table.get("thq").and_then(|v| v.as_table()) else {
+            return Ok(None); // no [thq] — lane off
+        };
+
+        for k in thq.keys() {
+            if !KNOWN_KEYS.contains(&k.as_str()) {
+                return Err(format!(
+                    "unknown key [thq].{k} — the enrollment config is exactly \
+                     thq_url / instance_id / advertise_url / runtime_name / \
+                     heartbeat_interval (the torpi-era registration keys were \
+                     REMOVED in 0.15.0; migrate the config)"
+                ));
+            }
+        }
+
+        let req = |key: &str| -> Result<String, String> {
+            let v = thq
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| format!("[thq].{key} is required (string, non-empty)"))?;
+            Ok(v)
+        };
+
+        // thq_url: an ORIGIN, nothing else — a path or query here is the
+        // 405 incident (a ?instance= made every appended route land on the
+        // dashboard). Fail loud instead of trimming it away silently.
+        let raw_thq_url = req("thq_url")?;
+        let trimmed = raw_thq_url.trim_end_matches('/');
+        let normalized = origin_of(trimmed).ok_or_else(|| {
+            format!(
+                "[thq].thq_url must be an http(s) ORIGIN (scheme://host[:port]) — got \
+                 {raw_thq_url:?}: no path, no query, no fragment (a ?instance= here \
+                 is the 405 bug; the leaf goes in [thq].instance_id)"
+            )
+        })?;
+        let parsed = url::Url::parse(trimmed).map_err(|e| format!("[thq].thq_url: {e}"))?;
+        if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(format!(
+                "[thq].thq_url must be an ORIGIN — got {raw_thq_url:?}: no path/query/fragment \
+                 allowed (the THQ leaf belongs in [thq].instance_id)"
+            ));
+        }
+
+        let instance_id = req("instance_id")?;
+        let advertise_url_raw = req("advertise_url")?;
+        if !advertise_url_raw.starts_with("http") {
+            return Err(format!(
+                "[thq].advertise_url must be an http(s) URL (THQ calls back to it) — got \
+                 {advertise_url_raw:?}"
+            ));
+        }
+        let advertise_url = advertise_url_raw.trim_end_matches('/').to_string();
+        let runtime_name = req("runtime_name")?;
+
+        let heartbeat_interval = match thq.get("heartbeat_interval") {
+            None => 30,
+            Some(v) => {
+                let n = v
+                    .as_integer()
+                    .ok_or("[thq].heartbeat_interval must be an integer (seconds)")?;
+                if n < 1 {
+                    return Err("[thq].heartbeat_interval must be >= 1 second".to_string());
+                }
+                n as u64
+            }
+        };
+
+        Ok(Some(Self {
+            thq_url: normalized,
+            instance_id,
+            advertise_url,
+            runtime_name,
+            heartbeat_interval,
+        }))
+    }
+}
+
+/// Shared handle between the `/thq/enroll` route and the enrollment loop.
+#[derive(Clone)]
+pub struct Enrollment(Arc<EnrollmentInner>);
+
+struct EnrollmentInner {
+    config: ThqConfig,
+    /// Where the runtime credential lives (injectable for tests).
+    cred_path: PathBuf,
+    /// Fired when the enroll handler persists a fresh secret — wakes the
+    /// loop out of its post-register wait. Correctness does NOT depend on
+    /// the notify (the loop re-reads the file each cycle); it only kills
+    /// up-to-one-interval of latency.
+    notify: tokio::sync::Notify,
+}
+
+impl Enrollment {
+    /// Production handle: credential at [`default_credential_path`].
+    pub fn new(config: ThqConfig) -> Self {
+        Self::with_cred_path(config, default_credential_path())
+    }
+
+    /// Testable handle with an explicit credential path.
+    pub fn with_cred_path(config: ThqConfig, cred_path: PathBuf) -> Self {
+        Self(Arc::new(EnrollmentInner {
+            config,
+            cred_path,
+            notify: tokio::sync::Notify::new(),
+        }))
+    }
+
+    /// sha256(advertise_url) — OUR deterministic runtime identity.
+    fn key(&self) -> String {
+        runtime_key(&self.0.config.advertise_url)
+    }
+
+    /// Load the credential, tolerating absence/corruption (warn + None →
+    /// the loop self-heals by re-registering).
+    fn load_credential(&self) -> Option<RuntimeCredential> {
+        let raw = std::fs::read_to_string(&self.0.cred_path).ok()?;
+        match serde_json::from_str(&raw) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(
+                    "THQ credential {} is unreadable ({e}) — will re-register",
+                    self.0.cred_path.display()
+                );
+                None
             }
         }
     }
-    None
-}
 
-/// Issue 8e0a1215: resolve an agent-user's dispatch credential.
-///
-/// The `[thq].service_token` declaration is the ONLY source — the config
-/// declares, the code never guesses. Declared-but-unresolved and
-/// undeclared are both distinct loud outcomes
-/// ([`ServiceTokenResolution`]); neither silently degrades.
-pub fn resolve_user_service_token(
-    user_home: &std::path::Path,
-    config: &ThqConfig,
-) -> ServiceTokenResolution {
-    match config.service_token.as_deref() {
-        Some(decl) => {
-            let var = declared_service_var(decl);
-            match lookup_env_value(&user_home.join(".env"), &var) {
-                Some(value) => ServiceTokenResolution::Resolved(value),
-                None => ServiceTokenResolution::DeclaredUnresolved { var },
+    /// The credential valid for THIS advertise_url — a stored key that does
+    /// not match means the advertise_url changed and the stale secret
+    /// belongs to another runtime identity (re-register, do not use).
+    fn valid_credential(&self) -> Option<RuntimeCredential> {
+        let c = self.load_credential()?;
+        if c.runtime_key == self.key() {
+            Some(c)
+        } else {
+            tracing::warn!(
+                "THQ credential at {} was minted for a different advertise_url \
+                 (key mismatch) — re-registering",
+                self.0.cred_path.display()
+            );
+            None
+        }
+    }
+
+    fn forget_credential(&self) {
+        if let Err(e) = std::fs::remove_file(&self.0.cred_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("THQ: cannot drop credential {}: {e}", self.0.cred_path.display());
             }
         }
-        None => ServiceTokenResolution::Undeclared,
+    }
+
+    fn save_credential(&self, cred: &RuntimeCredential) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(cred).expect("credential serializes");
+        write_private(&self.0.cred_path, &bytes)
+    }
+
+    /// Spawn the enrollment loop. Call AFTER the HTTP listener is up: the
+    /// register callback must land on a live `/thq/enroll` route.
+    pub fn spawn(self, state: crate::state::ServerState) {
+        let enrollment = self.clone();
+        let client = build_http_client();
+        tokio::spawn(async move {
+            let cfg = enrollment.0.config.clone();
+            let key = enrollment.key();
+            tracing::info!(
+                "THQ enrollment lane: runtime \"{}\" (key {}…) -> {} instance {} — \
+                 credential at {}",
+                cfg.runtime_name,
+                &key[..16],
+                cfg.thq_url,
+                cfg.instance_id,
+                enrollment.0.cred_path.display()
+            );
+            let interval = Duration::from_secs(cfg.heartbeat_interval.max(1));
+            loop {
+                match enrollment.valid_credential() {
+                    Some(cred) => match pull(&client, &cfg, &cred).await {
+                        PullOutcome::Ok(payload) => {
+                            // Wire-capture ruling: the pull payload is LOGGED
+                            // in full, never applied in this release.
+                            let total = payload
+                                .get("total")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or_default();
+                            tracing::info!(
+                                target: "thq",
+                                "THQ pull: {total} profile(s) bound — payload (logged, NOT applied): {payload}"
+                            );
+
+                            let busy = process_busy(&state).await;
+                            let profiles = payload
+                                .get("profiles")
+                                .and_then(|v| v.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            for p in &profiles {
+                                let Some(pid) = p.get("profile_id").and_then(|v| v.as_str())
+                                else {
+                                    continue;
+                                };
+                                match report_state(&client, &cfg, &cred, pid, busy).await {
+                                    StateOutcome::Ok => {}
+                                    StateOutcome::Forbidden => {
+                                        tracing::warn!(
+                                            "THQ state report 403 on profile {pid} — \
+                                             credential rotated; re-registering (self-heal)"
+                                        );
+                                        enrollment.forget_credential();
+                                        break;
+                                    }
+                                    StateOutcome::Failed(e) => {
+                                        tracing::warn!("THQ state report failed ({pid}): {e}")
+                                    }
+                                }
+                            }
+                            tokio::time::sleep(interval).await;
+                        }
+                        PullOutcome::Forbidden => {
+                            tracing::warn!(
+                                "THQ pull 403 — secret rotated or revoked; re-registering \
+                                 (self-heal)"
+                            );
+                            enrollment.forget_credential();
+                            // no sleep: fall straight through to register
+                        }
+                        PullOutcome::Failed(e) => {
+                            tracing::warn!("THQ pull failed (will retry): {e}");
+                            tokio::time::sleep(interval).await;
+                        }
+                    },
+                    None => {
+                        // No usable credential (first boot, advertise_url
+                        // change, corruption, or a 403 purge): REGISTER ONCE
+                        // and wait for the /thq/enroll callback.
+                        register_once(&client, &cfg).await;
+                        let notified = enrollment.0.notify.notified();
+                        tokio::select! {
+                            _ = notified => {}
+                            _ = tokio::time::sleep(interval) => {}
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 
-/// Busy = any of the user's sessions currently running.
+/// Build a reqwest client that accepts self-signed certs (THQ/advertise
+/// endpoints may use them; ruling 2026-09-12) with a 10s timeout — the
+/// enrollment lane must never hang the boot path.
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to build HTTP client for THQ enrollment")
+}
+
+// ---------------------------------------------------------------------------
+// The /thq/enroll receiver
+// ---------------------------------------------------------------------------
+
+/// THQ's callback payload (pinned from thq `deliver_secret`):
+/// `{thq_url, runtime_id, instance_id, secret}`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnrollPayload {
+    pub thq_url: String,
+    pub runtime_id: String,
+    pub instance_id: String,
+    pub secret: String,
+}
+
+/// POST /thq/enroll — THQ hands the enrollment secret to whoever actually
+/// serves the advertise URL (ACME-style proof of control).
 ///
-/// `user_key` is the THQ `owner_id` (the agent's Kanidm `sub`) — the same
-/// key the agent authenticates with, per the 16D agent user_key pin.
-/// Session mutexes are tokio (async): Arc clones are collected and the
-/// DashMap guard is dropped BEFORE any await.
-async fn is_busy(state: &crate::state::ServerState, user_key: Option<&str>) -> bool {
-    let Some(key) = user_key else {
-        return false;
+/// Fail-closed checks, all 403: the callback must name THIS runtime
+/// (`runtime_id`), come from the CONFIGURED THQ (origin of `thq_url` —
+/// rogue-THQ guard), and carry the CONFIGURED instance. Only then is the
+/// secret persisted (0700/0600) and the loop woken.
+async fn handle_enroll(
+    axum::Extension(enrollment): axum::Extension<Enrollment>,
+    Json(payload): Json<EnrollPayload>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
+    let cfg = &enrollment.0.config;
+    let short = payload.runtime_id.chars().take(16).collect::<String>();
+
+    if payload.runtime_id != enrollment.key() {
+        tracing::warn!(
+            "THQ enroll REJECTED: runtime_id {short}… is not this process \
+             (advertise_url key mismatch)"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "runtime_id mismatch — not this runtime"})),
+        );
+    }
+
+    // Rogue-THQ guard: whatever origin the payload claims must be exactly
+    // the origin in OUR config. THQ itself sends `scheme://host/?instance=`
+    // — compare ORIGINS (path/query stripped), never raw strings.
+    match origin_of(&payload.thq_url) {
+        Some(o) if o == cfg.thq_url => {}
+        other => {
+            tracing::error!(
+                "THQ enroll REJECTED (rogue-THQ guard): callback origin {other:?} \
+                 is not the configured thq_url {:?}",
+                cfg.thq_url
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "thq_url origin mismatch — not my THQ"})),
+            );
+        }
+    }
+
+    if payload.instance_id != cfg.instance_id {
+        tracing::error!(
+            "THQ enroll REJECTED: instance {} is not the configured leaf {}",
+            payload.instance_id,
+            cfg.instance_id
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "instance_id mismatch"})),
+        );
+    }
+
+    let cred = RuntimeCredential {
+        runtime_key: payload.runtime_id,
+        secret: payload.secret,
     };
-    let Some(user) = state.sessions.get(key) else {
-        return false;
-    };
-    let session_locks: Vec<_> = user
-        .sessions
-        .iter()
-        .map(|e| e.value().session.clone())
-        .collect();
-    drop(user);
-    for session in session_locks {
+    if let Err(e) = enrollment.save_credential(&cred) {
+        tracing::error!(
+            "THQ enroll: cannot persist credential to {}: {e}",
+            enrollment.0.cred_path.display()
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "credential persistence failed"})),
+        );
+    }
+    enrollment.0.notify.notify_waiters();
+    tracing::info!(
+        target: "thq",
+        "THQ enrollment secret received from {} — runtime {} enrolled (key {short}…)",
+        cfg.thq_url,
+        cfg.runtime_name
+    );
+    (StatusCode::OK, Json(json!({"status": "enrolled"})))
+}
+
+/// The enroll route, merged into the main router. Uses an `Extension`
+/// layer (process-level handle), so it merges into any `Router<S>` — same
+/// shape as the xagent merge. No `[thq]` config → no route (404).
+pub fn enroll_route<S: Clone + Send + Sync + 'static>(
+    enrollment: Enrollment,
+) -> axum::Router<S> {
+    axum::Router::new()
+        .route("/thq/enroll", axum::routing::post(handle_enroll))
+        .layer(axum::Extension(enrollment))
+}
+
+// ---------------------------------------------------------------------------
+// THQ clients: register / pull / state
+// ---------------------------------------------------------------------------
+
+/// `POST {thq_url}/api/v1/runtime/register` — open route, instance-gated.
+/// Response (201) carries `{runtime_id, asset_id, status, callback}` —
+/// logged for the receipt trail; the SECRET itself only ever travels on
+/// the callback, never in this response.
+async fn register_once(client: &reqwest::Client, cfg: &ThqConfig) {
+    let url = format!("{}/api/v1/runtime/register", cfg.thq_url);
+    let body = json!({
+        "name": cfg.runtime_name,
+        "advertise_url": cfg.advertise_url,
+    });
+    match client
+        .post(&url)
+        .header("X-Instance-Id", &cfg.instance_id)
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if status.is_success() {
+                tracing::info!(target: "thq", "THQ register accepted ({status}): {text}");
+            } else {
+                tracing::warn!("THQ register rejected ({status}): {}", truncate(&text, 300));
+            }
+        }
+        Err(e) => tracing::warn!("THQ register unreachable (will retry): {e}"),
+    }
+}
+
+enum PullOutcome {
+    /// 200 with the profiles payload (logged verbatim by the loop).
+    Ok(serde_json::Value),
+    /// 403 — credential bad (rotated/revoked): self-heal by re-register.
+    Forbidden,
+    /// Any other failure — transient, retry next tick.
+    Failed(String),
+}
+
+/// `GET {thq_url}/api/v1/runtime/profiles` — runtime-credential-ONLY (the
+/// unauthenticated `?runtime_id=` form is dead since thq v0.3.2).
+async fn pull(client: &reqwest::Client, cfg: &ThqConfig, cred: &RuntimeCredential) -> PullOutcome {
+    let url = format!("{}/api/v1/runtime/profiles", cfg.thq_url);
+    match client
+        .get(&url)
+        .header("X-Instance-Id", &cfg.instance_id)
+        .header("X-Runtime-Id", &cred.runtime_key)
+        .header("X-Runtime-Secret", &cred.secret)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.as_u16() == 403 {
+                return PullOutcome::Forbidden;
+            }
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return PullOutcome::Failed(format!("{status}: {}", truncate(&text, 300)));
+            }
+            match resp.json::<serde_json::Value>().await {
+                Ok(v) => PullOutcome::Ok(v),
+                Err(e) => PullOutcome::Failed(format!("payload is not JSON: {e}")),
+            }
+        }
+        Err(e) => PullOutcome::Failed(e.to_string()),
+    }
+}
+
+enum StateOutcome {
+    Ok,
+    Forbidden,
+    Failed(String),
+}
+
+/// `POST {thq_url}/api/v1/runtime/profiles/{id}/state` — report process
+/// health for one bound profile. Values sent: `running` (≥1 live session
+/// in the process) / `idle`. Any report flips the runtime pending→active.
+async fn report_state(
+    client: &reqwest::Client,
+    cfg: &ThqConfig,
+    cred: &RuntimeCredential,
+    profile_id: &str,
+    busy: bool,
+) -> StateOutcome {
+    let url = format!("{}/api/v1/runtime/profiles/{profile_id}/state", cfg.thq_url);
+    let observed = if busy { "running" } else { "idle" };
+    let body = json!({
+        "observed_state": observed,
+        "detail": if busy {
+            "process health: live session(s) present"
+        } else {
+            "process health: no live sessions"
+        },
+    });
+    match client
+        .post(&url)
+        .header("X-Instance-Id", &cfg.instance_id)
+        .header("X-Runtime-Id", &cred.runtime_key)
+        .header("X-Runtime-Secret", &cred.secret)
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.as_u16() == 403 {
+                return StateOutcome::Forbidden;
+            }
+            if status.is_success() {
+                StateOutcome::Ok
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                StateOutcome::Failed(format!("{status}: {}", truncate(&text, 300)))
+            }
+        }
+        Err(e) => StateOutcome::Failed(e.to_string()),
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
+/// Process-wide health: busy = ANY live session in ANY user bucket is
+/// Running. The runtime IS the process — per-user state is irrelevant
+/// here (that is the three-concept boundary).
+///
+/// DashMap guards are dropped before any await (house pattern).
+async fn process_busy(state: &crate::state::ServerState) -> bool {
+    let mut handles = Vec::new();
+    for user in state.sessions.iter() {
+        for entry in user.value().sessions.iter() {
+            handles.push(entry.value().session.clone());
+        }
+    }
+    for session in handles {
         if session.lock().await.workflow_state == trustee_core::types::WorkflowState::Running {
             return true;
         }
@@ -399,691 +698,369 @@ async fn is_busy(state: &crate::state::ServerState, user_key: Option<&str>) -> b
     false
 }
 
-/// Build a reqwest client that accepts self-signed certs (Torpi may use them).
-fn build_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(Duration::from_secs(10))
-        .build()
-        .expect("Failed to build HTTP client for THQ registration")
-}
-
-/// The registration/heartbeat loop: POST the entry immediately, then re-POST
-/// every heartbeat interval. `status` is recomputed every tick from live
-/// session state when `state` is provided. Failures are logged, never fatal.
-async fn registration_loop(
-    client: reqwest::Client,
-    url: String,
-    mut entry: AgentEntry,
-    interval_secs: u64,
-    bearer: Option<String>,
-    status_key: Option<String>,
-    state: Option<crate::state::ServerState>,
-    label: String,
-) {
-    let mut first = true;
-    loop {
-        entry.status = match state.as_ref() {
-            Some(state) => {
-                if is_busy(state, status_key.as_deref()).await {
-                    "running".to_string()
-                } else {
-                    "idle".to_string()
-                }
-            }
-            None => "idle".to_string(),
-        };
-        entry.last_seen = chrono::Utc::now().to_rfc3339();
-
-        let body = serde_json::to_value(&entry).unwrap_or_default();
-
-        let mut request = client.post(&url).json(&body);
-        if let Some(ref token) = bearer {
-            request = request.header("Authorization", format!("Bearer {}", token));
-        }
-
-        match request.send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
-                    if first {
-                        tracing::info!(
-                            "THQ registration successful: {} at {}",
-                            entry.name,
-                            entry.endpoint
-                        );
-                        first = false;
-                    } else {
-                        tracing::debug!("THQ heartbeat successful: {}", label);
-                    }
-                } else {
-                    let text = resp.text().await.unwrap_or_default();
-                    tracing::warn!(
-                        "THQ registration returned {}: {} ({})",
-                        status,
-                        text.chars().take(200).collect::<String>(),
-                        label
-                    );
-                }
-            }
-            Err(e) => {
-                if first {
-                    tracing::warn!("THQ registration failed (will retry): {} ({})", e, label);
-                } else {
-                    tracing::debug!("THQ heartbeat failed: {} ({})", e, label);
-                }
-            }
-        }
-
-        tokio::time::sleep(Duration::from_secs(interval_secs)).await;
-    }
-}
-
-/// Legacy single-process registration (pre-0.12 behavior). Used only when
-/// NO per-user `[thq]` entries exist.
-pub fn spawn(config: ThqConfig) {
-    let agent_id = match resolve_agent_id() {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!(
-                "Failed to resolve agent ID: {} — THQ registration disabled",
-                e
-            );
-            return;
-        }
-    };
-
-    tracing::info!(
-        "THQ registration enabled: agent={} (id={}) -> {}",
-        config.agent_name,
-        agent_id,
-        config.torpi_url
-    );
-
-    let entry = AgentEntry {
-        id: agent_id,
-        name: config.agent_name.clone(),
-        endpoint: config.advertise_url.clone(),
-        role: config.agent_role.clone(),
-        capabilities: config.capabilities.clone(),
-        status: "idle".to_string(),
-        tags: config.tags.clone(),
-        last_seen: chrono::Utc::now().to_rfc3339(),
-        owner_id: config.owner_id.clone(),
-    };
-
-    let url = format!("{}/thq/api/agents", config.torpi_url);
-    let bearer = config.registration_token.clone();
-
-    tokio::spawn(registration_loop(
-        build_http_client(),
-        url,
-        entry,
-        config.heartbeat_interval,
-        bearer,
-        None,
-        None,
-        config.agent_name,
-    ));
-}
-
-/// 16E: register EVERY agent-user found under `~/.trustee/users/` (per-user
-/// `[thq]` overlays); fall back to the legacy single-process registration
-/// only when none exist — so a legacy install keeps its exact behavior and
-/// an agents-as-users install never double-registers a machine entry.
-pub fn spawn_all(legacy: Option<ThqConfig>, state: crate::state::ServerState) {
-    let agents = discover_user_agents();
-    if agents.is_empty() {
-        match legacy {
-            Some(config) => {
-                tracing::info!(
-                    "THQ: no per-user [thq] entries under users/ — legacy single registration ({})",
-                    config.agent_name
-                );
-                spawn(config);
-            }
-            None => tracing::debug!("THQ registration not configured (no [thq] section)"),
-        }
-        return;
-    }
-
-    tracing::info!(
-        "THQ: registering {} agent-users from users/ (legacy_single=false)",
-        agents.len()
-    );
-    let client = build_http_client();
-
-    for agent in agents.iter() {
-        let label = format!("{} ({})", agent.config.agent_name, agent.user_hash);
-        let agent_id = match resolve_agent_id_at(&agent.user_home.join("agent_id")) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(
-                    "THQ: cannot resolve agent id for {} — skipping: {}",
-                    label,
-                    e
-                );
-                continue;
-            }
-        };
-        // Issue 8e0a1215: credential resolution is config-DECLARED, not
-        // code-guessed. An explicit [thq].service_token wins; absent →
-        // legacy scan; declared-but-unresolved → LOUD error, non-dispatchable.
-        let resolution = resolve_user_service_token(&agent.user_home, &agent.config);
-        let bearer = match &resolution {
-            ServiceTokenResolution::Resolved(token) => Some(token.clone()),
-            ServiceTokenResolution::Undeclared => {
-                tracing::error!(
-                    "THQ: agent {} has NO [thq].service_token declaration — dispatch credentials are \
-                     config-declared since api 0.13.0 (the hardcoded THQ/FAME/FARZAN/KANIDM key scan \
-                     was removed). Add service_token = \"${{YOUR_KEY}}\" to the [thq] section of {} — \
-                     agent NOT dispatchable until then.",
-                    label,
-                    agent.user_home.join("config").join("trustee.toml").display()
-                );
-                None
-            }
-            ServiceTokenResolution::DeclaredUnresolved { var } => {
-                tracing::error!(
-                    "THQ: agent {} declared [thq].service_token = \"${{{var}}}\" but {var} is NOT set in {} — \
-                     agent NOT dispatchable. Set the variable in the agent's .env (a placeholder value \
-                     like ${{...}} does not count) or fix the declaration.",
-                    label,
-                    agent.user_home.join(".env").display()
-                );
-                None
-            }
-        };
-        let url = format!("{}/thq/api/agents", agent.config.torpi_url);
-
-        // 16F: register the dispatch target so THQ-proxied sessions can be
-        // impersonated AS this agent-user (see crate::xagent).
-        if agent.config.owner_id.as_deref().map(str::len).unwrap_or(0) > 0 {
-            if !matches!(resolution, ServiceTokenResolution::Resolved(_)) {
-                // Already SCREAMED above — the agent stays out of the
-                // dispatch table (non-dispatchable), registration continues
-                // so the THQ UI still shows her. Never a silent skip.
-            } else {
-                state.thq_dispatch.insert(
-                    agent.config.agent_name.clone(),
-                    crate::state::ThqDispatchEntry {
-                        user_key: agent.config.owner_id.clone().unwrap_or_default(),
-                        service_token: bearer.clone(),
-                        issuer_url: read_overlay_service_issuer(&agent.user_home),
-                    },
-                );
-            }
-        } else {
-            tracing::warn!(
-                "THQ: agent-user {} has no [thq].owner_id — NOT dispatchable (16F)",
-                label
-            );
-        }
-
-        let entry = AgentEntry {
-            id: agent_id.clone(),
-            name: agent.config.agent_name.clone(),
-            endpoint: agent.config.advertise_url.clone(),
-            role: agent.config.agent_role.clone(),
-            capabilities: agent.config.capabilities.clone(),
-            status: "idle".to_string(),
-            tags: agent.config.tags.clone(),
-            last_seen: chrono::Utc::now().to_rfc3339(),
-            owner_id: agent.config.owner_id.clone(),
-        };
-
-        tracing::info!(
-            "THQ: agent-user {} -> {} as id {} (owner={})",
-            label,
-            agent.config.torpi_url,
-            agent_id,
-            agent.config.owner_id.as_deref().unwrap_or("<none>")
-        );
-
-        tokio::spawn(registration_loop(
-            client.clone(),
-            url,
-            entry,
-            agent.config.heartbeat_interval,
-            bearer,
-            agent.config.owner_id.clone(),
-            Some(state.clone()),
-            label,
-        ));
-    }
-}
-
-/// Shared test fixture: a fresh temp dir standing in for a user home.
-#[cfg(test)]
-fn temp_users_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("trustee-thq-test-{}-{}", tag, std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn tmp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trustee-thq3-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn full_toml() -> String {
+        r#"
+[thq]
+thq_url = "https://thq.tanbal.ir"
+instance_id = "6f635fe4-4a06-42b0-8a62-276383488a9c"
+advertise_url = "https://10.99.0.11:3000"
+runtime_name = "nox"
+heartbeat_interval = 30
+"#
+        .to_string()
+    }
+
+    // ── config ──────────────────────────────────────────────────────────
+
     #[test]
     fn parse_full_config() {
-        let toml = r#"
-[thq]
-torpi_url = "https://torpi.example.com"
-advertise_url = "https://10.0.0.5:3000"
-agent_name = "edge-paris"
-agent_role = "code-review"
-capabilities = ["rust", "docker"]
-tags = ["edge", "arm64"]
-heartbeat_interval = 60
-"#;
-        let cfg = ThqConfig::from_toml(toml).expect("should parse");
-        assert_eq!(cfg.torpi_url, "https://torpi.example.com");
-        assert_eq!(cfg.advertise_url, "https://10.0.0.5:3000");
-        assert_eq!(cfg.agent_name, "edge-paris");
-        assert_eq!(cfg.agent_role, "code-review");
-        assert_eq!(cfg.capabilities, vec!["rust", "docker"]);
-        assert_eq!(cfg.tags, vec!["edge", "arm64"]);
-        assert_eq!(cfg.heartbeat_interval, 60);
-        assert!(cfg.registration_token.is_none());
-        assert!(cfg.owner_id.is_none());
-    }
-
-    #[test]
-    fn parse_minimal_config() {
-        let toml = r#"
-[thq]
-torpi_url = "https://torpi.example.com/"
-advertise_url = "https://10.0.0.5:3000/"
-"#;
-        let cfg = ThqConfig::from_toml(toml).expect("should parse");
-        assert_eq!(cfg.torpi_url, "https://torpi.example.com"); // trailing slash trimmed
-        assert_eq!(cfg.advertise_url, "https://10.0.0.5:3000");
-        assert_eq!(cfg.agent_role, "general");
-        assert!(cfg.capabilities.is_empty());
-        assert!(cfg.tags.is_empty());
+        let cfg = ThqConfig::from_toml(&full_toml())
+            .expect("parse ok")
+            .expect("section present");
+        assert_eq!(cfg.thq_url, "https://thq.tanbal.ir");
+        assert_eq!(cfg.instance_id, "6f635fe4-4a06-42b0-8a62-276383488a9c");
+        assert_eq!(cfg.advertise_url, "https://10.99.0.11:3000");
+        assert_eq!(cfg.runtime_name, "nox");
         assert_eq!(cfg.heartbeat_interval, 30);
-        assert!(cfg.registration_token.is_none());
-        assert!(cfg.owner_id.is_none());
     }
 
     #[test]
-    fn parse_registration_token() {
+    fn parse_defaults_heartbeat_only() {
         let toml = r#"
 [thq]
-torpi_url = "https://torpi.example.com"
+thq_url = "https://thq.example.com"
+instance_id = "leaf-uuid"
 advertise_url = "https://10.0.0.5:3000"
-registration_token = "secret-agent-token"
+runtime_name = "edge"
 "#;
-        let cfg = ThqConfig::from_toml(toml).expect("should parse");
-        assert_eq!(
-            cfg.registration_token.as_deref(),
-            Some("secret-agent-token")
+        let cfg = ThqConfig::from_toml(toml).unwrap().unwrap();
+        assert_eq!(cfg.heartbeat_interval, 30, "default cadence");
+    }
+
+    #[test]
+    fn no_section_is_lane_off() {
+        assert!(ThqConfig::from_toml("[oidc]\nissuer_url = \"x\"\n")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn missing_required_keys_are_loud() {
+        for key in ["thq_url", "instance_id", "advertise_url", "runtime_name"] {
+            // build a full config minus one line
+            let broken: String = full_toml()
+                .lines()
+                .filter(|l| !l.starts_with(&format!("{key} =")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let err = ThqConfig::from_toml(&broken).expect_err("must be loud");
+            assert!(
+                err.contains(key),
+                "error must name the missing key {key}: {err}"
+            );
+        }
+    }
+
+    /// THE 405 INCIDENT: a `?instance=` in thq_url must never boot the
+    /// lane silently — it is the exact shape that swallowed every appended
+    /// path and landed on the dashboard.
+    #[test]
+    fn thq_url_with_instance_query_is_rejected() {
+        let toml = full_toml().replacen(
+            "thq_url = \"https://thq.tanbal.ir\"",
+            "thq_url = \"https://thq.tanbal.ir/?instance=6f635fe4-4a06-42b0-8a62-276383488a9c\"",
+            1,
         );
+        let err = ThqConfig::from_toml(&toml).expect_err("query in thq_url must fail loud");
+        assert!(err.contains("instance_id"), "error must redirect to instance_id: {err}");
     }
 
     #[test]
-    fn parse_owner_id() {
-        let toml = r#"
-[thq]
-torpi_url = "https://torpi.example.com"
-advertise_url = "https://10.0.0.5:3000"
-owner_id = "d0f5c4ba-9c10-4ff7-85a4-f2c0e588a55a"
-"#;
-        let cfg = ThqConfig::from_toml(toml).expect("should parse");
-        assert_eq!(
-            cfg.owner_id.as_deref(),
-            Some("d0f5c4ba-9c10-4ff7-85a4-f2c0e588a55a")
+    fn thq_url_with_path_is_rejected() {
+        let toml = full_toml().replacen(
+            "thq_url = \"https://thq.tanbal.ir\"",
+            "thq_url = \"https://thq.tanbal.ir/api/v2\"",
+            1,
         );
+        assert!(ThqConfig::from_toml(&toml).is_err());
     }
 
     #[test]
-    fn parse_empty_owner_id_is_none() {
-        let toml = r#"
-[thq]
-torpi_url = "https://torpi.example.com"
-advertise_url = "https://10.0.0.5:3000"
-owner_id = ""
-"#;
-        let cfg = ThqConfig::from_toml(toml).expect("should parse");
-        assert!(cfg.owner_id.is_none());
-    }
-
-    #[test]
-    fn parse_no_section_returns_none() {
-        let toml = r#"
-[oidc]
-issuer_url = "https://example.com"
-"#;
-        assert!(ThqConfig::from_toml(toml).is_none());
-    }
-
-    #[test]
-    fn parse_missing_required_returns_none() {
-        let toml = r#"
-[thq]
-torpi_url = "https://torpi.example.com"
-"#;
-        assert!(ThqConfig::from_toml(toml).is_none()); // missing advertise_url
-    }
-
-    #[test]
-    fn parse_overlay_with_mcp_and_thq() {
-        // 16E: the per-user overlay carries [mcp] AND [thq]; the parser must
-        // find [thq] and ignore the rest.
-        let toml = r#"
-[mcp]
-enabled = true
-
-[mcp.credentials.x]
-type = "service-account"
-service_token = "${FAME_SERVICE_TOKEN}"
-
-[[mcp.servers]]
-name = "fame"
-url = "https://fame.example/abc"
-credentials = "x"
-
-[thq]
-torpi_url = "https://torpi.example.com"
-advertise_url = "https://10.0.0.5:3000"
-agent_name = "ravand"
-owner_id = "1a71c077-b3b3-4581-b605-925c3f276f30"
-"#;
-        let cfg = ThqConfig::from_toml(toml).expect("should parse overlay");
-        assert_eq!(cfg.agent_name, "ravand");
-        assert_eq!(
-            cfg.owner_id.as_deref(),
-            Some("1a71c077-b3b3-4581-b605-925c3f276f30")
+    fn thq_url_trailing_slash_is_fine() {
+        let toml = full_toml().replacen(
+            "thq_url = \"https://thq.tanbal.ir\"",
+            "thq_url = \"https://thq.tanbal.ir/\"",
+            1,
         );
+        let cfg = ThqConfig::from_toml(&toml).unwrap().unwrap();
+        assert_eq!(cfg.thq_url, "https://thq.tanbal.ir", "normalized to origin");
+    }
+
+    /// No-compat ruling: the torpi-era keys are not translated, not
+    /// warned-about, not tolerated — they are ERRORS (the owner migrates
+    /// configs himself; code that guesses is extra code for nothing).
+    #[test]
+    fn registration_era_keys_are_rejected() {
+        // torpi_url instead of thq_url: missing-key error names thq_url.
+        let old_style = r#"
+[thq]
+torpi_url = "https://torpi.tanbal.ir"
+advertise_url = "https://10.0.0.5:3000"
+agent_name = "nox"
+"#;
+        let err = ThqConfig::from_toml(old_style).expect_err("must be loud");
+        assert!(err.contains("thq_url"), "must name thq_url: {err}");
+
+        // New keys present AND a leftover torpi_url: unknown-key error.
+        let leftover = format!("{}\ntorpi_url = \"https://x.example\"", full_toml());
+        let err = ThqConfig::from_toml(&leftover).expect_err("leftovers must fail loud");
+        assert!(err.contains("torpi_url"), "error must name the leftover key: {err}");
+
+        // agent_name (the pre-rename vocabulary) is equally foreign here.
+        let leftover_agent = format!("{}\nagent_name = \"nox\"", full_toml());
+        assert!(ThqConfig::from_toml(&leftover_agent).is_err());
     }
 
     #[test]
-    fn agent_entry_serializes_correctly() {
-        let entry = AgentEntry {
-            id: "test-id".to_string(),
-            name: "test".to_string(),
-            endpoint: "https://localhost:3000".to_string(),
-            role: "general".to_string(),
-            capabilities: vec!["rust".to_string()],
-            status: "idle".to_string(),
-            tags: vec![],
-            last_seen: "2025-01-01T00:00:00Z".to_string(),
-            owner_id: None,
+    fn heartbeat_zero_is_rejected() {
+        let toml = full_toml().replacen("heartbeat_interval = 30", "heartbeat_interval = 0", 1);
+        assert!(ThqConfig::from_toml(&toml).is_err());
+    }
+
+    #[test]
+    fn advertise_url_must_be_http() {
+        let toml = full_toml().replacen(
+            "advertise_url = \"https://10.99.0.11:3000\"",
+            "advertise_url = \"tcp://10.99.0.11:3000\"",
+            1,
+        );
+        assert!(ThqConfig::from_toml(&toml).is_err());
+    }
+
+    // ── identity / origin ───────────────────────────────────────────────
+
+    #[test]
+    fn runtime_key_matches_sha256() {
+        // Known vector: sha256("abc")
+        assert_eq!(
+            runtime_key("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(runtime_key("").len(), 64, "hex sha256");
+    }
+
+    /// THQ sends `scheme://host/?instance=<leaf>` in the callback — the
+    /// rogue-THQ guard must compare ORIGINS, never raw strings.
+    #[test]
+    fn origin_strips_instance_query_and_path() {
+        assert_eq!(
+            origin_of("https://thq.tanbal.ir/?instance=abc").as_deref(),
+            Some("https://thq.tanbal.ir")
+        );
+        assert_eq!(
+            origin_of("http://localhost:18710").as_deref(),
+            Some("http://localhost:18710")
+        );
+        assert_eq!(
+            origin_of("https://thq.tanbal.ir:8443/x?y=1").as_deref(),
+            Some("https://thq.tanbal.ir:8443")
+        );
+        assert_eq!(origin_of("not a url").as_deref(), None);
+        assert_eq!(origin_of("ftp://host/").as_deref(), None);
+    }
+
+    // ── credential store ────────────────────────────────────────────────
+
+    fn cfg() -> ThqConfig {
+        ThqConfig::from_toml(&full_toml()).unwrap().unwrap()
+    }
+
+    #[test]
+    fn credential_roundtrip_private() {
+        let dir = tmp("cred-round");
+        let path = dir.join("thq").join("runtime.json");
+        let enr = Enrollment::with_cred_path(cfg(), path.clone());
+        let cred = RuntimeCredential {
+            runtime_key: enr.key(),
+            secret: "s3cret-value".to_string(),
         };
-        let json = serde_json::to_string(&entry).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["id"], "test-id");
-        assert_eq!(v["status"], "idle");
-        assert!(v["capabilities"].is_array());
-        // owner_id should be absent when None (skip_serializing_if)
-        assert!(v.get("owner_id").is_none());
+        enr.save_credential(&cred).unwrap();
+
+        let loaded = enr.load_credential().expect("loads");
+        assert_eq!(loaded, cred);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(file_mode, 0o600, "secret file is owner-only");
+            let dir_mode = std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700, "thq/ namespace is owner-only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn agent_entry_serializes_owner_id() {
-        let entry = AgentEntry {
-            id: "test-id".to_string(),
-            name: "test".to_string(),
-            endpoint: "https://localhost:3000".to_string(),
-            role: "general".to_string(),
-            capabilities: vec!["rust".to_string()],
-            status: "idle".to_string(),
-            tags: vec![],
-            last_seen: "2025-01-01T00:00:00Z".to_string(),
-            owner_id: Some("user-uuid-123".to_string()),
+    fn corrupt_credential_yields_none() {
+        let dir = tmp("cred-corrupt");
+        let path = dir.join("runtime.json");
+        std::fs::write(&path, "{not json").unwrap();
+        let enr = Enrollment::with_cred_path(cfg(), path);
+        assert!(enr.load_credential().is_none(), "corruption self-heals via re-register");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// advertise_url changed ⇒ stored key no longer matches ⇒ the stale
+    /// secret is for ANOTHER runtime identity: invalid, must re-register.
+    #[test]
+    fn advertise_change_invalidates_stale_credential() {
+        let dir = tmp("cred-stale");
+        let path = dir.join("runtime.json");
+        let enr = Enrollment::with_cred_path(cfg(), path.clone());
+        let stale = RuntimeCredential {
+            runtime_key: runtime_key("https://OLD-ADVERTISE:3000"),
+            secret: "old".to_string(),
         };
-        let json = serde_json::to_string(&entry).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["owner_id"], "user-uuid-123");
-    }
-
-    // ── 16E tests ───────────────────────────────────────────────────────
-
-    /// Unique temp dir without the tempfile dev-dependency.
-    #[test]
-    fn discover_finds_only_users_with_thq() {
-        let base = temp_users_dir("discover");
-        let thq_overlay = format!(
-            "[mcp]\nenabled = true\n\n[thq]\ntorpi_url = \"https://torpi.example.com\"\nadvertise_url = \"https://10.0.0.5:3000\"\nagent_name = \"ravand\"\n"
-        );
-        for (hash, content) in [
-            ("aaaa1111", thq_overlay.as_str()),
-            ("bbbb2222", "[mcp]\nenabled = true\n"), // no thq
-            ("cccc3333", "not toml at all {{{"),     // unparsable
-        ] {
-            let dir = base.join(hash).join("config");
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("trustee.toml"), content).unwrap();
-        }
-
-        let found = discover_user_agents_in(&base);
-        assert_eq!(found.len(), 1, "only the [thq]-bearing user is discovered");
-        assert_eq!(found[0].user_hash, "aaaa1111");
-        assert_eq!(found[0].config.agent_name, "ravand");
-        assert_eq!(
-            found[0].user_home,
-            base.join("aaaa1111"),
-            "user_home points at the hash dir"
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn discover_is_deterministic_and_sorted() {
-        let base = temp_users_dir("sorted");
-        for hash in ["dddd4444", "bbbb2222", "cccc3333"] {
-            let dir = base.join(hash).join("config");
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(
-                dir.join("trustee.toml"),
-                "[thq]\ntorpi_url = \"https://t.example\"\nadvertise_url = \"https://10.0.0.5:3000\"\n",
-            )
-            .unwrap();
-        }
-        let found = discover_user_agents_in(&base);
-        let hashes: Vec<&str> = found.iter().map(|a| a.user_hash.as_str()).collect();
-        assert_eq!(hashes, vec!["bbbb2222", "cccc3333", "dddd4444"]);
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn discover_missing_dir_is_empty() {
-        let base = temp_users_dir("missing");
-        let found = discover_user_agents_in(&base.join("does-not-exist"));
-        assert!(found.is_empty());
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn resolve_agent_id_at_is_stable_and_persists() {
-        let base = temp_users_dir("agentid");
-        let id_file = base.join("agent_id");
-
-        let first = resolve_agent_id_at(&id_file).unwrap();
-        assert!(!first.is_empty());
-        assert!(id_file.exists(), "id persisted");
-
-        let second = resolve_agent_id_at(&id_file).unwrap();
-        assert_eq!(first, second, "id is stable across calls");
-
-        // Whitespace-padded existing id is trimmed, not regenerated.
-        std::fs::write(&id_file, format!("  {first}\n")).unwrap();
-        let third = resolve_agent_id_at(&id_file).unwrap();
-        assert_eq!(first, third);
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn read_overlay_service_issuer_picks_service_account_credential() {
-        let base = std::env::temp_dir().join(format!("trustee-thq-issuer-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let dir = base.join("config");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("trustee.toml"),
-            "[mcp.credentials.fame_service]\ntype = \"service-account\"\nservice_token = \"${FAME_SERVICE_TOKEN}\"\nissuer_url = \"https://idp.tanbal.ir/oauth2/openid/pdt-api\"\n\n[mcp.credentials.interactive]\ntype = \"interactive\"\nissuer_url = \"https://ignored.example/\"\n",
-        )
-        .unwrap();
-        let issuer = read_overlay_service_issuer(&base);
-        assert_eq!(
-            issuer.as_deref(),
-            Some("https://idp.tanbal.ir/oauth2/openid/pdt-api"),
-            "issuer must come from the service-account credential, not another type"
-        );
-        // No overlay file -> None.
-        assert!(read_overlay_service_issuer(&base.join("nope")).is_none());
-        let _ = std::fs::remove_dir_all(&base);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Issue 8e0a1215: [thq].service_token declared credential key
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod service_token_declaration_tests {
-    use super::*;
-
-    /// Minimal overlay TOML with an optional service_token declaration.
-    fn thq_toml(service_token: Option<&str>) -> String {
-        let mut s = String::from(
-            "[thq]\ntorpi_url = \"https://torpi.example.com\"\nadvertise_url = \"https://10.0.0.5:3000\"\n",
-        );
-        if let Some(st) = service_token {
-            s.push_str(&format!("service_token = \"{st}\"\n"));
-        }
-        s
-    }
-
-    #[test]
-    fn parse_declared_service_token_field() {
-        let cfg = ThqConfig::from_toml(&thq_toml(Some("${PAYDAR_SERVICE_ACCOUNT}")))
-            .expect("should parse");
-        assert_eq!(
-            cfg.service_token.as_deref(),
-            Some("${PAYDAR_SERVICE_ACCOUNT}"),
-            "declaration is stored verbatim; resolution happens at boot"
-        );
+        enr.save_credential(&stale).unwrap();
         assert!(
-            ThqConfig::from_toml(&thq_toml(None))
-                .unwrap()
-                .service_token
-                .is_none(),
-            "absent field = None (legacy path)"
+            enr.valid_credential().is_none(),
+            "stale-key credential must be treated as absent"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn declared_var_accepts_wrapped_and_bare_forms() {
-        assert_eq!(
-            declared_service_var("${PAYDAR_SERVICE_ACCOUNT}"),
-            "PAYDAR_SERVICE_ACCOUNT"
-        );
-        assert_eq!(
-            declared_service_var("  ${ PAYDAR_SERVICE_ACCOUNT }  "),
-            "PAYDAR_SERVICE_ACCOUNT"
-        );
-        assert_eq!(
-            declared_service_var("PAYDAR_SERVICE_ACCOUNT"),
-            "PAYDAR_SERVICE_ACCOUNT"
-        );
-        // Malformed input surfaces verbatim in the loud error, never swallowed.
-        assert_eq!(declared_service_var(""), "");
-        assert_eq!(declared_service_var("${"), "${");
+    fn forget_credential_is_tolerant() {
+        let dir = tmp("cred-forget");
+        let enr = Enrollment::with_cred_path(cfg(), dir.join("runtime.json"));
+        enr.forget_credential(); // absent file — no panic
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// THE PAYDAR CASE (live incident, issue 8e0a1215): an agent whose
-    /// credential lives under a key OUTSIDE the legacy four dispatches with
-    /// zero source changes — config-declared, not code-guessed.
-    #[test]
-    fn declared_field_wins_over_legacy_scan_with_custom_key_name() {
-        let base = temp_users_dir("declared-wins");
-        std::fs::write(
-            base.join(".env"),
-            "THQ_SERVICE_TOKEN=legacy-token\nPAYDAR_SERVICE_ACCOUNT=paydar-token\n",
-        )
-        .unwrap();
-        let cfg = ThqConfig::from_toml(&thq_toml(Some("${PAYDAR_SERVICE_ACCOUNT}"))).unwrap();
-        assert_eq!(
-            resolve_user_service_token(&base, &cfg),
-            ServiceTokenResolution::Resolved("paydar-token".to_string()),
-            "explicit declaration must win over the legacy priority list"
-        );
-        let _ = std::fs::remove_dir_all(&base);
+    // ── /thq/enroll receiver ────────────────────────────────────────────
+
+    use axum::response::Response;
+
+    async fn enroll(enr: &Enrollment, payload: &EnrollPayload) -> Response {
+        handle_enroll(axum::Extension(enr.clone()), Json(payload.clone()))
+            .await
+            .into_response()
     }
 
-    #[test]
-    fn declared_but_env_file_missing_is_loud_unresolved() {
-        let base = temp_users_dir("declared-no-env");
-        let cfg = ThqConfig::from_toml(&thq_toml(Some("${PAYDAR_SERVICE_ACCOUNT}"))).unwrap();
-        assert_eq!(
-            resolve_user_service_token(&base, &cfg),
-            ServiceTokenResolution::DeclaredUnresolved {
-                var: "PAYDAR_SERVICE_ACCOUNT".to_string()
-            },
-            ".env missing entirely → same loud path, never a silent skip"
-        );
-        let _ = std::fs::remove_dir_all(&base);
+    fn enroll_payload(enr: &Enrollment, thq_url: &str, instance: &str) -> EnrollPayload {
+        EnrollPayload {
+            thq_url: thq_url.to_string(),
+            runtime_id: enr.key(),
+            instance_id: instance.to_string(),
+            secret: "fresh-secret".to_string(),
+        }
     }
 
-    #[test]
-    fn declared_but_key_missing_from_env_is_loud_unresolved() {
-        let base = temp_users_dir("declared-no-key");
-        std::fs::write(base.join(".env"), "THQ_SERVICE_TOKEN=legacy-token\n").unwrap();
-        let cfg = ThqConfig::from_toml(&thq_toml(Some("${PAYDAR_SERVICE_ACCOUNT}"))).unwrap();
-        assert_eq!(
-            resolve_user_service_token(&base, &cfg),
-            ServiceTokenResolution::DeclaredUnresolved {
-                var: "PAYDAR_SERVICE_ACCOUNT".to_string()
-            },
-            "legacy key presence must NOT satisfy a different declared key"
+    #[tokio::test]
+    async fn enroll_accepts_configured_thq_and_persists() {
+        let dir = tmp("enroll-ok");
+        let path = dir.join("runtime.json");
+        let enr = Enrollment::with_cred_path(cfg(), path.clone());
+        // THQ's live callback shape: origin + /?instance=<leaf>
+        let payload = enroll_payload(
+            &enr,
+            "https://thq.tanbal.ir/?instance=6f635fe4-4a06-42b0-8a62-276383488a9c",
+            "6f635fe4-4a06-42b0-8a62-276383488a9c",
         );
-        let _ = std::fs::remove_dir_all(&base);
+        let resp = enroll(&enr, &payload).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let cred = enr.load_credential().expect("credential persisted");
+        assert_eq!(cred.runtime_key, enr.key());
+        assert_eq!(cred.secret, "fresh-secret");
+        assert!(enr.valid_credential().is_some(), "immediately usable");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn declared_but_placeholder_value_is_unresolved() {
-        let base = temp_users_dir("declared-placeholder");
-        // House convention: a ${...} VALUE means the secret was never
-        // provisioned (house convention: a ${...} value is never provisioned).
-        std::fs::write(
-            base.join(".env"),
-            "PAYDAR_SERVICE_ACCOUNT=${PAYDAR_SERVICE_ACCOUNT}\n",
-        )
-        .unwrap();
-        let cfg = ThqConfig::from_toml(&thq_toml(Some("${PAYDAR_SERVICE_ACCOUNT}"))).unwrap();
-        assert_eq!(
-            resolve_user_service_token(&base, &cfg),
-            ServiceTokenResolution::DeclaredUnresolved {
-                var: "PAYDAR_SERVICE_ACCOUNT".to_string()
-            }
+    #[tokio::test]
+    async fn enroll_rejects_rogue_thq_origin() {
+        let dir = tmp("enroll-rogue");
+        let path = dir.join("runtime.json");
+        let enr = Enrollment::with_cred_path(cfg(), path.clone());
+        let payload = enroll_payload(&enr, "https://rogue.example/?instance=leaf", "6f635fe4-4a06-42b0-8a62-276383488a9c");
+        let resp = enroll(&enr, &payload).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+        assert!(
+            enr.load_credential().is_none(),
+            "a rogue THQ must never persist anything"
         );
-        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The hardcoded key scan is REMOVED (api 0.13.0): an agent declaring
-    /// nothing is `Undeclared` — non-dispatchable, loud at boot when
-    /// `owner_id` (dispatch intent) is set. Legacy keys in .env are INERT.
-    #[test]
-    fn undeclared_declaration_is_undeclared_even_with_legacy_keys_present() {
-        let base = temp_users_dir("undeclared");
-        // The blessed-four keys sit right there in .env — they no longer
-        // conjure a credential. Config declares or the agent is out.
-        std::fs::write(base.join(".env"), "THQ_SERVICE_TOKEN=thq-token\n").unwrap();
-        let cfg = ThqConfig::from_toml(&thq_toml(None)).unwrap();
-        assert_eq!(
-            resolve_user_service_token(&base, &cfg),
-            ServiceTokenResolution::Undeclared,
-            "no declaration → Undeclared; the legacy scan must NOT rescue it"
+    #[tokio::test]
+    async fn enroll_rejects_foreign_runtime_id() {
+        let dir = tmp("enroll-wrongid");
+        let enr = Enrollment::with_cred_path(cfg(), dir.join("runtime.json"));
+        let mut payload = enroll_payload(
+            &enr,
+            "https://thq.tanbal.ir/?instance=6f635fe4-4a06-42b0-8a62-276383488a9c",
+            "6f635fe4-4a06-42b0-8a62-276383488a9c",
         );
-        // Same answer with no .env at all — the outcome is config-shaped,
-        // not env-shaped.
-        assert_eq!(
-            resolve_user_service_token(&base.join("no-env"), &cfg),
-            ServiceTokenResolution::Undeclared
-        );
-        let _ = std::fs::remove_dir_all(&base);
+        payload.runtime_id = runtime_key("https://SOMEONE-ELSE:3000");
+        let resp = enroll(&enr, &payload).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+        assert!(enr.load_credential().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn enroll_rejects_wrong_instance() {
+        let dir = tmp("enroll-wronginst");
+        let enr = Enrollment::with_cred_path(cfg(), dir.join("runtime.json"));
+        let payload = enroll_payload(&enr, "https://thq.tanbal.ir/?instance=other-leaf", "other-leaf");
+        let resp = enroll(&enr, &payload).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+        assert!(enr.load_credential().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── process health ──────────────────────────────────────────────────
+
+    fn open_state() -> crate::state::ServerState {
+        let (session, _rx) = trustee_core::session::Session::new();
+        let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(16);
+        crate::state::ServerState::new(session, ws_tx, None)
+    }
+
+    #[tokio::test]
+    async fn fresh_process_is_not_busy() {
+        let state = open_state();
+        assert!(!process_busy(&state).await);
+    }
+
+    #[tokio::test]
+    async fn any_running_session_makes_process_busy() {
+        let state = open_state();
+        // default bucket, first session — flip it to Running
+        let session = {
+            let user = state.sessions.get("default").unwrap();
+            let entry = user.value().sessions.get("default").unwrap();
+            entry.value().session.clone()
+        };
+        session.lock().await.workflow_state = trustee_core::types::WorkflowState::Running;
+        assert!(process_busy(&state).await);
     }
 }

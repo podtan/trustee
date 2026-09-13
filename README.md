@@ -428,45 +428,42 @@ The `InteractiveTokenProvider` automatically:
 - Checks expiry and refreshes if a refresh token is available
 - Returns an error if the token is expired and cannot be refreshed
 
-## THQ Auto-Registration with Torpi
+## THQ Enrollment (runtime lane)
 
-Trustee can automatically register itself with a Torpi instance (Trustee Head Quarters) for centralized agent management. When a `[thq]` section is present in the config, a background task periodically registers this agent and sends heartbeats.
+Trustee can enroll with a THQ (Trustee Head Quarters) instance as a **runtime**. Three concepts live server-side in THQ — agent identities, runtimes, and profiles (the binding) — and the runtime is the trustee **process itself**: one loop per process, reporting process-wide health (any live session → `running`, else `idle`). Zero coupling to users/agents in this lane.
 
 ### Configuration
 
-Add a `[thq]` section to your trustee config (`~/.trustee/config/trustee.toml`):
+Add a `[thq]` section to your **main** config (`~/.trustee/config/trustee.toml`) — exactly five keys, nothing else:
 
 ```toml
 [thq]
-torpi_url = "https://torpi.tanbal.ir"
-advertise_url = "https://your-agent-host:3000"
-agent_name = "my-agent"
-owner_id = "your-jwt-sub-uuid"
+thq_url = "https://thq.tanbal.ir"                       # ORIGIN only — no path, no query
+instance_id = "6f635fe4-4a06-42b0-8a62-276383488a9c"   # the THQ leaf instance
+advertise_url = "https://10.99.0.11:3000"               # this process's reachable URL
+runtime_name = "nox"                                    # shown in THQ as "Runtime: nox"
+heartbeat_interval = 30                                 # pull/state cadence (seconds)
 ```
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `torpi_url` | Yes | — | Base URL of the Torpi instance |
-| `advertise_url` | Yes | — | This agent's externally-reachable URL |
-| `agent_name` | No | `$HOSTNAME` | Human-friendly name shown in THQ |
-| `agent_role` | No | `general` | Agent role (e.g. `code-review`, `deploy`) |
-| `capabilities` | No | `[]` | Skill list (e.g. `["rust", "docker"]`) |
-| `tags` | No | `[]` | Free-form tags for filtering |
-| `heartbeat_interval` | No | `30` | Re-registration interval in seconds |
-| `registration_token` | No | — | Optional Bearer token for Torpi auth |
-| `owner_id` | No | — | User's JWT `sub` UUID for per-user agent access |
+| `thq_url` | Yes | — | THQ's origin (`scheme://host[:port]` only; the leaf goes in `instance_id`) |
+| `instance_id` | Yes | — | The THQ leaf instance id, sent as `X-Instance-Id` on every call |
+| `advertise_url` | Yes | — | This runtime's externally-reachable URL (THQ calls back to it) |
+| `runtime_name` | Yes | — | The runtime's name (vocabulary: runtime, never agent) |
+| `heartbeat_interval` | No | `30` | Pull/state cadence in seconds |
 
-### Per-User Agent Access (owner_id)
+The section is strict: unknown keys — including registration-era ones (`torpi_url`, `agent_name`, …) — fail loudly at boot with the lane disabled. There is no compatibility translation; migrate the config.
 
-When `owner_id` is set, Torpi associates this agent with the specified user. This allows non-admin users to view and manage their own agents through the Torpi THQ UI without requiring admin privileges.
+### The enrollment lane
 
-The `owner_id` should be the user's JWT `sub` claim from your OIDC provider (e.g. Kanidm). Users can find their UUID by checking the Torpi `/api/permissions` endpoint while logged in.
+1. **Register** — once at boot (and only ever again after a 403), trustee POSTs `{name, advertise_url}` to `{thq_url}/api/v1/runtime/register` with the `X-Instance-Id` header. The runtime's identity is deterministic: `runtime_key = sha256(advertise_url)` — no ids pasted anywhere.
+2. **Callback** — THQ POSTs `{thq_url, runtime_id, instance_id, secret}` to `{advertise_url}/thq/enroll`. Trustee verifies the payload's origin against the configured `thq_url` (rogue-THQ guard), plus instance and runtime key, then persists the secret to `~/.trustee/thq/runtime.json` (0700/0600) — process-level, never under `users/`.
+3. **Pull & state** — every `heartbeat_interval`, GET `/api/v1/runtime/profiles` with `X-Runtime-Id` + `X-Runtime-Secret` (bound profiles with their identity payload are logged — wire-capture — not yet applied), and report process health per bound profile. A 403 drops the credential and re-registers: secret rotation self-heals.
 
-**Without `owner_id`**: The agent is visible only to Torpi admins (backward compatible).
+### Per-user dispatch lane (unchanged)
 
-### Agent Identity Persistence
-
-The agent generates a stable UUID v4 on first run and persists it to `~/.trustee/agent_id`, ensuring the same identity survives process restarts.
+Per-user `[thq]` overlay sections no longer drive registration. They still declare the **xagent dispatch** target for agents-as-users: `agent_name` (dispatch key), `owner_id` (the agent's Kanidm `sub`), and `service_token` (the env var holding her service credential). The old `~/.trustee/agent_id` files are obsolete in the runtime lane and ignored.
 
 ## Lifecycle Plugins
 

@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.18.0] - 2026-09-13
+
+### Changed
+
+- **THQ enrollment rewrite — trustee is now a THQ v0.3 RUNTIME, not a torpi agent (BREAKING: `[thq]` config)** — the torpi-era auto-registration is DELETED: `POST {torpi_url}/thq/api/agents` AgentEntry upsert-heartbeats (both the per-user 16E loops and the legacy single registration), `~/.trustee/agent_id` files, and every registration-era config key (`torpi_url`, `agent_name`, `agent_role`, `capabilities`, `tags`, `registration_token`). Replaced by the three-concept model (owner-ruled 2026-09-13): agent identities, runtimes, and profiles live in THQ, server-side; the RUNTIME is the trustee **process** — zero coupling to users/agents, one loop per process, health is process-wide (any live session → `running`, else `idle`). The new lane (contracts pinned from thq v0.3.2 source):
+  1. **Register once** at boot: `POST {thq_url}/api/v1/runtime/register` with `{name, advertise_url}` and `X-Instance-Id` (header, never in the path — `thq_url` is origin-only, so it survives API prefix bumps). The runtime's identity is deterministic: `runtime_key = sha256(advertise_url)`.
+  2. **Callback**: THQ POSTs `{thq_url, runtime_id, instance_id, secret}` to `{advertise_url}/thq/enroll` — trustee now SERVES that route, fail-closed: the origin of the payload's `thq_url` must equal the configured origin (rogue-THQ guard), and `instance_id`/`runtime_id` must match. The secret persists **process-level** at `~/.trustee/thq/runtime.json` (0700 dir / 0600 file) — its own `thq/` namespace, never under `users/`, firewalled from agent/user secrets; `runtime_key` is computed at boot, never pasted.
+  3. **Loop** (cadence = `heartbeat_interval`): `GET {thq_url}/api/v1/runtime/profiles` with `X-Instance-Id` + `X-Runtime-Id` + `X-Runtime-Secret` (runtime-credential-ONLY; the unauthenticated `?runtime_id=` form is dead since thq v0.3.1/v0.3.2) — the bound-profile payload is **logged in full (wire-capture) but NOT applied**; materialization is the next dispatch. Then `POST …/profiles/{id}/state` reports health per bound profile; any report flips the runtime `pending → active` (verified thq side). A **403 anywhere** drops the credential and re-registers — secret rotation self-heals; there is never periodic re-registration. Self-signed TLS accepted in both directions (10s timeouts).
+- **New `[thq]` config (main process trustee.toml ONLY — per-user overlays no longer drive registration): exactly five keys** — `thq_url` (**origin only**: scheme://host[:port]; a `?instance=` there was the 405 incident that started this rewrite — the leaf goes in `instance_id`), `instance_id` (the THQ leaf), `advertise_url`, `runtime_name` (renamed from `agent_name` — the vocabulary must say runtime; maps to the THQ register body `{name}` and the entity "Runtime: {name}"), `heartbeat_interval` (default 30, now the pull/state cadence). **No compatibility code, by ruling**: unknown keys — including `torpi_url`/`agent_name` leftovers — fail LOUD at boot with the lane disabled; configs are migrated, not translated by code.
+- **16F dispatch lane unchanged, extracted to `thq_dispatch`** — per-user `[thq]` overlays still build the xagent dispatch table (`agent_name` dispatch key, `owner_id` = the agent's Kanidm `sub`, `service_token` declaration with the loud undeclared/unresolved boot errors, service-account issuer pickup for auth fallbacks). The module split severs the concept boundary only: dispatch is agents-as-users, enrollment is the-runtime-the-process. Registration-era keys in overlays are inert.
+
+### Tests
+
+- api suite 74 → 90: +22 enrollment (five-key parse incl. the `?instance=` 405 regression and origin normalization; no-compat rejections for `torpi_url`/`agent_name`; credential store 0600/0700 roundtrip, corruption, stale-key-after-advertise-change; enroll receiver accept + rogue-THQ/wrong-runtime/wrong-instance 403s; process-wide health busy/idle), +16 dispatch-extraction parity (discovery, issuer pickup, service-token resolution incl. the Paydar case), replacing the 22 torpi-era registration tests. `test result: ok` 90/90 verbatim.
+
+Crate bumps: api `0.14.3`→`0.15.0`, trustee `0.17.4`→`0.18.0`.
+
 ## [0.17.4] - 2026-09-06
 
 ### Added
