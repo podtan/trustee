@@ -103,6 +103,27 @@ pub fn redact_payload(payload: &serde_json::Value) -> serde_json::Value {
     out
 }
 
+/// Compact, order-independent signature of the bound-profile set:
+/// sorted `profile_id:desired_state` pairs joined by commas. The pull
+/// loop compares it across cycles so the INFO summary fires on CHANGE,
+/// not on every heartbeat tick (2026-09-14: the every-cycle INFO dump
+/// of the full payload made logs unusable — owner report).
+fn bound_signature(profiles: &[serde_json::Value]) -> String {
+    let mut parts: Vec<String> = profiles
+        .iter()
+        .filter_map(|p| {
+            let pid = p.get("profile_id").and_then(|v| v.as_str())?;
+            let ds = p
+                .get("desired_state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            Some(format!("{pid}:{ds}"))
+        })
+        .collect();
+    parts.sort();
+    parts.join(",")
+}
+
 /// The origin (`scheme://host[:port]`) of a URL, or None if it does not
 /// parse / has no host / is not http(s).
 fn origin_of(url: &str) -> Option<String> {
@@ -393,6 +414,9 @@ impl Enrollment {
                 enrollment.0.cred_path.display()
             );
             let interval = Duration::from_secs(cfg.heartbeat_interval.max(1));
+            // Signature of the last logged bound set — None until the first
+            // successful pull. Drives change-only INFO logging.
+            let mut last_bound: Option<String> = None;
             loop {
                 match enrollment.valid_credential() {
                     Some(cred) => match pull(&client, &cfg, &cred).await {
@@ -403,13 +427,33 @@ impl Enrollment {
                             // and (b) APPLIED: every bound profile is
                             // materialized as an agent-user under
                             // ~/.trustee/users/{user_hash(profile_id)}.
+                            // 2026-09-14: the full (redacted) payload dump is
+                            // DEBUG-only — the pull runs every
+                            // heartbeat_interval (default 30s) and the
+                            // all-fields dump (mcp_servers, persona, model)
+                            // at INFO drowned every log sink (owner report).
+                            // INFO carries a one-line summary, only when the
+                            // bound set changes.
                             let total = payload
                                 .get("total")
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or_default();
-                            tracing::info!(
+                            let profiles = payload
+                                .get("profiles")
+                                .and_then(|v| v.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            let signature = bound_signature(&profiles);
+                            if last_bound.as_deref() != Some(signature.as_str()) {
+                                tracing::info!(
+                                    target: "thq",
+                                    "THQ pull: {total} profile(s) bound [{signature}]"
+                                );
+                                last_bound = Some(signature);
+                            }
+                            tracing::debug!(
                                 target: "thq",
-                                "THQ pull: {total} profile(s) bound — payload (secrets REDACTED): {}",
+                                "THQ pull payload (secrets REDACTED): {}",
                                 redact_payload(&payload)
                             );
                             let report = crate::materialize::apply_profiles(&enrollment.0.home, &payload);
@@ -424,11 +468,8 @@ impl Enrollment {
                             }
 
                             let busy = process_busy(&state).await;
-                            let profiles = payload
-                                .get("profiles")
-                                .and_then(|v| v.as_array())
-                                .cloned()
-                                .unwrap_or_default();
+                            // `profiles` was extracted above for the bound-set
+                            // signature — the same array drives the state report.
                             for p in &profiles {
                                 let Some(pid) = p.get("profile_id").and_then(|v| v.as_str())
                                 else {
@@ -753,6 +794,39 @@ async fn process_busy(state: &crate::state::ServerState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── bound-set signature (change-only pull logging) ──────────────
+
+    #[test]
+    fn bound_signature_is_order_independent_and_stable() {
+        let a = serde_json::json!({"profile_id":"b-id","desired_state":"running"});
+        let b = serde_json::json!({"profile_id":"a-id","desired_state":"stopped"});
+        assert_eq!(
+            bound_signature(&[a.clone(), b.clone()]),
+            bound_signature(&[b, a]),
+            "signature must not depend on payload order"
+        );
+    }
+
+    #[test]
+    fn bound_signature_changes_when_desired_state_flips() {
+        let running = serde_json::json!({"profile_id":"p","desired_state":"running"});
+        let stopped = serde_json::json!({"profile_id":"p","desired_state":"stopped"});
+        assert_ne!(
+            bound_signature(&[running]),
+            bound_signature(&[stopped]),
+            "a desired_state flip must re-trigger the INFO summary"
+        );
+    }
+
+    #[test]
+    fn bound_signature_skips_idless_profiles_and_defaults_unknown_state() {
+        let no_id = serde_json::json!({"desired_state":"running"});
+        let no_state = serde_json::json!({"profile_id":"p"});
+        assert_eq!(bound_signature(&[no_id.clone(), no_state]), "p:?");
+        assert_eq!(bound_signature(&[]), "");
+        assert_eq!(bound_signature(&[no_id]), "");
+    }
 
     fn tmp(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
