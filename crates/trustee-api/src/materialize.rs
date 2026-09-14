@@ -249,6 +249,7 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
     // fragment); anything unparsable is a LOUD per-profile skip — never a
     // silently-broken overlay for the whole process.
     let mut mcp_fragment = String::new();
+    let mut credential_names: Vec<String> = Vec::new();
     if !mcp_servers.trim().is_empty() {
         match mcp_servers.parse::<toml::Table>() {
             Ok(frag) => {
@@ -259,6 +260,9 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
                     Some(t) => t,
                     None => return Err("mcp_servers [mcp] is not a table".to_string()),
                 });
+                // Distinct credential names the servers reference — the
+                // secrets resolver may need them to map a bare value.
+                credential_names = mcp_credential_names(&mcp);
                 // serialize WITH the key context so [[mcp.servers]] keeps its
                 // full path (an inner-table serialization would emit bare
                 // [[servers]] — a different table in the overlay)
@@ -287,8 +291,8 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
             .map_err(|e| format!("serialize overlay: {e}"))?
     );
 
-    // --- secrets → .env (KEY=VALUE lines). Values NEVER logged. ---
-    let env_str = parse_env_lines(secrets);
+    // --- secrets → .env. Values NEVER logged — lengths/counts only. ---
+    let env_str = resolve_env_text(secrets, &credential_names)?;
 
     // --- fingerprint: skip the rewrite when nothing changed ---
     let mut hasher = Sha256::new();
@@ -355,25 +359,93 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
     Ok(ProfileOutcome::Applied)
 }
 
-/// Parse a secrets string (`KEY=VALUE` lines, `#` comments skipped) into
-/// `.env` file text. Empty input → empty file (the binding simply carries
-/// no secrets). Values are NOT validated beyond the split — they are
-/// opaque to the runtime.
-fn parse_env_lines(secrets: &str) -> String {
-    let mut out = String::from("# Materialized from THQ profile secrets — 0600, never logged.\n");
-    for line in secrets.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
+/// Distinct `credentials` names referenced by an `[mcp]` table's servers —
+/// the hooks a bare-value secrets string can be mapped to.
+fn mcp_credential_names(mcp: &toml::Value) -> Vec<String> {
+    let mut names: Vec<String> = mcp
+        .get("servers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.get("credentials").and_then(|v| v.as_str()))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Resolve the profile's `secrets` string into `.env` file text.
+///
+/// Contract (thq profile metadata): `KEY=VALUE` lines, `#` comments
+/// skipped. Two real-world shapes beyond the contract are honored rather
+/// than silently dropped — the 0.19.0/0.19.1 defect: a non-KEY=VALUE
+/// secrets string parsed to a header-only (effectively EMPTY) .env while
+/// the rest of the materialization succeeded, so the agent dir looked
+/// fine and the agent ran credential-less (owner report, 2026-09-14):
+///   - a JSON object of string values → flattened to KEY=VALUE;
+///   - a bare value (no `=` anywhere) → mapped to the SINGLE credential
+///     name the profile's mcp_servers reference.
+/// A bare value with zero or multiple distinct credential names is a
+/// LOUD per-profile failure — never a silent empty .env.
+/// Values are NEVER logged — only lengths/counts.
+fn resolve_env_text(secrets: &str, credential_names: &[String]) -> Result<String, String> {
+    const HEADER: &str = "# Materialized from THQ profile secrets — 0600, never logged.\n";
+    let trimmed = secrets.trim();
+    if trimmed.is_empty() {
+        return Ok(HEADER.to_string());
+    }
+
+    // KEY=VALUE lines (the contract).
+    let kv: Vec<(&str, &str)> = trimmed
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (k, v) = line.split_once('=')?;
             let k = k.trim();
-            if !k.is_empty() {
-                out.push_str(&format!("{k}={}\n", v.trim()));
+            if k.is_empty() {
+                return None;
+            }
+            Some((k, v.trim()))
+        })
+        .collect();
+    if !kv.is_empty() {
+        let mut out = String::from(HEADER);
+        for (k, v) in kv {
+            out.push_str(&format!("{k}={v}\n"));
+        }
+        return Ok(out);
+    }
+
+    // JSON object of string values.
+    if trimmed.starts_with('{') {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(trimmed) {
+            if !map.is_empty() && map.values().all(serde_json::Value::is_string) {
+                let mut out = String::from(HEADER);
+                for (k, v) in map {
+                    out.push_str(&format!("{k}={}\n", v.as_str().unwrap_or_default()));
+                }
+                return Ok(out);
             }
         }
     }
-    out
+
+    // Bare value → map to the single referenced credential name.
+    match credential_names {
+        [name] => Ok(format!("{HEADER}{name}={trimmed}\n")),
+        other => Err(format!(
+            "secrets is a bare value ({} chars, not KEY=VALUE or a JSON object) and the \
+             profile references {} credential name(s) — cannot map it to .env unambiguously",
+            trimmed.len(),
+            other.len(),
+        )),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -478,6 +550,68 @@ mod tests {
             ProfileOutcome::Unchanged
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn bare_secret_maps_to_single_mcp_credential() {
+        let home = tmp("bare1");
+        let mut payload = fixture_payload("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYXJ6YW4ifQ.sig");
+        payload["profiles"][0]["mcp_servers"] = json!(
+            "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"fame\"\nurl = \"https://fame.example\"\ncredentials = \"farzan_service_account\"\n"
+        );
+        let report = apply_profiles(&home, &payload);
+        assert!(
+            matches!(report.profiles[0].outcome, ProfileOutcome::Applied),
+            "got {:?}",
+            report.profiles[0].outcome
+        );
+        let env = std::fs::read_to_string(user_dir(&home, "prof-1111").join(".env")).unwrap();
+        assert!(
+            env.contains("farzan_service_account=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYXJ6YW4ifQ.sig\n"),
+            "bare value must map to the single referenced credential name"
+        );
+    }
+
+    #[test]
+    fn bare_secret_without_any_credential_name_fails_loud() {
+        let home = tmp("bare0");
+        let report = apply_profiles(&home, &fixture_payload("raw-token-no-equals"));
+        match &report.profiles[0].outcome {
+            ProfileOutcome::Failed { reason } => {
+                assert!(reason.contains("bare value"), "reason: {reason}");
+            }
+            other => panic!("expected loud failure, got {other:?}"),
+        }
+        assert!(
+            !user_dir(&home, "prof-1111").exists(),
+            "a failed secrets resolution must not leave a half-materialized dir"
+        );
+    }
+
+    #[test]
+    fn bare_secret_with_multiple_credential_names_fails_loud() {
+        let home = tmp("bare2");
+        let mut payload = fixture_payload("raw-token");
+        payload["profiles"][0]["mcp_servers"] = json!(
+            "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"a\"\nurl = \"https://a.example\"\ncredentials = \"cred_a\"\n\n[[mcp.servers]]\nname = \"b\"\nurl = \"https://b.example\"\ncredentials = \"cred_b\"\n"
+        );
+        let report = apply_profiles(&home, &payload);
+        assert!(matches!(
+            &report.profiles[0].outcome,
+            ProfileOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn json_object_secrets_flatten_to_env_entries() {
+        let home = tmp("jsonsec");
+        let payload =
+            fixture_payload(r#"{"farzan_service_account":"tok-1","other_key":"val-2"}"#);
+        let report = apply_profiles(&home, &payload);
+        assert!(matches!(report.profiles[0].outcome, ProfileOutcome::Applied));
+        let env = std::fs::read_to_string(user_dir(&home, "prof-1111").join(".env")).unwrap();
+        assert!(env.contains("farzan_service_account=tok-1\n"));
+        assert!(env.contains("other_key=val-2\n"));
     }
 
     #[test]
