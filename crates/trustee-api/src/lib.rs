@@ -8,6 +8,7 @@
 //! token. Otherwise, all endpoints are open.
 
 pub mod auth;
+pub mod identity;
 pub mod tls;
 mod routes;
 mod state;

@@ -22,6 +22,110 @@ use trustee_core::types::TuiMessage;
 use crate::auth::AuthState;
 
 // ---------------------------------------------------------------------------
+// 16F console dispatch: user-key pinning (nghr ec3e0622 companion)
+// ---------------------------------------------------------------------------
+
+tokio::task_local! {
+    /// When set (by the `/xagent/{agent}` dispatch prelude), ALL
+    /// user-key-derived resolution — home dir, session bucket, project id,
+    /// secrets merge, MCP loader cache — pins to THIS key: the THQ profile
+    /// binding id (the stable identity anchor), NOT the token's claims.
+    /// Old-world 16E agents carry their Kanidm sub here, making the override
+    /// a bit-identical no-op for them. The ec3e0622 guarantee: token claims
+    /// can never re-home a principal.
+    static USER_KEY_OVERRIDE: String;
+}
+
+/// The effective namespace key for `user_key` under the active dispatch
+/// scope (see [`USER_KEY_OVERRIDE`]).
+pub(crate) fn effective_user_key(user_key: &str) -> String {
+    USER_KEY_OVERRIDE
+        .try_with(|v| v.clone())
+        .unwrap_or_else(|_| user_key.to_string())
+}
+
+/// Wrap a dispatched handler so every user-key-derived resolution inside it
+/// pins to the binding's key (see [`USER_KEY_OVERRIDE`]).
+pub(crate) async fn in_dispatch_scope<F: std::future::Future>(
+    user_key: &str,
+    fut: F,
+) -> F::Output {
+    USER_KEY_OVERRIDE.scope(user_key.to_string(), fut).await
+}
+
+/// Deterministic re-link of pre-rotation homes (nghr ec3e0622 acceptance 3).
+///
+/// `users/home_links.json`: `{ "links": [ { "from_hash": "<data dir>",
+/// "to_hash": "<current claims-derived dir>" } ] }` — the data lives under
+/// `from_hash`; the claims-derived `to_hash` home is the (empty) one the
+/// rotation created. Applied at startup, idempotent:
+/// - `to` missing → rename `from` → `to` (config + sessions restored);
+/// - `to` exists but has ZERO entries → remove it, then rename;
+/// - `to` exists with content → LOUD skip (manual reconciliation required).
+pub fn apply_home_links() -> Vec<String> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let users = home.join(".trustee").join("users");
+    let map_path = users.join("home_links.json");
+    let Ok(text) = std::fs::read_to_string(&map_path) else {
+        return Vec::new();
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        tracing::warn!(
+            "home_links.json is not valid JSON — ignored: {}",
+            map_path.display()
+        );
+        return Vec::new();
+    };
+    let mut report = Vec::new();
+    if let Some(links) = doc.get("links").and_then(|v| v.as_array()) {
+        for l in links {
+            let (Some(from), Some(to)) = (
+                l.get("from_hash").and_then(|v| v.as_str()),
+                l.get("to_hash").and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            let from_dir = users.join(from);
+            let to_dir = users.join(to);
+            if !from_dir.exists() {
+                continue; // already applied (or never existed)
+            }
+            if to_dir.exists() {
+                let empty = std::fs::read_dir(&to_dir)
+                    .map(|it| it.count() == 0)
+                    .unwrap_or(false);
+                if !empty {
+                    let msg = format!(
+                        "home link {from} → {to}: target exists with content — NOT touched, reconcile manually"
+                    );
+                    tracing::warn!("home_links: {msg}");
+                    report.push(msg);
+                    continue;
+                }
+                let _ = std::fs::remove_dir(&to_dir);
+            }
+            match std::fs::rename(&from_dir, &to_dir) {
+                Ok(()) => {
+                    let msg = format!(
+                        "home link applied: {from} → {to} (config/sessions restored)"
+                    );
+                    tracing::info!("home_links: {msg}");
+                    report.push(msg);
+                }
+                Err(e) => {
+                    let msg = format!("home link {from} → {to} FAILED: {e}");
+                    tracing::warn!("home_links: {msg}");
+                    report.push(msg);
+                }
+            }
+        }
+    }
+    report
+}
+
+// ---------------------------------------------------------------------------
 // Multi-session types
 // ---------------------------------------------------------------------------
 
@@ -209,6 +313,10 @@ impl ServerState {
         ws_tx: broadcast::Sender<String>,
         auth: Option<Arc<AuthState>>,
     ) -> Self {
+        // nghr ec3e0622 acceptance 3: deterministic re-link of pre-rotation
+        // homes, applied once at startup (idempotent; every action logged).
+        apply_home_links();
+
         let sessions = Arc::new(DashMap::new());
 
         // Store the default user's UserSessions with an initial session
@@ -486,7 +594,8 @@ impl ServerState {
         if chain_id.is_empty() || !chain_id.starts_with("session_") {
             return None;
         }
-        let hash = trustee_core::user_hash(user_key);
+        let user_key = effective_user_key(user_key);
+        let hash = trustee_core::user_hash(&user_key);
         dirs::home_dir().map(|home| {
             home.join(".trustee")
                 .join("users")
@@ -866,7 +975,8 @@ impl ServerState {
     /// checkpoint data from disk (history, session list, session detail)
     /// and must NOT create ghost sessions as a side effect.
     pub fn get_user_home_dir(&self, user_key: &str) -> Option<std::path::PathBuf> {
-        let hash = trustee_core::user_hash(user_key);
+        let user_key = effective_user_key(user_key);
+        let hash = trustee_core::user_hash(&user_key);
         dirs::home_dir().map(|home| home.join(".trustee").join("users").join(&hash))
     }
 
@@ -887,7 +997,8 @@ impl ServerState {
     /// Hashing goes through the single consolidated [`trustee_core::user_hash`]
     /// so the web path and the CLI path can never drift apart.
     fn apply_user_isolation(&self, session: &mut Session, user_key: &str) {
-        let user_hash = trustee_core::user_hash(user_key);
+        let user_key = effective_user_key(user_key);
+        let user_hash = trustee_core::user_hash(&user_key);
 
         // Set per-user home directory for checkpoint isolation
         let user_home = if let Some(home) = dirs::home_dir() {
@@ -1106,10 +1217,11 @@ impl ServerState {
         user_key: &str,
         token_store: &Arc<pep::MemoryTokenStore>,
     ) -> Result<Option<std::sync::Arc<abk::agent::McpToolLoader>>, String> {
-        let user_hash = trustee_core::user_hash(user_key);
+        let user_key = effective_user_key(user_key);
+        let user_hash = trustee_core::user_hash(&user_key);
 
         // Effective per-user config — the fingerprint source of truth.
-        let resolved = self.resolve_user_config(user_key);
+        let resolved = self.resolve_user_config(&user_key);
         let fingerprint = fingerprint_mcp_section(resolved.as_deref());
 
         // Fast path: fresh, non-degraded entry.
@@ -1643,6 +1755,29 @@ mod tests {
         let (session, _rx) = Session::new();
         let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(16);
         ServerState::new(session, ws_tx, None)
+    }
+
+    #[tokio::test]
+    async fn dispatch_scope_pins_user_key_resolution() {
+        // THE 16F pin (ec3e0622 companion): inside the dispatch scope, EVERY
+        // user-key-derived resolution lands in the binding's home — the
+        // caller's own key (and its claims) become irrelevant.
+        let state = test_state();
+        let caller = "some-human-sub";
+        let plain_home = state.get_user_home_dir(caller).unwrap();
+        let pinned_key = "prof-1234";
+        let pinned_home = in_dispatch_scope(pinned_key, async {
+            state.get_user_home_dir(caller).unwrap()
+        })
+        .await;
+        let users_root = dirs::home_dir().unwrap().join(".trustee").join("users");
+        assert_eq!(plain_home, users_root.join(trustee_core::user_hash(caller)));
+        assert_eq!(
+            pinned_home,
+            users_root.join(trustee_core::user_hash(pinned_key)),
+            "dispatch scope must pin resolution to the binding key"
+        );
+        assert_ne!(plain_home, pinned_home);
     }
 
     /// Unique temp dir with a `config/` subdir (std-only; no tempfile dep).

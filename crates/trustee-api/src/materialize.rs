@@ -281,6 +281,30 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
             }
         }
     }
+
+    // Console dispatch anchor (2026-09-14): [thq] makes the materialized
+    // user a 16F dispatch target — the xagent wrapper pins ALL user-key
+    // resolution to entry.user_key, so owner_id here is the STABLE binding
+    // id (the profile id), never a mutable IdP claim (the ec3e0622 class).
+    // Exactly one identity credential = the impersonation source; zero or
+    // several → the profile stays console-inert (loud INFO, never silent).
+    if credential_names.len() == 1 {
+        let mut thq = toml::Table::new();
+        thq.insert("agent_name".into(), toml::Value::String(name.clone()));
+        thq.insert("owner_id".into(), toml::Value::String(profile_id.to_string()));
+        thq.insert(
+            "service_token".into(),
+            toml::Value::String(credential_names[0].clone()),
+        );
+        overlay.insert("thq".into(), toml::Value::Table(thq));
+    } else if !credential_names.is_empty() {
+        tracing::info!(
+            target: "thq",
+            "THQ apply: profile {profile_id} carries {} identity credentials — \
+             no [thq] dispatch anchor (console dispatch needs exactly one)",
+            credential_names.len()
+        );
+    }
     let header = format!(
         "# Materialized by trustee from THQ — profile {profile_id}, identity {identity_id}.\n\
          # DO NOT HAND-EDIT: the next materialization pull rewrites changed content.\n"
@@ -550,6 +574,60 @@ mod tests {
             ProfileOutcome::Unchanged
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn materialized_overlay_carries_thq_dispatch_anchor() {
+        let home = tmp("thqanchor");
+        let mut payload = fixture_payload("k=v");
+        payload["profiles"][0]["mcp_servers"] = json!(
+            "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"fame\"\nurl = \"https://fame.example\"\ncredentials = \"farzan_service_account\"\n"
+        );
+        let report = apply_profiles(&home, &payload);
+        assert!(matches!(report.profiles[0].outcome, ProfileOutcome::Applied));
+        let overlay = std::fs::read_to_string(
+            user_dir(&home, "prof-1111").join("config/trustee.toml"),
+        )
+        .unwrap();
+        let table: toml::Table = overlay.parse().unwrap();
+        let thq = table
+            .get("thq")
+            .expect("[thq] dispatch anchor missing from materialized overlay")
+            .as_table()
+            .unwrap();
+        assert_eq!(
+            thq.get("agent_name").and_then(|v| v.as_str()),
+            Some("Farzan"),
+            "agent_name must be the title-stripped profile name (0.19.1 naming rule)"
+        );
+        assert_eq!(
+            thq.get("owner_id").and_then(|v| v.as_str()),
+            Some("prof-1111"),
+            "owner_id must be the STABLE binding id (the profile id), never a claim"
+        );
+        assert_eq!(
+            thq.get("service_token").and_then(|v| v.as_str()),
+            Some("farzan_service_account")
+        );
+    }
+
+    #[test]
+    fn multi_credential_profiles_stay_console_inert() {
+        let home = tmp("thqmulti");
+        let mut payload = fixture_payload("k=v");
+        payload["profiles"][0]["mcp_servers"] = json!(
+            "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"a\"\nurl = \"https://a.example\"\ncredentials = \"cred_a\"\n\n[[mcp.servers]]\nname = \"b\"\nurl = \"https://b.example\"\ncredentials = \"cred_b\"\n"
+        );
+        let report = apply_profiles(&home, &payload);
+        assert!(matches!(report.profiles[0].outcome, ProfileOutcome::Applied));
+        let overlay = std::fs::read_to_string(
+            user_dir(&home, "prof-1111").join("config/trustee.toml"),
+        )
+        .unwrap();
+        assert!(
+            !overlay.contains("[thq]"),
+            "multi-credential profile must not emit a dispatch anchor"
+        );
     }
 
     #[test]

@@ -28,6 +28,7 @@ use pep::oidc::pkce_cookie::PkceCookieManager;
 use pep::oidc_client::OidcClient;
 use pep::oidc_resource_server::ResourceServerClient;
 use pep::session_manager::WebSessionManager;
+use crate::identity::IdentityRegistry;
 use pep::{DevConfig, JwtClaims, JwtValidationOptions, OidcClientConfig};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -356,6 +357,10 @@ pub struct AuthState {
     /// AUTHN-only token-validation cache (issue c41eb9d7). NEVER gates Cedar:
     /// per-action authorization still runs per-request on the cached principal.
     validation_cache: Arc<ValidationCache>,
+    /// ec3e0622 root-cause fix: stable identity pins (sub → user_key), derived
+    /// ONCE at first sighting and never recomputed from claims. Agents bypass
+    /// it (their key is already the immutable sub).
+    pub identity_registry: IdentityRegistry,
 }
 
 impl AuthState {
@@ -393,7 +398,20 @@ impl AuthState {
             cedar_authorizer,
             issuer_fallbacks: Vec::new(),
             validation_cache: Arc::new(ValidationCache::new()),
+            identity_registry: IdentityRegistry::from_default_home(),
         }
+    }
+
+    /// ec3e0622 root-cause fix: resolve the namespace key THROUGH the pin
+    /// registry — the 16D derivation is consulted exactly ONCE per principal
+    /// (first sighting) and then never again. Claims may gate PERMISSIONS
+    /// (Cedar) but can no longer rotate the user's home directory. Agents
+    /// bypass the registry (their key is the immutable sub, per 16E).
+    pub fn resolve_user_key(&self, claims: &JwtClaims) -> String {
+        if PrincipalKind::from_role(claim_role(claims).as_deref()) == PrincipalKind::Agent {
+            return claims.sub.clone();
+        }
+        self.identity_registry.pin(claims.sub.as_str(), &jwt_user_key(claims))
     }
 
     /// 16F: set the service-account issuer fallback candidates.
@@ -986,7 +1004,7 @@ pub async fn check_auth(
                 if auth.check_cedar_authorized(&claims, action).is_err() {
                     return Err(StatusCode::FORBIDDEN);
                 }
-                Ok((None, jwt_user_key(&claims)))
+                Ok((None, auth.resolve_user_key(&claims)))
             }
             Err(e) => {
                 tracing::warn!("Bearer token validation failed: {}", e);
@@ -1034,7 +1052,7 @@ pub async fn check_auth(
                     SESSION_COOKIE_MAX_AGE,
                     secure,
                 );
-                Ok((Some(cookie.to_string()), jwt_user_key(&claims)))
+                Ok((Some(cookie.to_string()), auth.resolve_user_key(&claims)))
             }
             Err(e) => {
                 // Token was returned but JWT validation failed (e.g. ExpiredSignature
@@ -1057,7 +1075,7 @@ pub async fn check_auth(
                                 SESSION_COOKIE_MAX_AGE,
                                 secure,
                             );
-                            Ok((Some(cookie.to_string()), jwt_user_key(&claims)))
+                            Ok((Some(cookie.to_string()), auth.resolve_user_key(&claims)))
                         }
                         Err(e2) => {
                             tracing::warn!(

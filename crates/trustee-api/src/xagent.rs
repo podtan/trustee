@@ -36,7 +36,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 use crate::routes;
-use crate::state::ServerState;
+use crate::state::{ServerState, ThqDispatchEntry};
 
 /// Resolve the dispatch target and rebuild the inner request headers with
 /// the AGENT's Bearer (cookie stripped). Shared prelude of every wrapper.
@@ -44,7 +44,7 @@ async fn dispatch_context(
     state: &ServerState,
     agent: &str,
     headers: &HeaderMap,
-) -> Result<HeaderMap, (StatusCode, String)> {
+) -> Result<(HeaderMap, ThqDispatchEntry), (StatusCode, String)> {
     let Some(entry) = state.thq_dispatch.get(agent).map(|e| e.clone()) else {
         return Err((StatusCode::NOT_FOUND, format!("unknown agent: {agent}")));
     };
@@ -73,7 +73,7 @@ async fn dispatch_context(
         // which check_auth resolves as the open-mode "default" user.
         inner.remove(header::AUTHORIZATION);
         inner.remove(header::COOKIE);
-        return Ok(inner);
+        return Ok((inner, entry.clone()));
     };
 
     let Some(ref service_token) = entry.service_token else {
@@ -99,7 +99,7 @@ async fn dispatch_context(
                 })?,
             );
             inner.remove(header::COOKIE);
-            return Ok(inner);
+            return Ok((inner, entry.clone()));
         }
     }
 
@@ -133,7 +133,7 @@ async fn dispatch_context(
         })?,
     );
     inner.remove(header::COOKIE);
-    Ok(inner)
+    Ok((inner, entry))
 }
 
 /// THQ polls `{advertise_url}/api/v1/health` for liveness — resolve the agent
@@ -150,8 +150,8 @@ pub async fn x_list_sessions(
     Path(agent): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let inner = dispatch_context(&state, &agent, &headers).await?;
-    routes::list_sessions(State(state), inner).await
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    crate::state::in_dispatch_scope(&entry.user_key, routes::list_sessions(State(state), inner)).await
 }
 
 pub async fn x_create_session(
@@ -160,13 +160,13 @@ pub async fn x_create_session(
     headers: HeaderMap,
     Json(mut req): Json<routes::CreateSessionRequest>,
 ) -> Result<Response, (StatusCode, String)> {
-    let inner = dispatch_context(&state, &agent, &headers).await?;
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
     // Identity is NOT injected here: an dispatched session's persona comes
     // from the agent's OWN overlay config ([lifecycle].system_template in
     // her ~/.trustee/users/<hash>/config/trustee.toml — allowlisted since
     // the xagent-persona change), falling back to the shared config default.
     // An explicit identity in the create body still wins (caller override).
-    routes::create_session(State(state), inner, Json(req)).await
+    crate::state::in_dispatch_scope(&entry.user_key, routes::create_session(State(state), inner, Json(req))).await
 }
 
 pub async fn x_list_live_sessions(
@@ -174,8 +174,8 @@ pub async fn x_list_live_sessions(
     Path(agent): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let inner = dispatch_context(&state, &agent, &headers).await?;
-    routes::list_live_sessions(State(state), inner).await
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    crate::state::in_dispatch_scope(&entry.user_key, routes::list_live_sessions(State(state), inner)).await
 }
 
 pub async fn x_get_session_detail(
@@ -183,8 +183,8 @@ pub async fn x_get_session_detail(
     Path((agent, session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let inner = dispatch_context(&state, &agent, &headers).await?;
-    routes::get_session_detail(State(state), Path(session_id), inner).await
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    crate::state::in_dispatch_scope(&entry.user_key, routes::get_session_detail(State(state), Path(session_id), inner)).await
 }
 
 pub async fn x_destroy_session(
@@ -192,8 +192,8 @@ pub async fn x_destroy_session(
     Path((agent, session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let inner = dispatch_context(&state, &agent, &headers).await?;
-    routes::destroy_session(State(state), inner, Path(session_id)).await
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    crate::state::in_dispatch_scope(&entry.user_key, routes::destroy_session(State(state), inner, Path(session_id))).await
 }
 
 pub async fn x_get_live_session(
@@ -201,8 +201,8 @@ pub async fn x_get_live_session(
     Path((agent, session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let inner = dispatch_context(&state, &agent, &headers).await?;
-    routes::get_live_session(State(state), inner, Path(session_id)).await
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    crate::state::in_dispatch_scope(&entry.user_key, routes::get_live_session(State(state), inner, Path(session_id))).await
 }
 
 pub async fn x_resume_session(
@@ -211,8 +211,8 @@ pub async fn x_resume_session(
     headers: HeaderMap,
     body: Option<Json<routes::ResumeRequestBody>>,
 ) -> Result<Response, (StatusCode, String)> {
-    let inner = dispatch_context(&state, &agent, &headers).await?;
-    routes::resume_session(State(state), Path(checkpoint_session_id), inner, body).await
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    crate::state::in_dispatch_scope(&entry.user_key, routes::resume_session(State(state), Path(checkpoint_session_id), inner, body)).await
 }
 
 pub async fn x_get_session_history(
@@ -220,8 +220,8 @@ pub async fn x_get_session_history(
     Path((agent, session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let inner = dispatch_context(&state, &agent, &headers).await?;
-    routes::get_session_history(State(state), Path(session_id), inner).await
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    crate::state::in_dispatch_scope(&entry.user_key, routes::get_session_history(State(state), Path(session_id), inner)).await
 }
 
 pub async fn x_post_command_session(
@@ -230,8 +230,8 @@ pub async fn x_post_command_session(
     headers: HeaderMap,
     Json(req): Json<routes::CommandRequest>,
 ) -> Result<Response, (StatusCode, String)> {
-    let inner = dispatch_context(&state, &agent, &headers).await?;
-    routes::post_command_session(State(state), inner, Path(session_id), Json(req)).await
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    crate::state::in_dispatch_scope(&entry.user_key, routes::post_command_session(State(state), inner, Path(session_id), Json(req))).await
 }
 
 pub async fn x_post_cancel_session(
@@ -239,8 +239,8 @@ pub async fn x_post_cancel_session(
     Path((agent, session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let inner = dispatch_context(&state, &agent, &headers).await?;
-    routes::post_cancel_session(State(state), inner, Path(session_id)).await
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    crate::state::in_dispatch_scope(&entry.user_key, routes::post_cancel_session(State(state), inner, Path(session_id))).await
 }
 
 pub async fn x_post_handoff_session(
@@ -248,8 +248,8 @@ pub async fn x_post_handoff_session(
     Path((agent, session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let inner = dispatch_context(&state, &agent, &headers).await?;
-    routes::post_handoff_session(State(state), inner, Path(session_id)).await
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    crate::state::in_dispatch_scope(&entry.user_key, routes::post_handoff_session(State(state), inner, Path(session_id))).await
 }
 
 pub async fn x_ws_session_handler(
@@ -258,10 +258,14 @@ pub async fn x_ws_session_handler(
     Path((agent, session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let inner = dispatch_context(&state, &agent, &headers)
+    let (inner, entry) = dispatch_context(&state, &agent, &headers)
         .await
         .map_err(|(s, _)| s)?;
-    routes::ws_session_handler(ws, State(state), inner, Path(session_id)).await
+    crate::state::in_dispatch_scope(
+        &entry.user_key,
+        routes::ws_session_handler(ws, State(state), inner, Path(session_id)),
+    )
+    .await
 }
 
 pub async fn x_list_models(
@@ -269,8 +273,8 @@ pub async fn x_list_models(
     Path(agent): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    let inner = dispatch_context(&state, &agent, &headers).await?;
-    routes::list_models(State(state), inner).await
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    crate::state::in_dispatch_scope(&entry.user_key, routes::list_models(State(state), inner)).await
 }
 
 /// The `/xagent/{agent}/api/v1` route tree — merged into the main router.
@@ -401,7 +405,7 @@ mod tests {
                 issuer_url: Some("https://idp.tanbal.ir/oauth2/openid/pdt-api".to_string()),
             },
         );
-        let inner = dispatch_context(
+        let (inner, _entry) = dispatch_context(
             &state,
             "saman",
             &hdrs(&[
@@ -433,7 +437,7 @@ mod tests {
                 issuer_url: None,
             },
         );
-        let inner = dispatch_context(&state, "ravand", &hdrs(&[]))
+        let (inner, _entry) = dispatch_context(&state, "ravand", &hdrs(&[]))
             .await
             .unwrap();
         assert!(inner.get(header::AUTHORIZATION).is_none());
