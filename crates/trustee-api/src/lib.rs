@@ -11,6 +11,7 @@ pub mod auth;
 pub mod tls;
 mod routes;
 mod state;
+mod materialize;
 mod thq_dispatch;
 mod thq_register;
 pub mod xagent;

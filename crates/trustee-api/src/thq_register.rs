@@ -81,6 +81,28 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The ONLY form of the pull payload that may ever reach a log line: every
+/// profile's `secrets` value is replaced by a length note. Secret material
+/// travels to the credential-holder on the wire — never into logs
+/// (v0.19, owner + Paydar: the 0.18 payload log printed the full secrets
+/// JWT at info level).
+pub fn redact_payload(payload: &serde_json::Value) -> serde_json::Value {
+    let mut out = payload.clone();
+    if let Some(profiles) = out.get_mut("profiles").and_then(|v| v.as_array_mut()) {
+        for p in profiles.iter_mut() {
+            if let Some(secret) = p.get("secrets").and_then(|v| v.as_str()) {
+                let len = secret.len();
+                p["secrets"] = serde_json::json!(if len > 0 {
+                    format!("<redacted:{len} chars>")
+                } else {
+                    String::new()
+                });
+            }
+        }
+    }
+    out
+}
+
 /// The origin (`scheme://host[:port]`) of a URL, or None if it does not
 /// parse / has no host / is not http(s).
 fn origin_of(url: &str) -> Option<String> {
@@ -269,6 +291,9 @@ struct EnrollmentInner {
     config: ThqConfig,
     /// Where the runtime credential lives (injectable for tests).
     cred_path: PathBuf,
+    /// The ~/.trustee root — the materialization applier writes bound
+    /// profiles under `{home}/users/{user_hash(profile_id)}/`.
+    home: PathBuf,
     /// Fired when the enroll handler persists a fresh secret — wakes the
     /// loop out of its post-register wait. Correctness does NOT depend on
     /// the notify (the loop re-reads the file each cycle); it only kills
@@ -282,11 +307,19 @@ impl Enrollment {
         Self::with_cred_path(config, default_credential_path())
     }
 
-    /// Testable handle with an explicit credential path.
+    /// Testable handle with an explicit credential path. The materialization
+    /// home is derived as the credential's grandparent
+    /// (`~/.trustee/thq/runtime.json` → `~/.trustee`).
     pub fn with_cred_path(config: ThqConfig, cred_path: PathBuf) -> Self {
+        let home = cred_path
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
         Self(Arc::new(EnrollmentInner {
             config,
             cred_path,
+            home,
             notify: tokio::sync::Notify::new(),
         }))
     }
@@ -364,16 +397,28 @@ impl Enrollment {
                 match enrollment.valid_credential() {
                     Some(cred) => match pull(&client, &cfg, &cred).await {
                         PullOutcome::Ok(payload) => {
-                            // Wire-capture ruling: the pull payload is LOGGED
-                            // in full, never applied in this release.
+                            // v0.19: the payload is (a) LOGGED REDACTED — the
+                            // 0.18 full-payload info line printed the secrets
+                            // JWT, which is exactly what must never happen —
+                            // and (b) APPLIED: every bound profile is
+                            // materialized as an agent-user under
+                            // ~/.trustee/users/{user_hash(profile_id)}.
                             let total = payload
                                 .get("total")
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or_default();
                             tracing::info!(
                                 target: "thq",
-                                "THQ pull: {total} profile(s) bound — payload (logged, NOT applied): {payload}"
+                                "THQ pull: {total} profile(s) bound — payload (secrets REDACTED): {}",
+                                redact_payload(&payload)
                             );
+                            let report = crate::materialize::apply_profiles(&enrollment.0.home, &payload);
+                            if !report.applied.is_empty() {
+                                tracing::info!(target: "thq", "THQ apply: {} profile(s) materialized", report.applied.len());
+                            }
+                            for (id, reason) in &report.failed {
+                                tracing::warn!(target: "thq", "THQ apply: profile {id} FAILED: {reason}");
+                            }
 
                             let busy = process_busy(&state).await;
                             let profiles = payload
@@ -563,6 +608,7 @@ async fn register_once(client: &reqwest::Client, cfg: &ThqConfig) {
     let body = json!({
         "name": cfg.runtime_name,
         "advertise_url": cfg.advertise_url,
+        "version": env!("CARGO_PKG_VERSION"),
     });
     match client
         .post(&url)
@@ -643,6 +689,7 @@ async fn report_state(
     let observed = if busy { "running" } else { "idle" };
     let body = json!({
         "observed_state": observed,
+        "version": env!("CARGO_PKG_VERSION"),
         "detail": if busy {
             "process health: live session(s) present"
         } else {
