@@ -1,0 +1,4 @@
+# Keep the build context small — target/ alone is multiple GB.
+target
+.git
+*.log
