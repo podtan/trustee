@@ -413,11 +413,14 @@ impl Enrollment {
                                 redact_payload(&payload)
                             );
                             let report = crate::materialize::apply_profiles(&enrollment.0.home, &payload);
-                            if !report.applied.is_empty() {
-                                tracing::info!(target: "thq", "THQ apply: {} profile(s) materialized", report.applied.len());
+                            let applied = report.applied().count();
+                            if applied > 0 {
+                                tracing::info!(target: "thq", "THQ apply: {applied} profile(s) materialized");
                             }
-                            for (id, reason) in &report.failed {
-                                tracing::warn!(target: "thq", "THQ apply: profile {id} FAILED: {reason}");
+                            for pr in &report.profiles {
+                                if let crate::materialize::ProfileOutcome::Failed { reason } = &pr.outcome {
+                                    tracing::warn!(target: "thq", "THQ apply: profile {} FAILED: {reason}", pr.profile_id);
+                                }
                             }
 
                             let busy = process_busy(&state).await;
@@ -431,7 +434,11 @@ impl Enrollment {
                                 else {
                                     continue;
                                 };
-                                match report_state(&client, &cfg, &cred, pid, busy).await {
+                                // Launch-semantics contract (v0.19.1): the
+                                // observed string is PER PROFILE — derived
+                                // from what the applier actually did.
+                                let observed = report.observed_for(pid, busy);
+                                match report_state(&client, &cfg, &cred, pid, &observed).await {
                                     StateOutcome::Ok => {}
                                     StateOutcome::Forbidden => {
                                         tracing::warn!(
@@ -683,18 +690,12 @@ async fn report_state(
     cfg: &ThqConfig,
     cred: &RuntimeCredential,
     profile_id: &str,
-    busy: bool,
+    observed: &str,
 ) -> StateOutcome {
     let url = format!("{}/api/v1/runtime/profiles/{profile_id}/state", cfg.thq_url);
-    let observed = if busy { "running" } else { "idle" };
     let body = json!({
         "observed_state": observed,
         "version": env!("CARGO_PKG_VERSION"),
-        "detail": if busy {
-            "process health: live session(s) present"
-        } else {
-            "process health: no live sessions"
-        },
     });
     match client
         .post(&url)

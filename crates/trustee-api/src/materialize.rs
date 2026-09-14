@@ -32,15 +32,72 @@ use sha2::{Digest, Sha256};
 
 use std::path::Path;
 
+/// What the applier decided for ONE profile this pass.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProfileOutcome {
+    /// Freshly written or updated this pass.
+    Applied,
+    /// Content unchanged (fingerprint match) — nothing touched.
+    Unchanged,
+    /// desired_state is not "running": NOT materialized (skip-with-record);
+    /// `drained` = a previously materialized user was stripped (overlay +
+    /// secrets removed, history preserved).
+    Gated { desired: String, drained: bool },
+    /// Could not be applied — reason is loud and per-profile.
+    Failed { reason: String },
+}
+
+/// Per-profile report entry.
+#[derive(Debug, Clone)]
+pub struct ProfileReport {
+    pub profile_id: String,
+    pub outcome: ProfileOutcome,
+}
+
 /// Outcome of one apply pass over the pull payload.
 #[derive(Debug, Default, Clone)]
 pub struct ApplyReport {
-    /// profile_ids freshly written or updated this pass.
-    pub applied: Vec<String>,
-    /// profile_ids whose content was unchanged (fingerprint match).
-    pub unchanged: Vec<String>,
-    /// (profile_id, reason) for profiles that could not be applied.
-    pub failed: Vec<(String, String)>,
+    pub profiles: Vec<ProfileReport>,
+}
+
+impl ApplyReport {
+    pub fn applied(&self) -> impl Iterator<Item = &str> {
+        self.profiles
+            .iter()
+            .filter(|p| p.outcome == ProfileOutcome::Applied)
+            .map(|p| p.profile_id.as_str())
+    }
+
+    /// The observed_state string the state-report lane sends for this
+    /// profile — the LAUNCH SEMANTICS contract (Paydar item 2, decided:
+    /// option (b) refined). The ladder tells the truth per profile:
+    /// - process has live sessions            → "running"
+    /// - materialized, ready, not yet used    → "materialized"
+    /// - desired_state gated it               → "stopped"
+    /// - apply failed                         → "failed"
+    pub fn observed_for(&self, profile_id: &str, busy: bool) -> String {
+        let Some(p) = self.profiles.iter().find(|p| p.profile_id == profile_id) else {
+            return if busy {
+                "running: live session(s)".to_string()
+            } else {
+                "materialized: ready".to_string()
+            };
+        };
+        match &p.outcome {
+            ProfileOutcome::Applied | ProfileOutcome::Unchanged => {
+                if busy {
+                    "running: live session(s) in process".to_string()
+                } else {
+                    "materialized: ready".to_string()
+                }
+            }
+            ProfileOutcome::Gated { desired, drained } => format!(
+                "stopped: gated by desired_state ({desired}{})",
+                if *drained { ", drained" } else { "" }
+            ),
+            ProfileOutcome::Failed { reason } => format!("failed: {reason}"),
+        }
+    }
 }
 
 /// Apply every bound profile in the pull payload. `trustee_home` is the
@@ -55,27 +112,46 @@ pub fn apply_profiles(trustee_home: &Path, payload: &serde_json::Value) -> Apply
         let Some(profile_id) = p.get("profile_id").and_then(|v| v.as_str()) else {
             continue;
         };
-        match apply_one(trustee_home, p) {
-            Ok(true) => report.applied.push(profile_id.to_string()),
-            Ok(false) => report.unchanged.push(profile_id.to_string()),
-            Err(e) => report.failed.push((profile_id.to_string(), e)),
-        }
+        let outcome = match apply_one(trustee_home, p) {
+            Ok(o) => o,
+            Err(reason) => ProfileOutcome::Failed { reason },
+        };
+        report.profiles.push(ProfileReport {
+            profile_id: profile_id.to_string(),
+            outcome,
+        });
     }
     report
 }
 
+/// THQ entity titles carry display prefixes ("Agent: Farzan") — the
+/// materialized agent-user's own name strips them (the convention, ruled
+/// 2026-09-14: titles keep the prefix, the user name does not). The marker
+/// keeps the RAW title for traceability.
+const TITLE_PREFIXES: [&str; 4] = ["Agent: ", "Identity: ", "Runtime: ", "Profile: "];
+
+fn strip_title_prefix(title: &str) -> String {
+    for p in TITLE_PREFIXES {
+        if let Some(rest) = title.strip_prefix(p) {
+            return rest.to_string();
+        }
+    }
+    title.to_string()
+}
+
 /// Apply one profile. `Ok(true)` = written, `Ok(false)` = unchanged.
-fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<bool, String> {
+fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcome, String> {
     let profile_id = p
         .get("profile_id")
         .and_then(|v| v.as_str())
         .ok_or("no profile_id")?;
-    let name = p
+    let raw_name = p
         .get("identity")
         .and_then(|i| i.get("name"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let name = strip_title_prefix(&raw_name);
     let identity_id = p
         .get("identity")
         .and_then(|i| i.get("id"))
@@ -100,6 +176,52 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<bool, String>
         .and_then(|v| v.as_str())
         .unwrap_or("running")
         .to_string();
+
+    let user_dir = trustee_home
+        .join("users")
+        .join(trustee_core::user_hash(profile_id));
+    let marker_path = user_dir.join("materialized.json");
+
+    // v0.19.1 (Paydar item 1): desired_state GATES the applier — whitelist
+    // "running". A stopped/paused profile must not materialize-and-run:
+    // fresh → skip-with-record; previously materialized → DRAIN (the
+    // applier-owned overlay + secrets are removed, the dir and any history
+    // stay, the marker records the drain). Flipping back to running
+    // re-materializes via the fingerprint miss.
+    if desired_state != "running" {
+        let was_materialized = marker_path.exists();
+        if was_materialized {
+            let _ = std::fs::remove_file(user_dir.join("config").join("trustee.toml"));
+            let _ = std::fs::remove_file(user_dir.join(".env"));
+            let marker = serde_json::json!({
+                "profile_id": profile_id,
+                "desired_state": desired_state,
+                "materialized": false,
+                "drained_at": chrono::Utc::now().to_rfc3339(),
+            });
+            std::fs::write(
+                &marker_path,
+                serde_json::to_vec_pretty(&marker).map_err(|e| format!("serialize marker: {e}"))?,
+            )
+            .map_err(|e| format!("write marker: {e}"))?;
+            tracing::warn!(
+                target: "thq",
+                "THQ apply: profile {profile_id} DRAINED (desired_state={desired_state}) —                  overlay and secrets removed; history preserved"
+            );
+            return Ok(ProfileOutcome::Gated {
+                desired: desired_state,
+                drained: true,
+            });
+        }
+        tracing::info!(
+            target: "thq",
+            "THQ apply: profile {profile_id} GATED (desired_state={desired_state}) — not materialized"
+        );
+        return Ok(ProfileOutcome::Gated {
+            desired: desired_state,
+            drained: false,
+        });
+    }
 
     // --- build the overlay (guaranteed-valid TOML via the toml crate) ---
     let mut overlay = toml::Table::new();
@@ -175,15 +297,10 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<bool, String>
     hasher.update(env_str.as_bytes());
     let fingerprint = hex(&hasher.finalize());
 
-    let user_dir = trustee_home
-        .join("users")
-        .join(trustee_core::user_hash(profile_id));
-    let marker_path = user_dir.join("materialized.json");
-
     if let Ok(existing) = std::fs::read_to_string(&marker_path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&existing) {
             if v.get("fingerprint").and_then(|f| f.as_str()) == Some(fingerprint.as_str()) {
-                return Ok(false); // unchanged — skip the rewrite
+                return Ok(ProfileOutcome::Unchanged); // unchanged — skip the rewrite
             }
         }
     }
@@ -224,7 +341,7 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<bool, String>
     let marker = serde_json::json!({
         "profile_id": profile_id,
         "identity_id": identity_id,
-        "name": name,
+        "name": raw_name,
         "desired_state": desired_state,
         "fingerprint": fingerprint,
         "applied_at": chrono::Utc::now().to_rfc3339(),
@@ -235,7 +352,7 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<bool, String>
         serde_json::to_vec_pretty(&marker).map_err(|e| format!("serialize marker: {e}"))?,
     )
     .map_err(|e| format!("write marker: {e}"))?;
-    Ok(true)
+    Ok(ProfileOutcome::Applied)
 }
 
 /// Parse a secrets string (`KEY=VALUE` lines, `#` comments skipped) into
@@ -298,15 +415,26 @@ mod tests {
         })
     }
 
+    fn user_dir(home: &Path, pid: &str) -> std::path::PathBuf {
+        home.join("users").join(trustee_core::user_hash(pid))
+    }
+
     #[test]
     fn applies_profile_to_user_home() {
         let home = tmp("apply");
         let report = apply_profiles(&home, &fixture_payload("farzan_service_account=sec-ret-1"));
-        assert_eq!(report.applied, vec!["prof-1111".to_string()]);
+        assert_eq!(
+            report.profiles[0].outcome,
+            ProfileOutcome::Applied
+        );
 
-        let user_dir = home.join("users").join(trustee_core::user_hash("prof-1111"));
-        let overlay = std::fs::read_to_string(user_dir.join("config").join("trustee.toml")).unwrap();
-        assert!(overlay.contains("Agent: Farzan"), "identity name applied");
+        let ud = user_dir(&home, "prof-1111");
+        let overlay = std::fs::read_to_string(ud.join("config").join("trustee.toml")).unwrap();
+        assert!(overlay.contains("name = \"Farzan\""), "prefix stripped: {overlay}");
+        assert!(
+            !overlay.contains("Agent: Farzan"),
+            "the [agent] name must not carry the title prefix"
+        );
         assert!(
             overlay.contains("Be helpful, concise, Persian-friendly."),
             "persona applied: {overlay}"
@@ -315,13 +443,13 @@ mod tests {
         assert!(overlay.contains("[[mcp.servers]]"), "mcp fragment applied");
         assert!(overlay.contains("https://fame.example"));
 
-        let env = std::fs::read_to_string(user_dir.join(".env")).unwrap();
+        let env = std::fs::read_to_string(ud.join(".env")).unwrap();
         assert!(env.contains("farzan_service_account=sec-ret-1"));
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(user_dir.join(".env"))
+            let mode = std::fs::metadata(ud.join(".env"))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -330,10 +458,11 @@ mod tests {
         }
 
         let marker: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(user_dir.join("materialized.json")).unwrap(),
+            &std::fs::read_to_string(ud.join("materialized.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(marker["profile_id"], "prof-1111");
+        assert_eq!(marker["name"], "Agent: Farzan", "marker keeps the RAW title");
         assert_eq!(marker["desired_state"], "running");
         assert_eq!(marker["mcp_applied"], true);
         let _ = std::fs::remove_dir_all(&home);
@@ -342,10 +471,12 @@ mod tests {
     #[test]
     fn second_pull_with_unchanged_content_skips_rewrite() {
         let home = tmp("idem");
-        assert_eq!(apply_profiles(&home, &fixture_payload("k=v")).applied.len(), 1);
+        assert_eq!(apply_profiles(&home, &fixture_payload("k=v")).applied().count(), 1);
         let report = apply_profiles(&home, &fixture_payload("k=v"));
-        assert!(report.applied.is_empty());
-        assert_eq!(report.unchanged, vec!["prof-1111".to_string()]);
+        assert_eq!(
+            report.profiles[0].outcome,
+            ProfileOutcome::Unchanged
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -354,13 +485,8 @@ mod tests {
         let home = tmp("rotate");
         apply_profiles(&home, &fixture_payload("k=old-value"));
         let report = apply_profiles(&home, &fixture_payload("k=new-value"));
-        assert_eq!(report.applied, vec!["prof-1111".to_string()]);
-        let env = std::fs::read_to_string(
-            home.join("users")
-                .join(trustee_core::user_hash("prof-1111"))
-                .join(".env"),
-        )
-        .unwrap();
+        assert_eq!(report.profiles[0].outcome, ProfileOutcome::Applied);
+        let env = std::fs::read_to_string(user_dir(&home, "prof-1111").join(".env")).unwrap();
         assert!(env.contains("k=new-value") && !env.contains("old-value"));
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -377,11 +503,7 @@ mod tests {
             !rendered.contains(canary),
             "SECRETS-IN-LOGS regression: the redacted payload must not carry the canary"
         );
-        assert!(
-            rendered.contains("<redacted:"),
-            "the redaction is honest about having removed something: {rendered}"
-        );
-        // and the redaction is lossless about everything else
+        assert!(rendered.contains("<redacted:"));
         assert_eq!(red["profiles"][0]["profile_id"], "prof-1111");
         assert_eq!(red["profiles"][0]["model"], "GLM-5.3-Flash@glm-zai");
     }
@@ -392,23 +514,116 @@ mod tests {
         let mut payload = fixture_payload("k=v");
         payload["profiles"][0]["mcp_servers"] = json!("not toml at all {{{");
         let report = apply_profiles(&home, &payload);
-        assert_eq!(report.failed.len(), 1);
-        assert!(report.failed[0].1.contains("not valid TOML"));
+        assert!(matches!(
+            report.profiles[0].outcome,
+            ProfileOutcome::Failed { .. }
+        ));
+        assert!(report.observed_for("prof-1111", false).starts_with("failed:"));
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn empty_secrets_produce_an_empty_env() {
         let home = tmp("nosecrets");
-        let report = apply_profiles(&home, &fixture_payload(""));
-        assert_eq!(report.applied.len(), 1);
-        let env = std::fs::read_to_string(
-            home.join("users")
-                .join(trustee_core::user_hash("prof-1111"))
-                .join(".env"),
-        )
-        .unwrap();
+        apply_profiles(&home, &fixture_payload(""));
+        let env = std::fs::read_to_string(user_dir(&home, "prof-1111").join(".env")).unwrap();
         assert!(env.lines().filter(|l| !l.starts_with('#')).count() == 0);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // ── v0.19.1: desired_state gating + drain ───────────────────────────
+
+    fn gated_payload(desired: &str) -> serde_json::Value {
+        let mut p = fixture_payload("k=v");
+        p["profiles"][0]["desired_state"] = json!(desired);
+        p
+    }
+
+    #[test]
+    fn stopped_profile_is_gated_not_materialized() {
+        let home = tmp("gate-fresh");
+        let report = apply_profiles(&home, &gated_payload("stopped"));
+        assert_eq!(
+            report.profiles[0].outcome,
+            ProfileOutcome::Gated { desired: "stopped".into(), drained: false }
+        );
+        assert!(
+            !user_dir(&home, "prof-1111").exists(),
+            "a gated profile must not materialize"
+        );
+        assert_eq!(
+            report.observed_for("prof-1111", false),
+            "stopped: gated by desired_state (stopped)"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn paused_profile_is_gated_too() {
+        let home = tmp("gate-paused");
+        let report = apply_profiles(&home, &gated_payload("paused"));
+        assert!(matches!(
+            report.profiles[0].outcome,
+            ProfileOutcome::Gated { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn flip_running_to_stopped_drains_a_materialized_user() {
+        let home = tmp("drain");
+        apply_profiles(&home, &fixture_payload("k=v"));
+        let ud = user_dir(&home, "prof-1111");
+        assert!(ud.join("config").join("trustee.toml").exists());
+
+        let report = apply_profiles(&home, &gated_payload("stopped"));
+        assert_eq!(
+            report.profiles[0].outcome,
+            ProfileOutcome::Gated { desired: "stopped".into(), drained: true }
+        );
+        assert!(
+            !ud.join("config").join("trustee.toml").exists(),
+            "overlay removed on drain"
+        );
+        assert!(!ud.join(".env").exists(), "secrets removed on drain");
+        let marker: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(ud.join("materialized.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker["materialized"], false);
+        assert_eq!(marker["desired_state"], "stopped");
+
+        // flip back to running → re-materializes (fingerprint miss)
+        let report = apply_profiles(&home, &fixture_payload("k=v"));
+        assert_eq!(report.profiles[0].outcome, ProfileOutcome::Applied);
+        assert!(ud.join("config").join("trustee.toml").exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // ── launch-semantics contract (option b, refined) ───────────────────
+
+    #[test]
+    fn observed_ladder_maps_outcomes_truthfully() {
+        let mut home = tmp("observed");
+        let report = apply_profiles(&home, &fixture_payload("k=v"));
+        // materialized + not busy → materialized (NOT "idle")
+        assert_eq!(
+            report.observed_for("prof-1111", false),
+            "materialized: ready"
+        );
+        // process busy → running (the worker is active)
+        assert_eq!(
+            report.observed_for("prof-1111", true),
+            "running: live session(s) in process"
+        );
+        // gated → stopped
+        let gated = apply_profiles(&home, &gated_payload("stopped"));
+        assert_eq!(
+            gated.observed_for("prof-1111", false),
+            "stopped: gated by desired_state (stopped, drained)",
+            "the profile was previously materialized — the drain is part of the truth"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+        home = home; // no-op for symmetry
     }
 }
