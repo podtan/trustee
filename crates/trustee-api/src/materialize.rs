@@ -45,6 +45,11 @@ pub enum ProfileOutcome {
     Gated { desired: String, drained: bool },
     /// Could not be applied — reason is loud and per-profile.
     Failed { reason: String },
+    /// v0.19.5: the profile is GONE from the pull payload entirely (deleted
+    /// in THQ) — the applier reclaimed its materialization (overlay +
+    /// secrets + marker removed; dir and history preserved) and its 16F
+    /// dispatch entry leaves the table.
+    Reclaimed,
 }
 
 /// Per-profile report entry.
@@ -96,13 +101,20 @@ impl ApplyReport {
                 if *drained { ", drained" } else { "" }
             ),
             ProfileOutcome::Failed { reason } => format!("failed: {reason}"),
+            // Unreachable in practice: a reclaimed profile is no longer in
+            // the payload, so the state-report loop never asks for it. The
+            // arm keeps the match exhaustive and the contract honest.
+            ProfileOutcome::Reclaimed => "deleted in THQ: reclaimed".to_string(),
         }
     }
 }
 
-/// Apply every bound profile in the pull payload. `trustee_home` is the
-/// `~/.trustee` directory. Never panics on payload shapes — every profile
-/// is independent, failures are per-profile and loud.
+/// Apply every bound profile in the pull payload, then RECLAIM orphans:
+/// materialized users whose profile no longer appears in the payload
+/// (deleted in THQ) get their overlay + secrets + marker removed — loud,
+/// per-user, history preserved. `trustee_home` is the `~/.trustee`
+/// directory. Never panics on payload shapes — every profile is
+/// independent, failures are per-profile and loud.
 pub fn apply_profiles(trustee_home: &Path, payload: &serde_json::Value) -> ApplyReport {
     let mut report = ApplyReport::default();
     let Some(profiles) = payload.get("profiles").and_then(|v| v.as_array()) else {
@@ -121,7 +133,69 @@ pub fn apply_profiles(trustee_home: &Path, payload: &serde_json::Value) -> Apply
             outcome,
         });
     }
+    // v0.19.5: reconcile deletions — a profile missing from the payload was
+    // deleted in THQ; its materialized home must not linger as a ghost
+    // (dispatch-dispatchable, MCP-configured) binding.
+    let bound: std::collections::HashSet<&str> = profiles
+        .iter()
+        .filter_map(|p| p.get("profile_id").and_then(|v| v.as_str()))
+        .collect();
+    reclaim_orphans(trustee_home, &bound, &mut report);
     report
+}
+
+/// Remove the materialization of every user whose marker proves applier
+/// ownership (a fingerprint = currently materialized) but whose profile id
+/// is absent from the pull payload. Overlay, `.env`, and marker are
+/// removed; the directory and any session history stay. Drained markers
+/// (no fingerprint) have nothing left on disk and are skipped.
+fn reclaim_orphans(
+    trustee_home: &Path,
+    bound: &std::collections::HashSet<&str>,
+    report: &mut ApplyReport,
+) {
+    let users_dir = trustee_home.join("users");
+    let Ok(entries) = std::fs::read_dir(&users_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let user_dir = entry.path();
+        let marker_path = user_dir.join("materialized.json");
+        let Ok(text) = std::fs::read_to_string(&marker_path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        // Ownership proof: the marker must name a profile id AND carry a
+        // fingerprint (the applier only writes fingerprints for
+        // currently-materialized users). Anything else is not ours to touch.
+        let Some(profile_id) = v.get("profile_id").and_then(|s| s.as_str()) else {
+            continue;
+        };
+        if v.get("fingerprint").and_then(|f| f.as_str()).is_none() {
+            continue;
+        }
+        if bound.contains(profile_id) {
+            continue;
+        }
+        let _ = std::fs::remove_file(user_dir.join("config").join("trustee.toml"));
+        let _ = std::fs::remove_file(user_dir.join(".env"));
+        if let Err(e) = std::fs::remove_file(&marker_path) {
+            tracing::warn!(
+                target: "thq",
+                "THQ reclaim: profile {profile_id} marker removal failed: {e}"
+            );
+        }
+        tracing::warn!(
+            target: "thq",
+            "THQ reclaim: profile {profile_id} deleted in THQ — overlay, secrets and marker \n             removed (history preserved); dispatch entry leaves the table"
+        );
+        report.profiles.push(ProfileReport {
+            profile_id: profile_id.to_string(),
+            outcome: ProfileOutcome::Reclaimed,
+        });
+    }
 }
 
 /// THQ entity titles carry display prefixes ("Agent: Farzan") — the
@@ -167,6 +241,14 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
     let model = p.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mcp_servers = p
         .get("mcp_servers")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // v0.19.5 (issue 567a0f40): the THQ-owned [mcp.credentials.*] blob rides
+    // alongside mcp_servers — passed through VERBATIM, never derived or
+    // defaulted (owner ruling: authentication config is deployment data).
+    let mcp_credentials = p
+        .get("mcp_credentials")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
@@ -244,35 +326,25 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
         llm.insert("model".into(), toml::Value::String(model.clone()));
         overlay.insert("llm".into(), toml::Value::Table(llm));
     }
-    // The [mcp] section rides in the payload's mcp_servers content. Parse
-    // (standalone doc with an [mcp] table, or a bare [mcp]/[[mcp.servers]]
+    // The [mcp] section rides in the payload's mcp_servers content, joined
+    // by the mcp_credentials blob (v0.19.5). Parse each (standalone doc with
+    // an [mcp] table, or a bare [mcp]/[[mcp.servers]]/[mcp.credentials.*]
     // fragment); anything unparsable is a LOUD per-profile skip — never a
     // silently-broken overlay for the whole process.
     let mut mcp_fragment = String::new();
     let mut credential_names: Vec<String> = Vec::new();
+    let mut mcp_table: Option<toml::Table> = None;
     if !mcp_servers.trim().is_empty() {
         match mcp_servers.parse::<toml::Table>() {
             Ok(frag) => {
                 let mcp = frag.get("mcp").cloned().ok_or_else(|| {
                     "mcp_servers content parses as TOML but carries no [mcp] table".to_string()
                 })?;
-                let mcp = toml::Value::Table(match mcp.as_table().cloned() {
+                let mcp = match mcp.as_table().cloned() {
                     Some(t) => t,
                     None => return Err("mcp_servers [mcp] is not a table".to_string()),
-                });
-                // Distinct credential names the servers reference — the
-                // secrets resolver may need them to map a bare value.
-                credential_names = mcp_credential_names(&mcp);
-                // serialize WITH the key context so [[mcp.servers]] keeps its
-                // full path (an inner-table serialization would emit bare
-                // [[servers]] — a different table in the overlay)
-                let mut doc = toml::Table::new();
-                doc.insert("mcp".into(), mcp);
-                mcp_fragment = format!(
-                    "\n# [mcp] — materialized from THQ profile {profile_id}\n{}\n",
-                    toml::to_string_pretty(&toml::Value::Table(doc))
-                        .map_err(|e| format!("serialize mcp: {e}"))?
-                );
+                };
+                mcp_table = Some(mcp);
             }
             Err(e) => {
                 return Err(format!(
@@ -280,6 +352,54 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
                 ));
             }
         }
+    }
+    if !mcp_credentials.trim().is_empty() {
+        match mcp_credentials.parse::<toml::Table>() {
+            Ok(frag) => {
+                let mcp = frag.get("mcp").cloned().ok_or_else(|| {
+                    "mcp_credentials content parses as TOML but carries no [mcp] table".to_string()
+                })?;
+                let mcp = match mcp.as_table().cloned() {
+                    Some(t) => t,
+                    None => return Err("mcp_credentials [mcp] is not a table".to_string()),
+                };
+                // MERGE into the servers-side table. Verbatim means verbatim:
+                // a conflicting key between the two blobs is a loud per-profile
+                // error, never a silent overwrite.
+                let table = mcp_table.get_or_insert_with(toml::Table::new);
+                for (k, v) in mcp {
+                    if let Some(existing) = table.get(&k) {
+                        if existing != &v {
+                            return Err(format!(
+                                "mcp_credentials conflicts with mcp_servers on [mcp.{k}] — refusing to silently overwrite"
+                            ));
+                        }
+                    } else {
+                        table.insert(k, v);
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "mcp_credentials content is not valid TOML (skipped loudly): {e}"
+                ));
+            }
+        }
+    }
+    if let Some(mcp) = mcp_table {
+        // Distinct credential names the servers reference — the
+        // secrets resolver may need them to map a bare value.
+        credential_names = mcp_credential_names(&toml::Value::Table(mcp.clone()));
+        // serialize WITH the key context so [[mcp.servers]] keeps its
+        // full path (an inner-table serialization would emit bare
+        // [[servers]] — a different table in the overlay)
+        let mut doc = toml::Table::new();
+        doc.insert("mcp".into(), toml::Value::Table(mcp));
+        mcp_fragment = format!(
+            "\n# [mcp] — materialized from THQ profile {profile_id}\n{}\n",
+            toml::to_string_pretty(&toml::Value::Table(doc))
+                .map_err(|e| format!("serialize mcp: {e}"))?
+        );
     }
 
     // Console dispatch anchor (2026-09-14): [thq] makes the materialized
@@ -837,5 +957,235 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&home);
         home = home; // no-op for symmetry
+    }
+}
+
+#[cfg(test)]
+mod v0195_credentials_tests {
+    //! v0.19.5 pins (issue 567a0f40): the THQ-owned [mcp.credentials.*] blob
+    //! materializes into the overlay VERBATIM (byte-equivalent semantics vs
+    //! the owner's known-good config), a credentials change self-heals via
+    //! the fingerprint, cross-blob conflicts fail loud, deleted profiles are
+    //! reclaimed, and no-auth runtimes are untouched.
+
+    use super::*;
+    use serde_json::json;
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trustee-mat-0195-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const KNOWN_GOOD_CREDENTIALS: &str = "[mcp.credentials.farzan_service_account]\ntype = \"service-account\"\nservice_token = \"${FARZAN_SERVICE_ACCOUNT}\"\nissuer_url = \"https://idp.tanbal.ir/oauth2/openid/pdt-api\"\nclient_id = \"pdt-api\"\naudience = \"pdt-api\"\nscope = \"openid groups profile\"\n";
+
+    fn payload_with_credentials(mcp_credentials: &str, secrets: &str) -> serde_json::Value {
+        json!({
+            "profiles": [{
+                "profile_id": "prof-cred-1",
+                "name": "Profile: Farzan-nox",
+                "desired_state": "running",
+                "mcp_servers": "[[mcp.servers]]\nname = \"fame\"\nurl = \"https://fame.example\"\ncredentials = \"farzan_service_account\"\n",
+                "mcp_credentials": mcp_credentials,
+                "model": "GLM-5.3-Flash@glm-zai",
+                "secrets": secrets,
+                "identity": {
+                    "id": "ident-2222",
+                    "name": "Agent: Farzan",
+                    "agent_id": "fame-123",
+                    "persona": "Be helpful."
+                }
+            }],
+            "total": 1
+        })
+    }
+
+    fn overlay_of(home: &Path, pid: &str) -> String {
+        std::fs::read_to_string(
+            home.join("users")
+                .join(trustee_core::user_hash(pid))
+                .join("config")
+                .join("trustee.toml"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn credentials_embed_verbatim_and_servers_survive() {
+        let home = tmp("verbatim");
+        let report = apply_profiles(
+            &home,
+            &payload_with_credentials(KNOWN_GOOD_CREDENTIALS, "FARZAN_SERVICE_ACCOUNT=tok-1"),
+        );
+        assert_eq!(report.profiles[0].outcome, ProfileOutcome::Applied);
+
+        let overlay = overlay_of(&home, "prof-cred-1");
+        // byte-shape acceptance bar (owner's known-good config)
+        for line in [
+            "[mcp.credentials.farzan_service_account]",
+            "type = \"service-account\"",
+            "service_token = \"${FARZAN_SERVICE_ACCOUNT}\"",
+            "issuer_url = \"https://idp.tanbal.ir/oauth2/openid/pdt-api\"",
+            "client_id = \"pdt-api\"",
+            "audience = \"pdt-api\"",
+            "scope = \"openid groups profile\"",
+        ] {
+            assert!(overlay.contains(line), "missing {line} in:\n{overlay}");
+        }
+        // the servers fragment survived the merge (key-context preserved)
+        assert!(overlay.contains("[[mcp.servers]]"), "servers side:\n{overlay}");
+        assert!(overlay.contains("credentials = \"farzan_service_account\""));
+        // secrets landed
+        let env = std::fs::read_to_string(
+            home.join("users")
+                .join(trustee_core::user_hash("prof-cred-1"))
+                .join(".env"),
+        )
+        .unwrap();
+        assert!(env.contains("FARZAN_SERVICE_ACCOUNT=tok-1"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn credentials_change_self_heals_via_fingerprint() {
+        let home = tmp("selfheal");
+        let without = apply_profiles(&home, &payload_with_credentials("", "k=v"));
+        assert_eq!(without.profiles[0].outcome, ProfileOutcome::Applied);
+        let with = apply_profiles(&home, &payload_with_credentials(KNOWN_GOOD_CREDENTIALS, "k=v"));
+        assert_eq!(
+            with.profiles[0].outcome,
+            ProfileOutcome::Applied,
+            "credentials addition must be a fingerprint MISS — re-materialization is the self-heal"
+        );
+        assert!(overlay_of(&home, "prof-cred-1").contains("[mcp.credentials.farzan_service_account]"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn cross_blob_conflict_fails_loud_not_silent_overwrite() {
+        let home = tmp("conflict");
+        let conflicting = "[mcp]\nenabled = false\n";
+        let payload = payload_with_credentials(conflicting, "k=v");
+        // the servers blob has no [mcp] wrapper key... give both a shared key:
+        // servers with [mcp] enabled=true, credentials with enabled=false
+        let mut p = payload.clone();
+        p["profiles"][0]["mcp_servers"] =
+            json!("[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"fame\"\n");
+        let report = apply_profiles(&home, &p);
+        match &report.profiles[0].outcome {
+            ProfileOutcome::Failed { reason } => {
+                assert!(reason.contains("conflicts"), "loud conflict: {reason}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn unparsable_credentials_blob_is_a_loud_per_profile_skip() {
+        let home = tmp("badtoml");
+        let report = apply_profiles(
+            &home,
+            &payload_with_credentials("not [ valid toml <", "k=v"),
+        );
+        match &report.profiles[0].outcome {
+            ProfileOutcome::Failed { reason } => {
+                assert!(reason.contains("mcp_credentials"), "loud: {reason}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn no_credentials_payload_unchanged_nothing_fabricated() {
+        let home = tmp("noauth");
+        let report = apply_profiles(&home, &payload_with_credentials("", "k=v"));
+        assert_eq!(report.profiles[0].outcome, ProfileOutcome::Applied);
+        let overlay = overlay_of(&home, "prof-cred-1");
+        assert!(
+            !overlay.contains("mcp.credentials"),
+            "empty credentials blob must fabricate nothing: {overlay}"
+        );
+        assert!(overlay.contains("[[mcp.servers]]"), "servers still materialize");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn deleted_profile_is_reclaimed_from_home() {
+        let home = tmp("reclaim");
+        // bind two profiles
+        let mut payload = payload_with_credentials(KNOWN_GOOD_CREDENTIALS, "FARZAN_SERVICE_ACCOUNT=t");
+        payload["profiles"][0]["profile_id"] = json!("prof-gone");
+        payload["profiles"].as_array_mut().unwrap().push(json!({
+            "profile_id": "prof-stays",
+            "name": "Profile: Stay",
+            "desired_state": "running",
+            "mcp_servers": "",
+            "model": "",
+            "secrets": "k=v",
+            "identity": {"id": "i2", "name": "Agent: Stay", "agent_id": "f-2", "persona": "p"}
+        }));
+        payload["total"] = json!(2);
+        apply_profiles(&home, &payload);
+
+        // next pull: prof-gone deleted in THQ → payload carries only prof-stays
+        let mut after = json!({"profiles": [payload["profiles"][1].clone()], "total": 1});
+        after["profiles"][0]["profile_id"] = json!("prof-stays");
+        let report = apply_profiles(&home, &after);
+
+        let reclaimed = report
+            .profiles
+            .iter()
+            .find(|p| p.profile_id == "prof-gone")
+            .expect("reclaimed profile must be reported");
+        assert_eq!(reclaimed.outcome, ProfileOutcome::Reclaimed);
+
+        let gone_dir = home.join("users").join(trustee_core::user_hash("prof-gone"));
+        assert!(!gone_dir.join("config").join("trustee.toml").exists(), "overlay removed");
+        assert!(!gone_dir.join(".env").exists(), "secrets removed");
+        assert!(!gone_dir.join("materialized.json").exists(), "marker removed");
+        assert!(gone_dir.exists(), "the dir itself (history) is preserved");
+        // the surviving profile is untouched
+        assert!(overlay_of(&home, "prof-stays").contains("[agent]"), "survivor intact");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn drained_and_foreign_markers_are_never_touched_by_reclaim() {
+        let home = tmp("reclaim-safe");
+        let users = home.join("users");
+        // a DRAINED marker (no fingerprint): owned, but nothing left on disk
+        let drained = users.join(trustee_core::user_hash("prof-drained"));
+        std::fs::create_dir_all(&drained).unwrap();
+        std::fs::write(
+            drained.join("materialized.json"),
+            json!({"profile_id": "prof-drained", "desired_state": "stopped", "materialized": false})
+                .to_string(),
+        )
+        .unwrap();
+        // a FOREIGN marker (not applier-shaped — no fingerprint, different world)
+        let foreign = users.join(trustee_core::user_hash("prof-foreign"));
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(
+            foreign.join("materialized.json"),
+            json!({"profile_id": "prof-foreign"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(foreign.join("keepme"), "not mine").unwrap();
+
+        let report = apply_profiles(&home, &json!({"profiles": [], "total": 0}));
+        assert!(
+            report.profiles.iter().all(|p| p.outcome != ProfileOutcome::Reclaimed),
+            "nothing reclaimable: {:?}",
+            report.profiles
+        );
+        assert!(drained.join("materialized.json").exists(), "drained marker stays");
+        assert!(foreign.join("keepme").exists(), "foreign dir untouched");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

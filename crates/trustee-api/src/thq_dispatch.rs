@@ -847,6 +847,25 @@ mod refresh_tests {
     }
 
     #[test]
+    fn refresh_removes_entry_when_profile_is_reclaimed() {
+        // v0.19.5: a profile deleted in THQ is Reclaimed by the applier —
+        // its dispatch entry must leave the table in the same pull cycle.
+        let home = temp_home("reclaim");
+        let table: DashMap<String, ThqDispatchEntry> = DashMap::new();
+        table.insert(
+            "Farzan".to_string(),
+            ThqDispatchEntry {
+                user_key: "prof-1".to_string(),
+                service_token: Some("tok-1".to_string()),
+                issuer_url: None,
+            },
+        );
+        refresh_after_apply(&table, &home, &report("prof-1", ProfileOutcome::Reclaimed));
+
+        assert!(table.get("Farzan").is_none(), "reclaimed profile must leave the table");
+    }
+
+    #[test]
     fn refresh_removes_stale_entry_when_apply_fails() {
         let home = temp_home("fail");
         let table: DashMap<String, ThqDispatchEntry> = DashMap::new();
