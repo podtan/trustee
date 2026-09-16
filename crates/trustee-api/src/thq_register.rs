@@ -457,6 +457,15 @@ impl Enrollment {
                                 redact_payload(&payload)
                             );
                             let report = crate::materialize::apply_profiles(&enrollment.0.home, &payload);
+                            // 0.19.4: the 16F dispatch table follows the applier
+                            // — new/re-bound profiles become console-reachable
+                            // within this pull cycle; drained/failed ones leave
+                            // the table (no restart-to-(un)bind anymore).
+                            crate::thq_dispatch::refresh_after_apply(
+                                &state.thq_dispatch,
+                                &enrollment.0.home,
+                                &report,
+                            );
                             let applied = report.applied().count();
                             if applied > 0 {
                                 tracing::info!(target: "thq", "THQ apply: {applied} profile(s) materialized");

@@ -238,6 +238,107 @@ pub fn resolve_user_service_token(
     }
 }
 
+/// 0.19.4: keep the dispatch table in step with ONE materialization pass.
+/// Called from the enrollment loop right after
+/// [`crate::materialize::apply_profiles`]. Kills the "newly bound profile
+/// needs a runtime restart" wart — and its silent twin: a DRAINED profile
+/// used to stay console-dispatchable until restart.
+///
+/// Per profile outcome:
+/// - `Applied` | `Unchanged` → upsert the entry from the materialized
+///   overlay's `[thq]` anchor (`agent_name` → owner_id + resolved service
+///   token + issuer). Silent when an identical entry already exists — the
+///   pull runs every heartbeat cycle.
+/// - `Gated` / `Failed` / missing anchor → remove any entry whose
+///   `user_key` equals the profile id (the materialized anchor form).
+///   Old-world 16E entries carry a Kanidm sub, which can never collide
+///   with a profile id — legacy agents are untouchable by this path.
+pub fn refresh_after_apply(
+    table: &dashmap::DashMap<String, ThqDispatchEntry>,
+    trustee_home: &std::path::Path,
+    report: &crate::materialize::ApplyReport,
+) {
+    use crate::materialize::ProfileOutcome;
+
+    for pr in &report.profiles {
+        let user_dir = trustee_home
+            .join("users")
+            .join(trustee_core::user_hash(&pr.profile_id));
+        let overlay = user_dir.join("config").join("trustee.toml");
+        let cfg = std::fs::read_to_string(&overlay)
+            .ok()
+            .and_then(|c| DispatchConfig::from_toml(&c));
+        let wants_entry = matches!(
+            pr.outcome,
+            ProfileOutcome::Applied | ProfileOutcome::Unchanged
+        );
+
+        match (wants_entry, cfg) {
+            (true, Some(cfg)) if !cfg.owner_id.as_deref().unwrap_or_default().is_empty() => {
+                match resolve_user_service_token(&user_dir, &cfg) {
+                    ServiceTokenResolution::Resolved(bearer) => {
+                        let entry = ThqDispatchEntry {
+                            user_key: cfg.owner_id.clone().unwrap_or_default(),
+                            service_token: Some(bearer),
+                            issuer_url: read_overlay_service_issuer(&user_dir),
+                        };
+                        let changed = match table.get(&cfg.agent_name) {
+                            Some(existing) => {
+                                let e = existing.value();
+                                e.user_key != entry.user_key
+                                    || e.service_token != entry.service_token
+                                    || e.issuer_url != entry.issuer_url
+                            }
+                            None => true,
+                        };
+                        table.insert(cfg.agent_name.clone(), entry);
+                        if changed {
+                            tracing::info!(
+                                target: "thq",
+                                "THQ dispatch refresh: agent {} upserted (profile {}) — console-reachable, no restart needed",
+                                cfg.agent_name, pr.profile_id
+                            );
+                        }
+                    }
+                    other => {
+                        remove_by_user_key(table, &pr.profile_id);
+                        tracing::warn!(
+                            target: "thq",
+                            "THQ dispatch refresh: agent {} anchor present but credential unresolved ({other:?}) — entry removed",
+                            cfg.agent_name
+                        );
+                    }
+                }
+            }
+            _ => {
+                if remove_by_user_key(table, &pr.profile_id) {
+                    tracing::info!(
+                        target: "thq",
+                        "THQ dispatch refresh: profile {} no longer materialized — dispatch entry removed",
+                        pr.profile_id
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Remove the dispatch entry (if any) whose `user_key` equals the profile id
+/// — the materialized-anchor form. Returns true when an entry was removed.
+fn remove_by_user_key(
+    table: &dashmap::DashMap<String, ThqDispatchEntry>,
+    user_key: &str,
+) -> bool {
+    let key = table
+        .iter()
+        .find(|kv| kv.value().user_key == user_key)
+        .map(|kv| kv.key().clone());
+    match key {
+        Some(k) => table.remove(&k).is_some(),
+        None => false,
+    }
+}
+
 /// 16F: build the dispatch table from per-user `[thq]` overlays.
 ///
 /// The dispatch lane of the old `thq_register::spawn_all`, extracted
@@ -652,5 +753,138 @@ mod service_token_declaration_tests {
             ServiceTokenResolution::Undeclared
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use crate::materialize::{ApplyReport, ProfileOutcome, ProfileReport};
+    use std::path::PathBuf;
+    use dashmap::DashMap;
+
+    fn temp_home(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trustee-disp-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_materialized(home: &PathBuf, pid: &str, agent_name: &str, token_value: &str) {
+        let dir = home
+            .join("users")
+            .join(trustee_core::user_hash(pid));
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::write(
+            dir.join("config").join("trustee.toml"),
+            format!(
+                "[agent]\nname = \"{agent_name}\"\n\n[thq]\nagent_name = \"{agent_name}\"\nowner_id = \"{pid}\"\nservice_token = \"farzan_service_account\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join(".env"), format!("farzan_service_account={token_value}\n")).unwrap();
+    }
+
+    fn report(pid: &str, outcome: ProfileOutcome) -> ApplyReport {
+        ApplyReport {
+            profiles: vec![ProfileReport {
+                profile_id: pid.to_string(),
+                outcome,
+            }],
+        }
+    }
+
+    #[test]
+    fn refresh_upserts_entry_for_applied_profile() {
+        let home = temp_home("up");
+        make_materialized(&home, "prof-1", "Farzan", "tok-1");
+        let table: DashMap<String, ThqDispatchEntry> = DashMap::new();
+
+        refresh_after_apply(&table, &home, &report("prof-1", ProfileOutcome::Applied));
+
+        let e = table.get("Farzan").expect("entry must exist");
+        assert_eq!(e.user_key, "prof-1", "user_key = the stable binding id");
+        assert_eq!(e.service_token.as_deref(), Some("tok-1"));
+    }
+
+    #[test]
+    fn refresh_is_idempotent_for_unchanged_profiles() {
+        let home = temp_home("idem");
+        make_materialized(&home, "prof-1", "Farzan", "tok-1");
+        let table: DashMap<String, ThqDispatchEntry> = DashMap::new();
+
+        refresh_after_apply(&table, &home, &report("prof-1", ProfileOutcome::Applied));
+        refresh_after_apply(&table, &home, &report("prof-1", ProfileOutcome::Unchanged));
+
+        assert_eq!(table.len(), 1, "no duplicate entries across pull cycles");
+        assert_eq!(table.get("Farzan").unwrap().service_token.as_deref(), Some("tok-1"));
+    }
+
+    #[test]
+    fn refresh_removes_entry_when_profile_drains() {
+        let home = temp_home("drain");
+        let table: DashMap<String, ThqDispatchEntry> = DashMap::new();
+        table.insert(
+            "Farzan".to_string(),
+            ThqDispatchEntry {
+                user_key: "prof-1".to_string(),
+                service_token: Some("tok-1".to_string()),
+                issuer_url: None,
+            },
+        );
+        // Drain deleted the overlay config — nothing on disk to re-discover.
+        let outcome = ProfileOutcome::Gated {
+            desired: "stopped".to_string(),
+            drained: true,
+        };
+        refresh_after_apply(&table, &home, &report("prof-1", outcome));
+
+        assert!(table.get("Farzan").is_none(), "drained profile must leave the table");
+    }
+
+    #[test]
+    fn refresh_removes_stale_entry_when_apply_fails() {
+        let home = temp_home("fail");
+        let table: DashMap<String, ThqDispatchEntry> = DashMap::new();
+        table.insert(
+            "Farzan".to_string(),
+            ThqDispatchEntry {
+                user_key: "prof-1".to_string(),
+                service_token: Some("tok-1".to_string()),
+                issuer_url: None,
+            },
+        );
+        // Failed apply = no materialized dir → not dispatchable.
+        let outcome = ProfileOutcome::Failed {
+            reason: "secrets is a bare value".to_string(),
+        };
+        refresh_after_apply(&table, &home, &report("prof-1", outcome));
+
+        assert!(table.get("Farzan").is_none(), "stale entry must go on loud failure");
+    }
+
+    #[test]
+    fn refresh_never_touches_old_world_16e_entries() {
+        let home = temp_home("legacy");
+        make_materialized(&home, "prof-1", "Farzan", "tok-1");
+        let table: DashMap<String, ThqDispatchEntry> = DashMap::new();
+        table.insert(
+            "legacy-nox".to_string(),
+            ThqDispatchEntry {
+                user_key: "kanidm-sub-uuid".to_string(),
+                service_token: Some("legacy-tok".to_string()),
+                issuer_url: None,
+            },
+        );
+
+        // A DIFFERENT profile fails → removal is keyed, not wholesale.
+        refresh_after_apply(&table, &home, &report("prof-9", ProfileOutcome::Failed {
+            reason: "x".to_string(),
+        }));
+        assert!(table.contains_key("legacy-nox"), "unrelated legacy entry untouched");
     }
 }
