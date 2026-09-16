@@ -252,6 +252,24 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // 0.19.6 (incident fc94aea9): the agent's dispatch identity is DECLARED
+    // on the profile — a ${VAR} reference into the profile secrets plus an
+    // issuer URL — and passed through VERBATIM. The identity is never
+    // borrowed from MCP configuration (the 0.19.3–0.19.5 anchor selected it
+    // by counting distinct `credentials` names on the servers; the issuer
+    // reader took the first service-account credential it found — both
+    // shape-based selections of an identity fact from an unrelated config
+    // section).
+    let identity_service_token = p
+        .get("identity_service_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let identity_issuer_url = p
+        .get("identity_issuer_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let secrets = p.get("secrets").and_then(|v| v.as_str()).unwrap_or("");
     let desired_state = p
         .get("desired_state")
@@ -332,7 +350,6 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
     // fragment); anything unparsable is a LOUD per-profile skip — never a
     // silently-broken overlay for the whole process.
     let mut mcp_fragment = String::new();
-    let mut credential_names: Vec<String> = Vec::new();
     let mut mcp_table: Option<toml::Table> = None;
     if !mcp_servers.trim().is_empty() {
         match mcp_servers.parse::<toml::Table>() {
@@ -387,9 +404,6 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
         }
     }
     if let Some(mcp) = mcp_table {
-        // Distinct credential names the servers reference — the
-        // secrets resolver may need them to map a bare value.
-        credential_names = mcp_credential_names(&toml::Value::Table(mcp.clone()));
         // serialize WITH the key context so [[mcp.servers]] keeps its
         // full path (an inner-table serialization would emit bare
         // [[servers]] — a different table in the overlay)
@@ -402,27 +416,32 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
         );
     }
 
-    // Console dispatch anchor (2026-09-14): [thq] makes the materialized
-    // user a 16F dispatch target — the xagent wrapper pins ALL user-key
-    // resolution to entry.user_key, so owner_id here is the STABLE binding
-    // id (the profile id), never a mutable IdP claim (the ec3e0622 class).
-    // Exactly one identity credential = the impersonation source; zero or
-    // several → the profile stays console-inert (loud INFO, never silent).
-    if credential_names.len() == 1 {
+    // Console dispatch anchor (REVISED 0.19.6): [thq] makes the materialized
+    // user a 16F dispatch target. The identity is the PROFILE-DECLARED
+    // `identity_service_token` (a ${VAR} reference) copied VERBATIM — no
+    // selection, no counting, no MCP lookup. The dispatch resolver strips
+    // ${} and reads the per-user .env, so the anchor and the MCP credentials
+    // resolve through the SAME env key. Undeclared → no anchor, LOUD (never
+    // silent — the 0.19.4 zero-case logged nothing).
+    if !identity_service_token.is_empty() {
         let mut thq = toml::Table::new();
         thq.insert("agent_name".into(), toml::Value::String(name.clone()));
         thq.insert("owner_id".into(), toml::Value::String(profile_id.to_string()));
         thq.insert(
             "service_token".into(),
-            toml::Value::String(credential_names[0].clone()),
+            toml::Value::String(identity_service_token.clone()),
         );
+        if !identity_issuer_url.is_empty() {
+            thq.insert(
+                "issuer_url".into(),
+                toml::Value::String(identity_issuer_url.clone()),
+            );
+        }
         overlay.insert("thq".into(), toml::Value::Table(thq));
-    } else if !credential_names.is_empty() {
-        tracing::info!(
+    } else {
+        tracing::warn!(
             target: "thq",
-            "THQ apply: profile {profile_id} carries {} identity credentials — \
-             no [thq] dispatch anchor (console dispatch needs exactly one)",
-            credential_names.len()
+            "THQ apply: profile {profile_id} declares NO identity_service_token — no [thq] dispatch anchor \n             (console dispatch off). Declare it on the profile: the ${{VAR}} reference into the profile secrets."
         );
     }
     let header = format!(
@@ -436,7 +455,7 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
     );
 
     // --- secrets → .env. Values NEVER logged — lengths/counts only. ---
-    let env_str = resolve_env_text(secrets, &credential_names)?;
+    let env_str = resolve_env_text(secrets)?;
 
     // --- fingerprint: skip the rewrite when nothing changed ---
     let mut hasher = Sha256::new();
@@ -505,23 +524,6 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
 
 /// Distinct `credentials` names referenced by an `[mcp]` table's servers —
 /// the hooks a bare-value secrets string can be mapped to.
-fn mcp_credential_names(mcp: &toml::Value) -> Vec<String> {
-    let mut names: Vec<String> = mcp
-        .get("servers")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| s.get("credentials").and_then(|v| v.as_str()))
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names.dedup();
-    names
-}
-
 /// Resolve the profile's `secrets` string into `.env` file text.
 ///
 /// Contract (thq profile metadata): `KEY=VALUE` lines, `#` comments
@@ -536,7 +538,7 @@ fn mcp_credential_names(mcp: &toml::Value) -> Vec<String> {
 /// A bare value with zero or multiple distinct credential names is a
 /// LOUD per-profile failure — never a silent empty .env.
 /// Values are NEVER logged — only lengths/counts.
-fn resolve_env_text(secrets: &str, credential_names: &[String]) -> Result<String, String> {
+fn resolve_env_text(secrets: &str) -> Result<String, String> {
     const HEADER: &str = "# Materialized from THQ profile secrets — 0600, never logged.\n";
     let trimmed = secrets.trim();
     if trimmed.is_empty() {
@@ -580,16 +582,17 @@ fn resolve_env_text(secrets: &str, credential_names: &[String]) -> Result<String
         }
     }
 
-    // Bare value → map to the single referenced credential name.
-    match credential_names {
-        [name] => Ok(format!("{HEADER}{name}={trimmed}\n")),
-        other => Err(format!(
-            "secrets is a bare value ({} chars, not KEY=VALUE or a JSON object) and the \
-             profile references {} credential name(s) — cannot map it to .env unambiguously",
-            trimmed.len(),
-            other.len(),
-        )),
-    }
+    // Bare value (0.19.6): REJECTED, loud. The 0.19.2 heuristic mapped a
+    // bare value to the single referenced credential NAME — a manufactured
+    // key convention that collided with the ${VAR} references the overlay
+    // declarations use (incident fc94aea9, T3). The .env key is not a
+    // guessable fact: declare it as KEY=VALUE.
+    Err(format!(
+        "secrets is a bare value ({} chars) — rejected. The .env key must be DECLARED: \
+         KEY=VALUE lines (exact-case; the key is the ${{VAR}} name the overlay references) \
+         or a JSON object of keys to values",
+        trimmed.len(),
+    ))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -703,6 +706,9 @@ mod tests {
         payload["profiles"][0]["mcp_servers"] = json!(
             "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"fame\"\nurl = \"https://fame.example\"\ncredentials = \"farzan_service_account\"\n"
         );
+        payload["profiles"][0]["identity_service_token"] = json!("${FARZAN_SERVICE_ACCOUNT}");
+        payload["profiles"][0]["identity_issuer_url"] =
+            json!("https://idp.tanbal.ir/oauth2/openid/pdt-api");
         let report = apply_profiles(&home, &payload);
         assert!(matches!(report.profiles[0].outcome, ProfileOutcome::Applied));
         let overlay = std::fs::read_to_string(
@@ -725,19 +731,33 @@ mod tests {
             Some("prof-1111"),
             "owner_id must be the STABLE binding id (the profile id), never a claim"
         );
+        // 0.19.6: the anchor copies the DECLARED identity ${VAR} verbatim —
+        // the dispatch resolver strips ${} and lands on the same env key the
+        // MCP credentials reference. Never a credential NAME (0.19.4 did),
+        // never an inference.
         assert_eq!(
             thq.get("service_token").and_then(|v| v.as_str()),
-            Some("farzan_service_account")
+            Some("${FARZAN_SERVICE_ACCOUNT}"),
+            "anchor service_token = the declared identity_service_token, VERBATIM"
+        );
+        assert_eq!(
+            thq.get("issuer_url").and_then(|v| v.as_str()),
+            Some("https://idp.tanbal.ir/oauth2/openid/pdt-api"),
+            "anchor issuer_url = the declared identity_issuer_url, VERBATIM"
         );
     }
 
     #[test]
-    fn multi_credential_profiles_stay_console_inert() {
-        let home = tmp("thqmulti");
+    fn undeclared_identity_means_no_anchor_and_the_inference_is_dead() {
+        // 0.19.6 pin: the 0.19.4 inference (exactly one distinct credential
+        // name on the servers → that credential IS the identity) is DELETED.
+        // A single-credential profile with NO declaration gets NO anchor.
+        let home = tmp("thqnoinfer");
         let mut payload = fixture_payload("k=v");
         payload["profiles"][0]["mcp_servers"] = json!(
-            "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"a\"\nurl = \"https://a.example\"\ncredentials = \"cred_a\"\n\n[[mcp.servers]]\nname = \"b\"\nurl = \"https://b.example\"\ncredentials = \"cred_b\"\n"
+            "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"fame\"\nurl = \"https://fame.example\"\ncredentials = \"farzan_service_account\"\n"
         );
+        // NO identity_service_token declared
         let report = apply_profiles(&home, &payload);
         assert!(matches!(report.profiles[0].outcome, ProfileOutcome::Applied));
         let overlay = std::fs::read_to_string(
@@ -746,58 +766,77 @@ mod tests {
         .unwrap();
         assert!(
             !overlay.contains("[thq]"),
-            "multi-credential profile must not emit a dispatch anchor"
+            "no declaration → no anchor. Counting server credentials must never select an identity again"
         );
     }
 
     #[test]
-    fn bare_secret_maps_to_single_mcp_credential() {
-        let home = tmp("bare1");
-        let mut payload = fixture_payload("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYXJ6YW4ifQ.sig");
-        payload["profiles"][0]["mcp_servers"] = json!(
-            "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"fame\"\nurl = \"https://fame.example\"\ncredentials = \"farzan_service_account\"\n"
-        );
-        let report = apply_profiles(&home, &payload);
-        assert!(
-            matches!(report.profiles[0].outcome, ProfileOutcome::Applied),
-            "got {:?}",
-            report.profiles[0].outcome
-        );
-        let env = std::fs::read_to_string(user_dir(&home, "prof-1111").join(".env")).unwrap();
-        assert!(
-            env.contains("farzan_service_account=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYXJ6YW4ifQ.sig\n"),
-            "bare value must map to the single referenced credential name"
-        );
-    }
-
-    #[test]
-    fn bare_secret_without_any_credential_name_fails_loud() {
-        let home = tmp("bare0");
-        let report = apply_profiles(&home, &fixture_payload("raw-token-no-equals"));
-        match &report.profiles[0].outcome {
-            ProfileOutcome::Failed { reason } => {
-                assert!(reason.contains("bare value"), "reason: {reason}");
-            }
-            other => panic!("expected loud failure, got {other:?}"),
-        }
-        assert!(
-            !user_dir(&home, "prof-1111").exists(),
-            "a failed secrets resolution must not leave a half-materialized dir"
-        );
-    }
-
-    #[test]
-    fn bare_secret_with_multiple_credential_names_fails_loud() {
-        let home = tmp("bare2");
-        let mut payload = fixture_payload("raw-token");
+    fn multi_credential_profile_with_declared_identity_gets_anchor() {
+        // 0.19.6: the owner's known-good two-credential config (identity
+        // credential + a second tool credential) previously lost console
+        // dispatch by the count rule. With a declaration, tool-credential
+        // count is irrelevant to the anchor.
+        let home = tmp("thqmulti");
+        let mut payload = fixture_payload("k=v");
         payload["profiles"][0]["mcp_servers"] = json!(
             "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"a\"\nurl = \"https://a.example\"\ncredentials = \"cred_a\"\n\n[[mcp.servers]]\nname = \"b\"\nurl = \"https://b.example\"\ncredentials = \"cred_b\"\n"
         );
+        payload["profiles"][0]["identity_service_token"] = json!("${ID_TOKEN}");
         let report = apply_profiles(&home, &payload);
-        assert!(matches!(
-            &report.profiles[0].outcome,
-            ProfileOutcome::Failed { .. }
-        ));
+        assert!(matches!(report.profiles[0].outcome, ProfileOutcome::Applied));
+        let overlay = std::fs::read_to_string(
+            user_dir(&home, "prof-1111").join("config/trustee.toml"),
+        )
+        .unwrap();
+        let table: toml::Table = overlay.parse().unwrap();
+        assert_eq!(
+            table["thq"]["service_token"].as_str(),
+            Some("${ID_TOKEN}"),
+            "declared identity wins regardless of how many tool credentials exist"
+        );
+    }
+
+    #[test]
+    fn bare_secret_is_rejected_regardless_of_credential_count() {
+        // 0.19.6: the 0.19.2 bare→credential-name mapping is DELETED — it
+        // manufactured the .env key convention that collided with the ${VAR}
+        // references (incident fc94aea9, T3). Bare values are rejected LOUD
+        // in every shape, whatever the servers reference.
+        for (tag, servers) in [
+            ("none", ""),
+            (
+                "single",
+                "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"fame\"\nurl = \"https://fame.example\"\ncredentials = \"farzan_service_account\"\n",
+            ),
+            (
+                "multi",
+                "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"a\"\nurl = \"https://a.example\"\ncredentials = \"cred_a\"\n\n[[mcp.servers]]\nname = \"b\"\nurl = \"https://b.example\"\ncredentials = \"cred_b\"\n",
+            ),
+        ] {
+            let home = tmp(&format!("bare-reject-{tag}"));
+            let mut payload = fixture_payload("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYXJ6YW4ifQ.sig");
+            if !servers.is_empty() {
+                payload["profiles"][0]["mcp_servers"] = json!(servers);
+            }
+            let report = apply_profiles(&home, &payload);
+            match &report.profiles[0].outcome {
+                ProfileOutcome::Failed { reason } => {
+                    assert!(
+                        reason.contains("bare value"),
+                        "{tag}: reason must name the bare-value rejection: {reason}"
+                    );
+                    assert!(
+                        reason.contains("KEY=VALUE"),
+                        "{tag}: reason must state the required format: {reason}"
+                    );
+                }
+                other => panic!("{tag}: expected loud failure, got {other:?}"),
+            }
+            assert!(
+                !user_dir(&home, "prof-1111").exists(),
+                "{tag}: a failed secrets resolution must not leave a half-materialized dir"
+            );
+        }
     }
 
     #[test]

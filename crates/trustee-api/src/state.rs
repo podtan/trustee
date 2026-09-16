@@ -1299,6 +1299,22 @@ impl ServerState {
                     .map_err(|e| format!("config parse failed: {}", e))?;
                 match value.get("mcp") {
                     Some(section) => {
+                        // 0.19.6 (incident fc94aea9, T3): a leftover ${…} in
+                        // the effective [mcp] section means the credential
+                        // reference is UNRESOLVED — the literal placeholder
+                        // must never reach an agent (it once rode to
+                        // production auth as the Bearer). Fail the build
+                        // loud; the degraded path handles retry/backoff.
+                        let mut leftovers: Vec<String> = Vec::new();
+                        collect_unresolved_placeholders(section, &mut leftovers);
+                        if !leftovers.is_empty() {
+                            return Err(format!(
+                                "unresolved {} placeholder(s) in [mcp]: {} — supply the \
+                                 exact-case key in the profile secrets",
+                                leftovers.len(),
+                                leftovers.join(", ")
+                            ));
+                        }
                         use serde::Deserialize as _;
                         Some(
                             abk::config::McpConfig::deserialize(section.clone())
@@ -1689,11 +1705,41 @@ fn deep_merge_toml(base: &mut toml::Value, overlay: &toml::Value) {
 ///
 /// Falls back to process environment if the variable is not in the map.
 /// Variables not found in either are left as-is.
+/// Walk a TOML value tree; collect every string that still contains a
+/// `${…}` placeholder (post-substitution leftovers — unresolved references).
+fn collect_unresolved_placeholders(value: &toml::Value, out: &mut Vec<String>) {
+    match value {
+        toml::Value::String(s) => {
+            if let Some(start) = s.find("${") {
+                if let Some(end_rel) = s[start + 2..].find('}') {
+                    let name = &s[start + 2..start + 2 + end_rel];
+                    let rendered = format!("${{{name}}}");
+                    if !out.contains(&rendered) {
+                        out.push(rendered);
+                    }
+                }
+            }
+        }
+        toml::Value::Table(t) => {
+            for v in t.values() {
+                collect_unresolved_placeholders(v, out);
+            }
+        }
+        toml::Value::Array(a) => {
+            for v in a {
+                collect_unresolved_placeholders(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<String, String>) {
     // Simple state machine: scan for ${, read until }, replace.
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
+    let mut unresolved: Vec<&str> = Vec::new();
 
     while i < bytes.len() {
         if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
@@ -1706,8 +1752,14 @@ fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<Strin
                 } else if let Ok(value) = std::env::var(var_name) {
                     result.push_str(&value);
                 } else {
-                    // Not found — leave as-is
+                    // Not found — leave as-is BUT NOT SILENTLY (incident
+                    // fc94aea9, T3): an unresolved ${VAR} once rode to
+                    // production authentication as the literal credential.
+                    // Every leftover is named, every time.
                     result.push_str(&s[i..i + 2 + end + 1]);
+                    if !unresolved.contains(&var_name) {
+                        unresolved.push(var_name);
+                    }
                 }
                 i = i + 2 + end + 1;
             } else {
@@ -1719,6 +1771,20 @@ fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<Strin
             result.push(bytes[i] as char);
             i += 1;
         }
+    }
+
+    if !unresolved.is_empty() {
+        tracing::warn!(
+            "ENV SUBSTITUTION LEFT {} UNRESOLVED: {} — the literal ${{…}} remains in the \
+             effective config; supply the key in the profile secrets (exact-case KEY=VALUE) \
+             or the environment",
+            unresolved.len(),
+            unresolved
+                .iter()
+                .map(|v| format!("${{{v}}}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     *s = result;
@@ -2204,3 +2270,54 @@ mod restore_tests {
         assert!(out.is_none());
     }
 }
+
+    #[test]
+    fn collect_unresolved_placeholders_walks_the_tree() {
+        let section: toml::Value = toml::from_str(
+            r#"
+[credentials.farzan_service_account]
+service_token = "${FARZAN_SERVICE_ACCOUNT}"
+issuer_url = "https://ok.example"
+
+[[servers]]
+name = "fame"
+url = "https://fame.example"
+credentials = "farzan_service_account"
+
+[[servers]]
+name = "other"
+url = "https://other.example"
+token = "${OTHER_TOKEN}"
+"#,
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        collect_unresolved_placeholders(&section, &mut out);
+        out.sort();
+        assert_eq!(
+            out,
+            vec!["${FARZAN_SERVICE_ACCOUNT}".to_string(), "${OTHER_TOKEN}".to_string()],
+            "every leftover placeholder in the [mcp] tree must be collected, deduped"
+        );
+        // clean section → nothing
+        let clean: toml::Value = toml::from_str("[x]\ny = \"z\"\n").unwrap();
+        let mut out2 = Vec::new();
+        collect_unresolved_placeholders(&clean, &mut out2);
+        assert!(out2.is_empty());
+    }
+
+    #[test]
+    fn substitute_env_vars_resolves_and_keeps_leftovers_deterministically() {
+        let mut secrets = std::collections::HashMap::new();
+        secrets.insert("A_TOKEN".to_string(), "resolved-value".to_string());
+        let mut s = "x = \"${A_TOKEN}\" y = \"${MISSING_TOKEN}\"".to_string();
+        substitute_env_vars(&mut s, &secrets);
+        assert!(
+            s.contains("resolved-value"),
+            "declared key resolves: {s}"
+        );
+        assert!(
+            s.contains("${MISSING_TOKEN}"),
+            "undeclared key keeps the literal (the loader guard turns this into a loud failure): {s}"
+        );
+    }

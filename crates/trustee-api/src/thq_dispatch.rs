@@ -133,6 +133,21 @@ pub fn discover_user_agents_in(users_dir: &std::path::Path) -> Vec<DiscoveredAge
 fn read_overlay_service_issuer(user_home: &std::path::Path) -> Option<String> {
     let overlay = std::fs::read_to_string(user_home.join("config").join("trustee.toml")).ok()?;
     let v: toml::Value = overlay.parse().ok()?;
+    // 0.19.6: the DECLARED identity issuer wins — [thq].issuer_url is a
+    // verbatim copy of the profile's identity_issuer_url (incident fc94aea9:
+    // scanning [mcp.credentials] for the first service-account credential was
+    // a shape-based selection of an identity fact from the tool lane). The
+    // legacy scan stays as a fallback for hand-authored overlays that never
+    // declared one.
+    if let Some(issuer) = v
+        .get("thq")
+        .and_then(|t| t.get("issuer_url"))
+        .and_then(|i| i.as_str())
+    {
+        if !issuer.trim().is_empty() {
+            return Some(issuer.to_string());
+        }
+    }
     let creds = v.get("mcp")?.get("credentials")?.as_table()?;
     for (_name, cred) in creds {
         if cred.get("type").and_then(|t| t.as_str()) == Some("service-account") {
@@ -562,6 +577,28 @@ owner_id = "d0f5c4ba-9c10-4ff7-85a4-f2c0e588a55a"
             "issuer must come from the service-account credential, not another type"
         );
         assert!(read_overlay_service_issuer(&base.join("nope")).is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn declared_identity_issuer_wins_over_the_mcp_scan() {
+        // 0.19.6: [thq].issuer_url (verbatim copy of the profile's
+        // identity_issuer_url) is the identity fact; the legacy
+        // [mcp.credentials] scan is a fallback for hand-authored overlays.
+        let base = std::env::temp_dir().join(format!("trustee-dispatch-issuer-decl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("config");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("trustee.toml"),
+            "[thq]\nagent_name = \"a\"\nissuer_url = \"https://identity.example/openid/agent\"\n\n[mcp.credentials.tool_cred]\ntype = \"service-account\"\nservice_token = \"${TOOL_TOKEN}\"\nissuer_url = \"https://different-idp.example/\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_overlay_service_issuer(&base).as_deref(),
+            Some("https://identity.example/openid/agent"),
+            "the DECLARED identity issuer wins even when a tool credential points elsewhere"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
