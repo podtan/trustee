@@ -10,10 +10,12 @@
 //!   zero coupling to users.
 //! - **Dispatch** (THIS module): agents-as-users. Per-user `[thq]` overlay
 //!   sections declare which agent-user a THQ-dispatched session must run
-//!   AS (`owner_id` = the agent's Kanidm `sub`, `service_token` = the env
-//!   var holding her service credential). The `xagent` router consumes the
-//!   table built here. Registration-era keys (`torpi_url`, `advertise_url`)
-//!   in overlays are INERT here — dispatch only reads its own three keys.
+//!   AS (`owner_id` = the agent's Kanidm `sub`, `service_token` = a
+//!   `${VAR}` reference into her `.env` OR a literal credential — the thq
+//!   auto-wire embeds minted tokens byte-verbatim, 0.19.7). The `xagent`
+//!   router consumes the table built here. Registration-era keys
+//!   (`torpi_url`, `advertise_url`) in overlays are INERT here — dispatch
+//!   only reads its own three keys.
 //!
 //! Boot-only lifecycle: overlays are read once at boot (restart to change),
 //! exactly as before the rewrite.
@@ -32,8 +34,10 @@ pub struct DispatchConfig {
     /// The agent's Kanidm `sub` (16E sub-pin): session bucket, per-user
     /// home, MCP loader cache, and Cedar principal all resolve through it.
     pub owner_id: Option<String>,
-    /// Issue 8e0a1215: the env var holding her service credential
-    /// (`service_token = "${PAYDAR_SERVICE_ACCOUNT}"` or bare `KEY`).
+    /// The dispatch credential declaration: either a `${VAR}` reference
+    /// resolved from the agent's `.env`, or a LITERAL credential used
+    /// byte-verbatim (0.19.7 — the thq 0.5.1/0.5.3 auto-wire embeds the
+    /// minted token directly; a non-`${…}` string is NEVER a variable name).
     pub service_token: Option<String>,
 }
 
@@ -176,32 +180,41 @@ pub fn discover_service_issuers() -> Vec<String> {
 /// Issue 8e0a1215: outcome of resolving an agent-user's dispatch credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceTokenResolution {
-    /// `[thq].service_token` declared and resolved from the agent's `.env`.
-    /// The ONLY way an agent becomes dispatchable — the hardcoded key scan
-    /// (THQ/FAME/FARZAN/KANIDM_SERVICE_TOKEN) was removed in api 0.13.0.
+    /// `Resolved` doc: carries the bearer — the `${VAR}`-resolved value OR
+    /// the literal declaration byte-verbatim (0.19.7). The ONLY way an agent
+    /// becomes dispatchable — the hardcoded key scan (THQ/FAME/FARZAN/
+    /// KANIDM_SERVICE_TOKEN) was removed in api 0.13.0.
     Resolved(String),
     /// No `[thq].service_token` declared at all. The agent is NOT
     /// dispatchable; with an `owner_id` present (dispatch intent) boot
     /// FAILS LOUD — an undeclared credential is the same silent-skip shape
     /// this issue was filed to kill.
     Undeclared,
-    /// `[thq].service_token` DECLARED but its variable did not resolve from
-    /// the agent's `.env` (missing file, missing key, or an unresolved
-    /// `${…}` placeholder value). Boot FAILS LOUD naming agent + variable;
-    /// the agent is NOT dispatchable. Never a silent skip.
+    /// `[thq].service_token` declared as a `${VAR}` reference but the
+    /// variable did not resolve from the agent's `.env` (missing file,
+    /// missing key, or an unresolved `${…}` placeholder value). Boot FAILS
+    /// LOUD naming agent + variable; the agent is NOT dispatchable. Never a
+    /// silent skip. (0.19.7: only `${…}` references take this path — a
+    /// non-`${…}` declaration is a literal and always resolves.)
     DeclaredUnresolved { var: String },
 }
 
-/// Extract the env-var name from a `[thq].service_token` declaration.
-/// Accepts the canonical `"${KEY}"` wrapper and a bare `"KEY"`. Malformed
-/// input returns the raw trimmed string — the lookup then fails and the
-/// boot error names exactly what the config said.
-fn declared_service_var(decl: &str) -> String {
+/// Extract the env-var name from a `[thq].service_token` declaration that
+/// is a `${VAR}` REFERENCE. Returns `None` for anything that is not a full
+/// `${…}` wrap.
+///
+/// 0.19.7 (Kavosh work order, 2026-09-19): a non-`${…}` declaration is a
+/// LITERAL credential — the thq auto-wire (thq 0.5.1/0.5.3) embeds the
+/// minted token byte-verbatim into the payload. The old parser treated
+/// every non-wrapped string as a variable NAME, resolved the raw JWT
+/// against the agent's `.env`, failed, and removed a dispatchable agent —
+/// `DeclaredUnresolved { var: "eyJhbGciOi…" }`. Never again: only an
+/// exact `${…}` wrap is a reference; everything else is the bearer.
+fn declared_env_reference(decl: &str) -> Option<String> {
     let s = decl.trim();
-    match s.strip_prefix("${").and_then(|r| r.strip_suffix('}')) {
-        Some(inner) => inner.trim().to_string(),
-        None => s.to_string(),
-    }
+    s.strip_prefix("${")
+        .and_then(|r| r.strip_suffix('}'))
+        .map(|inner| inner.trim().to_string())
 }
 
 /// Look up `key` in a `.env` file (`KEY=value`, quotes unwrapped, `#`
@@ -234,8 +247,11 @@ fn lookup_env_value(env_path: &std::path::Path, key: &str) -> Option<String> {
 /// Issue 8e0a1215: resolve an agent-user's dispatch credential.
 ///
 /// The `[thq].service_token` declaration is the ONLY source — the config
-/// declares, the code never guesses. Declared-but-unresolved and
-/// undeclared are both distinct loud outcomes
+/// declares, the code never guesses. Two accepted forms (0.19.7):
+/// - `${VAR}`   → resolved from the agent's `.env` (unchanged path);
+/// - otherwise → LITERAL credential, byte-verbatim as the bearer (the
+///   thq auto-wire embed). Never treated as a variable name.
+/// Declared-but-unresolved and undeclared remain distinct loud outcomes
 /// ([`ServiceTokenResolution`]); neither silently degrades.
 pub fn resolve_user_service_token(
     user_home: &std::path::Path,
@@ -243,10 +259,15 @@ pub fn resolve_user_service_token(
 ) -> ServiceTokenResolution {
     match config.service_token.as_deref() {
         Some(decl) => {
-            let var = declared_service_var(decl);
-            match lookup_env_value(&user_home.join(".env"), &var) {
-                Some(value) => ServiceTokenResolution::Resolved(value),
-                None => ServiceTokenResolution::DeclaredUnresolved { var },
+            let decl = decl.trim();
+            match declared_env_reference(decl) {
+                // ${VAR} reference → resolve from the agent's .env.
+                Some(var) => match lookup_env_value(&user_home.join(".env"), &var) {
+                    Some(value) => ServiceTokenResolution::Resolved(value),
+                    None => ServiceTokenResolution::DeclaredUnresolved { var },
+                },
+                // Anything else → LITERAL credential, byte-verbatim.
+                None => ServiceTokenResolution::Resolved(decl.to_string()),
             }
         }
         None => ServiceTokenResolution::Undeclared,
@@ -681,22 +702,23 @@ mod service_token_declaration_tests {
     }
 
     #[test]
-    fn declared_var_accepts_wrapped_and_bare_forms() {
+    fn declared_env_reference_accepts_only_full_wraps() {
         assert_eq!(
-            declared_service_var("${PAYDAR_SERVICE_ACCOUNT}"),
-            "PAYDAR_SERVICE_ACCOUNT"
+            declared_env_reference("${PAYDAR_SERVICE_ACCOUNT}").as_deref(),
+            Some("PAYDAR_SERVICE_ACCOUNT")
         );
         assert_eq!(
-            declared_service_var("  ${ PAYDAR_SERVICE_ACCOUNT }  "),
-            "PAYDAR_SERVICE_ACCOUNT"
+            declared_env_reference("  ${ PAYDAR_SERVICE_ACCOUNT }  ").as_deref(),
+            Some("PAYDAR_SERVICE_ACCOUNT")
         );
-        assert_eq!(
-            declared_service_var("PAYDAR_SERVICE_ACCOUNT"),
-            "PAYDAR_SERVICE_ACCOUNT"
-        );
-        // Malformed input surfaces verbatim in the loud error, never swallowed.
-        assert_eq!(declared_service_var(""), "");
-        assert_eq!(declared_service_var("${"), "${");
+        // 0.19.7: bare KEY and every other non-`${…}` shape is a LITERAL
+        // credential — never a variable name (Kavosh work order).
+        assert_eq!(declared_env_reference("PAYDAR_SERVICE_ACCOUNT"), None);
+        assert_eq!(declared_env_reference("eyJhbGciOiJIUzI1NiJ9.sig"), None);
+        // Malformed wraps are literals too — the lookup path is only for
+        // exact `${…}` references; anything else IS the bearer.
+        assert_eq!(declared_env_reference(""), None);
+        assert_eq!(declared_env_reference("${"), None);
     }
 
     /// THE PAYDAR CASE (live incident, issue 8e0a1215): an agent whose
@@ -819,11 +841,28 @@ mod refresh_tests {
         std::fs::write(
             dir.join("config").join("trustee.toml"),
             format!(
-                "[agent]\nname = \"{agent_name}\"\n\n[thq]\nagent_name = \"{agent_name}\"\nowner_id = \"{pid}\"\nservice_token = \"farzan_service_account\"\n"
+                "[agent]\nname = \"{agent_name}\"\n\n[thq]\nagent_name = \"{agent_name}\"\nowner_id = \"{pid}\"\nservice_token = \"${{FARZAN_SERVICE_ACCOUNT}}\"\n"
             ),
         )
         .unwrap();
-        std::fs::write(dir.join(".env"), format!("farzan_service_account={token_value}\n")).unwrap();
+        std::fs::write(dir.join(".env"), format!("FARZAN_SERVICE_ACCOUNT={token_value}\n")).unwrap();
+    }
+
+    /// 0.19.7: the thq auto-wire embeds the minted token byte-verbatim —
+    /// the overlay declares the LITERAL JWT, no .env involved.
+    fn make_materialized_literal(home: &PathBuf, pid: &str, agent_name: &str, literal: &str) {
+        let dir = home
+            .join("users")
+            .join(trustee_core::user_hash(pid));
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::write(
+            dir.join("config").join("trustee.toml"),
+            format!(
+                "[agent]\nname = \"{agent_name}\"\n\n[thq]\nagent_name = \"{agent_name}\"\nowner_id = \"{pid}\"\nservice_token = \"{literal}\"\n"
+            ),
+        )
+        .unwrap();
+        // Deliberately NO .env — the literal must not need one.
     }
 
     fn report(pid: &str, outcome: ProfileOutcome) -> ApplyReport {
@@ -942,5 +981,88 @@ mod refresh_tests {
             reason: "x".to_string(),
         }));
         assert!(table.contains_key("legacy-nox"), "unrelated legacy entry untouched");
+    }
+
+    /// 0.19.7 — THE KAVOSH CASE (prod 2026-09-19): thq auto-wire embeds the
+    /// minted JWT byte-verbatim; the old parser resolved it as a variable
+    /// NAME against the agent .env, failed, and removed a dispatchable
+    /// agent. A literal declaration resolves to itself — no .env needed.
+    #[test]
+    fn literal_declaration_resolves_byte_verbatim_without_env() {
+        let base = temp_users_dir("literal");
+        let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJrYXZvc2gifQ.sig";
+        let cfg = DispatchConfig::from_toml(&format!(
+            "[thq]\nagent_name = \"Kavosh\"\nowner_id = \"prof\"\nservice_token = \"{jwt}\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            resolve_user_service_token(&base, &cfg),
+            ServiceTokenResolution::Resolved(jwt.to_string()),
+            "a non-${{…}} declaration IS the credential — byte-verbatim, no .env"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The literal path must NEVER consult the .env — even a .env line
+    /// that happens to start with the token text must not override it.
+    #[test]
+    fn literal_declaration_is_never_treated_as_a_variable_name() {
+        let base = temp_users_dir("literal-not-var");
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.payload.sig";
+        std::fs::write(base.join(".env"), "eyJhbGciOiJIUzI1NiJ9.payload.sig=env-wins\n").unwrap();
+        let cfg = DispatchConfig::from_toml(&format!(
+            "[thq]\nagent_name = \"Kavosh\"\nowner_id = \"prof\"\nservice_token = \"{jwt}\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            resolve_user_service_token(&base, &cfg),
+            ServiceTokenResolution::Resolved(jwt.to_string()),
+            "never treat a non-${{…}} string as a variable name"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 0.19.7 end-to-end dispatch-lane pin of the Kavosh incident shape:
+    /// an auto-wire literal rides the materialized overlay through the
+    /// refresh and lands in the table verbatim.
+    #[test]
+    fn refresh_upserts_auto_wired_literal_entry() {
+        let home = temp_home("auto-wire");
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.auto.wire";
+        make_materialized_literal(&home, "prof-kavosh", "Kavosh", jwt);
+        let table: DashMap<String, ThqDispatchEntry> = DashMap::new();
+
+        refresh_after_apply(&table, &home, &report("prof-kavosh", ProfileOutcome::Applied));
+
+        let e = table.get("Kavosh").expect("auto-wired agent must be dispatchable");
+        assert_eq!(e.service_token.as_deref(), Some(jwt), "byte-verbatim bearer");
+    }
+
+    /// Req 2 (work order 2026-09-19): entries removed as unresolved must
+    /// RE-JOIN on a later refresh once resolvable — no restart. The refresh
+    /// runs every heartbeat cycle, so the very next cycle must recover it.
+    #[test]
+    fn refresh_rejoins_entry_once_credential_resolves() {
+        let home = temp_home("rejoin");
+        let dir = home.join("users").join(trustee_core::user_hash("prof-1"));
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::write(
+            dir.join("config").join("trustee.toml"),
+            "[agent]\nname = \"Farzan\"\n\n[thq]\nagent_name = \"Farzan\"\nowner_id = \"prof-1\"\nservice_token = \"${FARZAN_SERVICE_ACCOUNT}\"\n",
+        )
+        .unwrap();
+        // .env has the never-provisioned placeholder — house convention: NOT a value.
+        std::fs::write(dir.join(".env"), "FARZAN_SERVICE_ACCOUNT=${FARZAN_SERVICE_ACCOUNT}\n").unwrap();
+        let table: DashMap<String, ThqDispatchEntry> = DashMap::new();
+
+        refresh_after_apply(&table, &home, &report("prof-1", ProfileOutcome::Applied));
+        assert!(table.get("Farzan").is_none(), "unresolved → entry out");
+
+        // The credential becomes resolvable (provisioned, no restart).
+        std::fs::write(dir.join(".env"), "FARZAN_SERVICE_ACCOUNT=fresh-token\n").unwrap();
+        refresh_after_apply(&table, &home, &report("prof-1", ProfileOutcome::Unchanged));
+
+        let e = table.get("Farzan").expect("re-join on a later refresh, no restart");
+        assert_eq!(e.service_token.as_deref(), Some("fresh-token"));
     }
 }
