@@ -1730,7 +1730,10 @@ async fn mcp_callback_handler(
 }
 
 /// GET /auth/mcp/status — return connection status for all MCP credentials.
-async fn mcp_status_handler(
+/// v0.19.8: pub(crate) — the xagent impersonation lane (thq console relay)
+/// serves the SAME handler at /xagent/{agent}/api/v1/mcp/status so the
+/// console's MCP Connections overlay works on the split topology.
+pub(crate) async fn mcp_status_handler(
     State(state): State<crate::ServerState>,
     headers: axum::http::HeaderMap,
 ) -> Response {

@@ -277,6 +277,24 @@ pub async fn x_list_models(
     crate::state::in_dispatch_scope(&entry.user_key, routes::list_models(State(state), inner)).await
 }
 
+/// v0.19.8: impersonated MCP credential status — the same handler the
+/// trustee web serves at /auth/mcp/status, resolved in the agent's dispatch
+/// scope (per-credential connected/warn/fail dots for the thq console).
+pub async fn x_mcp_status(
+    State(state): State<ServerState>,
+    Path(agent): Path<String>,
+    headers: HeaderMap,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    Ok(
+        crate::state::in_dispatch_scope(
+            &entry.user_key,
+            crate::auth::mcp_status_handler(State(state), inner),
+        )
+        .await,
+    )
+}
+
 /// The `/xagent/{agent}/api/v1` route tree — merged into the main router.
 pub fn router() -> axum::Router<ServerState> {
     use axum::routing::{get, post};
@@ -325,6 +343,13 @@ pub fn router() -> axum::Router<ServerState> {
             get(x_ws_session_handler),
         )
         .route("/xagent/{agent}/api/v1/models", get(x_list_models))
+        // v0.19.8: the thq console's MCP Connections overlay relays
+        // /api/v1/console/agents/{agent}/mcp/status → THIS route. Without it
+        // the overlay 404s into a misleading "No MCP credentials" message.
+        .route(
+            "/xagent/{agent}/api/v1/mcp/status",
+            get(x_mcp_status),
+        )
 }
 
 #[cfg(test)]
