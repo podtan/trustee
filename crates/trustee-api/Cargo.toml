@@ -1,6 +1,6 @@
 [package]
 name = "trustee-api"
-version = "0.19.9"
+version = "0.19.10"
 edition = "2021"
 description = "REST + WebSocket API server for Trustee agent"
 license = "MIT OR Apache-2.0"
@@ -62,7 +62,7 @@ umf = "0.3.0"
 # Concurrent hash map for per-user session registry
 dashmap = "6"
 # 16C: per-user McpToolLoader cache (loader type + McpConfig parsing)
-abk = { version = "0.19", features = ["config", "agent", "registry-mcp-token"] }
+abk = { version = "0.19", features = ["config", "agent", "registry-mcp-token", "cli"] }
 # SHA-256 for user hash computation
 sha2 = "0.10"
 # Home directory resolution
