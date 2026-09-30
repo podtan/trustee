@@ -1202,3 +1202,69 @@ impl abk::orchestration::output::OutputSink for TuiForwardSink {
         let _ = self.tx.send(msg);
     }
 }
+
+#[cfg(test)]
+mod inject_model_tests {
+    use super::*;
+
+    /// The abk 0.19 `danger_accept_invalid_certs` field must SURVIVE the
+    /// model-override provider swap — inject_model clones raw toml tables,
+    /// so any new provider field rides through untouched. This gate pins
+    /// the pass-through contract: if a future refactor switches to typed
+    /// struct rebuilds and drops unknown fields, this fails loudly.
+    #[test]
+    fn provider_swap_preserves_danger_accept_invalid_certs() {
+        let config_toml = r#"
+[llm.provider]
+name = "cloud"
+base_url = "https://api.openai.com/v1"
+api_key = "${OPENAI_API_KEY}"
+model = "gpt-4o"
+
+[llm.providers.ninfer]
+name = "ninfer"
+provider_type = "openai"
+base_url = "https://10.253.1.9/v1"
+api_key = "${NINFER_API_KEY}"
+model = "qwen3.8-27b"
+models = ["qwen3.8-27b"]
+danger_accept_invalid_certs = true
+"#;
+
+        // Case 1: model override = provider KEY → whole ninfer entry is
+        // swapped into llm.provider — the TLS flag must ride along.
+        let swapped = inject_model(config_toml.to_string(), Some("ninfer".to_string()));
+        let table = swapped.parse::<toml::Value>().expect("swapped config parses");
+        let provider = table
+            .get("llm")
+            .and_then(|l| l.get("provider"))
+            .and_then(|p| p.as_table())
+            .expect("llm.provider present after key swap");
+        assert_eq!(
+            provider.get("base_url").and_then(|v| v.as_str()),
+            Some("https://10.253.1.9/v1"),
+            "swap selected the ninfer provider"
+        );
+        assert_eq!(
+            provider.get("danger_accept_invalid_certs").and_then(|v| v.as_bool()),
+            Some(true),
+            "TLS flag survives the provider swap"
+        );
+
+        // Case 3: literal model string → current provider is edited in
+        // place; the flag (and everything else) must stay untouched.
+        let literal = inject_model(config_toml.to_string(), Some("qwen3.8-27b".to_string()));
+        let table = literal.parse::<toml::Value>().expect("literal config parses");
+        let providers = table
+            .get("llm")
+            .and_then(|l| l.get("providers"))
+            .and_then(|p| p.get("ninfer"))
+            .and_then(|p| p.as_table())
+            .expect("providers table untouched by literal override");
+        assert_eq!(
+            providers.get("danger_accept_invalid_certs").and_then(|v| v.as_bool()),
+            Some(true),
+            "TLS flag untouched in the providers table on literal override"
+        );
+    }
+}
