@@ -65,22 +65,26 @@ pub struct CommandRequest {
     /// override `[llm.provider]` for this command.
     #[serde(default)]
     pub model: Option<String>,
-    /// Optional multimodal image attachments for this command (base64, in
+    /// Optional multimodal attachments for this command (base64, in
     /// memory — the client encodes; the server never touches the filesystem
-    /// for these). Validated by [`validate_attachments`] before execution.
+    /// for these). Images render as image parts; text/markdown files are
+    /// inlined as fenced synthetic text. Validated by
+    /// [`validate_attachments`] before execution.
     #[serde(default)]
     pub attachments: Vec<AttachmentInput>,
 }
 
-/// One image attachment on a [`CommandRequest`] (multimodal input).
+/// One attachment on a [`CommandRequest`] (multimodal input).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AttachmentInput {
-    /// MIME type. Accepted: image/jpeg, image/png, image/gif, image/webp.
+    /// MIME type. Accepted: image/jpeg, image/png, image/gif, image/webp
+    /// (rendered as image parts) and text/plain, text/markdown,
+    /// text/x-markdown (inlined as fenced synthetic text).
     pub mime: String,
-    /// Base64-encoded image bytes. A `data:{mime};base64,` prefix is
+    /// Base64-encoded file bytes. A `data:{mime};base64,` prefix is
     /// tolerated and stripped.
     pub data: String,
-    /// Original file name, when the client knows it (display only).
+    /// Original file name, when the client knows it (display + fence info).
     #[serde(default)]
     pub filename: Option<String>,
 }
@@ -89,6 +93,9 @@ pub struct AttachmentInput {
 pub const MAX_ATTACHMENTS: usize = 4;
 /// Maximum decoded size per image.
 pub const MAX_IMAGE_BYTES: usize = 6 * 1024 * 1024; // 6 MiB
+/// Maximum decoded size per text/markdown file. Text rides the prompt
+/// itself, so it is bounded far tighter than images (token cost).
+pub const MAX_TEXT_BYTES: usize = 256 * 1024; // 256 KiB
 /// Body-limit applied to the command routes (base64 inflates by 4/3).
 pub const ATTACH_BODY_LIMIT: usize = 40 * 1024 * 1024; // 40 MiB
 
@@ -96,16 +103,57 @@ pub const ATTACH_BODY_LIMIT: usize = 40 * 1024 * 1024; // 40 MiB
 pub const ALLOWED_IMAGE_MIMES: [&str; 4] =
     ["image/jpeg", "image/png", "image/gif", "image/webp"];
 
-/// Validate request attachments and convert them to umf sidecar entries.
-///
-/// Fails closed with a descriptive message on: too many attachments,
-/// unsupported MIME, undecodable base64, or an image over
-/// [`MAX_IMAGE_BYTES`] decoded.
-pub fn validate_attachments(
-    inputs: &[AttachmentInput],
-) -> Result<Vec<umf::chatml::ImageAttachment>, String> {
-    use base64::Engine as _;
+/// Accepted text MIME types. `text/x-markdown` is accepted and normalized
+/// to `text/markdown`.
+pub const ALLOWED_TEXT_MIMES: [&str; 3] =
+    ["text/plain", "text/markdown", "text/x-markdown"];
 
+/// Validated attachment set: image sidecars (umf wire form) plus decoded
+/// text files (inlined into the task text by the session layer).
+#[derive(Debug, Default)]
+pub struct ValidatedAttachments {
+    pub images: Vec<umf::chatml::ImageAttachment>,
+    pub text_files: Vec<trustee_core::session::TextFileAttachment>,
+}
+
+/// Decode and clean the base64 payload of one attachment.
+///
+/// Tolerates a data-URL prefix and whitespace the client may have inserted
+/// when chunking long base64 strings.
+fn decode_attachment_base64(
+    idx: usize,
+    name: &str,
+    input: &AttachmentInput,
+) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    let raw = input
+        .data
+        .trim()
+        .strip_prefix("data:")
+        .and_then(|rest| rest.split_once(";base64,"))
+        .map(|(_, b64)| b64)
+        .unwrap_or_else(|| input.data.trim());
+    let cleaned: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(cleaned.as_bytes())
+        .map_err(|e| {
+            format!(
+                "Attachment {} ({}): invalid base64: {}",
+                idx + 1,
+                name,
+                e
+            )
+        })
+}
+
+/// Validate request attachments and split them into image sidecars and
+/// decoded text files.
+///
+/// Fails closed with a descriptive message on: too many attachments
+/// (across BOTH families), unsupported MIME, undecodable base64, an image
+/// over [`MAX_IMAGE_BYTES`], a text file over [`MAX_TEXT_BYTES`], or text
+/// that is not valid UTF-8.
+pub fn validate_attachments(inputs: &[AttachmentInput]) -> Result<ValidatedAttachments, String> {
     if inputs.len() > MAX_ATTACHMENTS {
         return Err(format!(
             "Too many attachments: {} (max {})",
@@ -114,59 +162,87 @@ pub fn validate_attachments(
         ));
     }
 
-    let mut images = Vec::with_capacity(inputs.len());
+    let mut out = ValidatedAttachments::default();
     for (idx, input) in inputs.iter().enumerate() {
+        let name = input.filename.as_deref().unwrap_or("unnamed");
         let mime = input.mime.trim().to_ascii_lowercase();
-        if !ALLOWED_IMAGE_MIMES.contains(&mime.as_str()) {
-            return Err(format!(
-                "Attachment {} ({}): unsupported type '{}' — expected one of {}",
-                idx + 1,
-                input.filename.as_deref().unwrap_or("unnamed"),
-                input.mime,
-                ALLOWED_IMAGE_MIMES.join(", ")
-            ));
-        }
+        let decoded = decode_attachment_base64(idx, name, input)?;
 
-        // Tolerate a data-URL prefix; strip whitespace the client may have
-        // inserted when chunking long base64 strings.
-        let raw = input
-            .data
-            .trim()
-            .strip_prefix("data:")
-            .and_then(|rest| rest.split_once(";base64,"))
-            .map(|(_, b64)| b64)
-            .unwrap_or_else(|| input.data.trim());
-        let cleaned: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
-
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(cleaned.as_bytes())
-            .map_err(|e| {
-                format!(
-                    "Attachment {} ({}): invalid base64: {}",
+        if ALLOWED_IMAGE_MIMES.contains(&mime.as_str()) {
+            if decoded.len() > MAX_IMAGE_BYTES {
+                return Err(format!(
+                    "Attachment {} ({}): {} MiB decoded exceeds the {} MiB limit",
                     idx + 1,
-                    input.filename.as_deref().unwrap_or("unnamed"),
-                    e
+                    name,
+                    decoded.len() / (1024 * 1024),
+                    MAX_IMAGE_BYTES / (1024 * 1024)
+                ));
+            }
+            use base64::Engine as _;
+            let cleaned_b64 =
+                base64::engine::general_purpose::STANDARD.encode(&decoded);
+            let display_name = if name.is_empty() {
+                format!(
+                    "attachment-{}.{}",
+                    idx + 1,
+                    mime.trim_start_matches("image/")
+                )
+            } else {
+                name.to_string()
+            };
+            out.images.push(
+                umf::chatml::ImageAttachment::new(mime.clone(), cleaned_b64)
+                    .with_filename(display_name),
+            );
+        } else if ALLOWED_TEXT_MIMES.contains(&mime.as_str()) {
+            // text/x-markdown is an alias — normalize for the wire/header.
+            let mime = if mime == "text/x-markdown" {
+                "text/markdown".to_string()
+            } else {
+                mime
+            };
+            if decoded.len() > MAX_TEXT_BYTES {
+                return Err(format!(
+                    "Attachment {} ({}): {} KiB of text exceeds the {} KiB limit",
+                    idx + 1,
+                    name,
+                    decoded.len() / 1024,
+                    MAX_TEXT_BYTES / 1024
+                ));
+            }
+            let content = String::from_utf8(decoded).map_err(|_| {
+                format!(
+                    "Attachment {} ({}): not valid UTF-8 — text attachments must decode to UTF-8 (is this a binary file?)",
+                    idx + 1,
+                    name
                 )
             })?;
-        if decoded.len() > MAX_IMAGE_BYTES {
+            let filename = if name.is_empty() {
+                format!(
+                    "attachment-{}.{}",
+                    idx + 1,
+                    if mime == "text/markdown" { "md" } else { "txt" }
+                )
+            } else {
+                name.to_string()
+            };
+            out.text_files.push(trustee_core::session::TextFileAttachment {
+                mime,
+                filename,
+                content,
+            });
+        } else {
             return Err(format!(
-                "Attachment {} ({}): {} MiB decoded exceeds the {} MiB limit",
+                "Attachment {} ({}): unsupported type '{}' — expected one of {} (images) or {} (text/markdown files)",
                 idx + 1,
-                input.filename.as_deref().unwrap_or("unnamed"),
-                decoded.len() / (1024 * 1024),
-                MAX_IMAGE_BYTES / (1024 * 1024)
+                name,
+                input.mime,
+                ALLOWED_IMAGE_MIMES.join(", "),
+                ["text/plain", "text/markdown"].join(", ")
             ));
         }
-
-        images.push(
-            umf::chatml::ImageAttachment::new(mime.clone(), cleaned).with_filename(
-                input.filename.clone().unwrap_or_else(|| {
-                    format!("attachment-{}.{}", idx + 1, mime.trim_start_matches("image/"))
-                }),
-            ),
-        );
     }
-    Ok(images)
+    Ok(out)
 }
 
 #[derive(Debug, Serialize)]
@@ -1257,7 +1333,7 @@ async fn execute_command_inner(
 ) -> Result<(), (StatusCode, String)> {
     // Multimodal: validate attachments FIRST — a malformed or oversized
     // payload must fail with 400 before any session state is touched.
-    let input_images = validate_attachments(&req.attachments)
+    let attachments = validate_attachments(&req.attachments)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let agent_name = {
@@ -1355,7 +1431,8 @@ async fn execute_command_inner(
         session.token_store = Some(token_store.clone());
         session.workflow_permit = Some(permit);
         session.input = req.command;
-        session.input_images = input_images;
+        session.input_images = attachments.images;
+        session.input_text_files = attachments.text_files;
         session.execute_command();
     }
 
@@ -1527,10 +1604,10 @@ mod attachment_tests {
     #[test]
     fn test_validate_attachments_happy_path() {
         let out = validate_attachments(&[input("image/png", TINY_PNG_B64)]).unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].mime, "image/png");
-        assert_eq!(out[0].data, TINY_PNG_B64);
-        assert_eq!(out[0].filename.as_deref(), Some("test.img"));
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].mime, "image/png");
+        assert_eq!(out.images[0].data, TINY_PNG_B64);
+        assert_eq!(out.images[0].filename.as_deref(), Some("test.img"));
     }
 
     #[test]
@@ -1547,7 +1624,7 @@ mod attachment_tests {
     fn test_validate_attachments_data_url_prefix_stripped() {
         let data_url = format!("data:image/png;base64,{}", TINY_PNG_B64);
         let out = validate_attachments(&[input("image/png", &data_url)]).unwrap();
-        assert_eq!(out[0].data, TINY_PNG_B64);
+        assert_eq!(out.images[0].data, TINY_PNG_B64);
     }
 
     #[test]
@@ -1572,6 +1649,95 @@ mod attachment_tests {
         let big = "QUJD".repeat(2 * 1024 * 1024 + 4); // ~6.0000xx MiB decoded
         let err = validate_attachments(&[input("image/png", &big)]).unwrap_err();
         assert!(err.contains("exceeds"), "got: {}", err);
+    }
+
+    fn text_input(mime: &str, content: &str) -> AttachmentInput {
+        use base64::Engine as _;
+        AttachmentInput {
+            mime: mime.to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(content.as_bytes()),
+            filename: Some("notes.md".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_validate_attachments_text_happy_path() {
+        let out = validate_attachments(&[
+            text_input("text/plain", "hello world"),
+            text_input("text/markdown", "# Title\n\nbody"),
+        ])
+        .unwrap();
+        assert!(out.images.is_empty());
+        assert_eq!(out.text_files.len(), 2);
+        assert_eq!(out.text_files[0].mime, "text/plain");
+        assert_eq!(out.text_files[0].content, "hello world");
+        assert_eq!(out.text_files[0].filename, "notes.md");
+        assert_eq!(out.text_files[1].mime, "text/markdown");
+        assert_eq!(out.text_files[1].content, "# Title\n\nbody");
+    }
+
+    #[test]
+    fn test_validate_attachments_x_markdown_normalized() {
+        let out = validate_attachments(&[text_input("text/x-markdown", "# x")]).unwrap();
+        assert_eq!(out.text_files[0].mime, "text/markdown");
+    }
+
+    #[test]
+    fn test_validate_attachments_text_data_url_prefix_stripped() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"readme body");
+        let data_url = format!("data:text/plain;base64,{}", b64);
+        let out = validate_attachments(&[input("text/plain", &data_url)]).unwrap();
+        assert_eq!(out.text_files[0].content, "readme body");
+    }
+
+    #[test]
+    fn test_validate_attachments_text_invalid_utf8_rejected() {
+        let err = validate_attachments(&[input("text/plain", "/v8A")]).unwrap_err(); // 0xFF 0xDF 0x00
+        assert!(err.contains("UTF-8"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_attachments_text_oversize_rejected() {
+        let big = "x".repeat(MAX_TEXT_BYTES + 1024);
+        let err = validate_attachments(&[text_input("text/plain", &big)]).unwrap_err();
+        assert!(err.contains("exceeds"), "got: {}", err);
+        // Exactly at the cap passes.
+        let at_cap = "x".repeat(MAX_TEXT_BYTES);
+        assert!(validate_attachments(&[text_input("text/plain", &at_cap)]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_attachments_mixed_families_preserved() {
+        let out = validate_attachments(&[
+            input("image/png", TINY_PNG_B64),
+            text_input("text/markdown", "# plan"),
+        ])
+        .unwrap();
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.text_files.len(), 1);
+        assert_eq!(out.text_files[0].content, "# plan");
+    }
+
+    #[test]
+    fn test_validate_attachments_too_many_across_families() {
+        let mut inputs = vec![
+            input("image/png", TINY_PNG_B64),
+            input("image/png", TINY_PNG_B64),
+            input("image/png", TINY_PNG_B64),
+            text_input("text/plain", "one"),
+        ];
+        assert!(validate_attachments(&inputs).is_ok()); // exactly 4 = cap
+        inputs.push(text_input("text/markdown", "two")); // 5 > cap
+        let err = validate_attachments(&inputs).unwrap_err();
+        assert!(err.contains("Too many attachments"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_attachments_unsupported_names_both_families() {
+        let err = validate_attachments(&[input("application/pdf", TINY_PNG_B64)]).unwrap_err();
+        assert!(err.contains("text/plain"), "got: {}", err);
+        assert!(err.contains("image/jpeg"), "got: {}", err);
     }
 
     #[test]

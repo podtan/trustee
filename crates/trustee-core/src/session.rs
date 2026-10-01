@@ -45,6 +45,79 @@ pub fn truncate_session_name(command: &str) -> String {
 
 /// Core session state for the Trustee agent.
 ///
+/// One text/markdown file attachment on a user command.
+///
+/// The content is already decoded UTF-8 (the API layer validates before the
+/// session ever sees it). Rendered into the LLM turn as opencode-style
+/// synthetic text: a header line + a fenced block, so text files ride the
+/// same wire form as the user's own words — no provider-side file protocol
+/// needed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TextFileAttachment {
+    /// Declared MIME type ("text/plain" or "text/markdown").
+    pub mime: String,
+    /// Original file name (display + fence info string).
+    pub filename: String,
+    /// Decoded UTF-8 file content.
+    pub content: String,
+}
+
+/// Longest run of backticks in `content` — used to pick a closing fence
+/// longer than anything the file itself contains, so fenced content can
+/// never escape its own block.
+fn longest_backtick_run(content: &str) -> usize {
+    let mut max = 0;
+    let mut run = 0;
+    for c in content.chars() {
+        if c == '`' {
+            run += 1;
+            max = max.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    max
+}
+
+/// Fence string for a fenced block wrapping `content`: at least three
+/// backticks, longer when the content itself contains fences.
+fn fence_for(content: &str) -> String {
+    "`".repeat(3.max(longest_backtick_run(content) + 1))
+}
+
+/// Compose the LLM-visible task text: the user's command plus each text
+/// file as an opencode-style synthetic block — header line (name, mime,
+/// size) + fenced content. The visible transcript keeps echoing the RAW
+/// command; only the model sees the composed form.
+pub fn compose_task_with_text_files(
+    command: &str,
+    files: &[TextFileAttachment],
+) -> String {
+    if files.is_empty() {
+        return command.to_string();
+    }
+    let mut composed = String::with_capacity(command.len() + 64);
+    composed.push_str(command);
+    for f in files {
+        let fence = fence_for(&f.content);
+        let info = match f.filename.rsplit_once('.') {
+            Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && ext.len() <= 8 => ext,
+            _ => "text",
+        };
+        composed.push_str(&format!(
+            "\n\n[Attached file: {} ({}, {} bytes)]\n{}{}\n{}\n{}",
+            f.filename,
+            f.mime,
+            f.content.len(),
+            fence,
+            info,
+            f.content,
+            fence,
+        ));
+    }
+    composed
+}
+
 /// Holds all state that is independent of the presentation layer (TUI, API, Web).
 /// Frontend crates compose this struct and add their own UI-specific fields.
 pub struct Session {
@@ -54,6 +127,11 @@ pub struct Session {
     /// Consumed by `execute_command` and attached to the initial user turn;
     /// callers (API/web) fill this before invoking `execute_command`.
     pub input_images: Vec<umf::chatml::ImageAttachment>,
+    /// Pre-loaded text/markdown file attachments for the next command.
+    /// Same lifecycle as `input_images`: callers fill before
+    /// `execute_command`; consumed exactly once. Composed into the task
+    /// text as fenced synthetic blocks.
+    pub input_text_files: Vec<TextFileAttachment>,
     /// Output log lines
     pub output_lines: Vec<String>,
     /// Sender for messages from async workflows (clone and pass to workflow runners)
@@ -178,6 +256,7 @@ impl Session {
             todo_lines: Vec::new(),
             cancel_token: CancellationToken::new(),
             input_images: Vec::new(),
+            input_text_files: Vec::new(),
             pending_command: None,
             handoff_pending: false,
             pending_tool_lines: Vec::new(),
@@ -488,6 +567,16 @@ impl Session {
                 .push(format!("📎 {} image attachment(s)", input_images.len()));
         }
 
+        // Text/markdown file attachments: same one-command lifecycle.
+        // The transcript echoes the RAW command; the composed text (with
+        // fenced file blocks) is what the model receives.
+        let input_text_files = std::mem::take(&mut self.input_text_files);
+        if !input_text_files.is_empty() {
+            self.output_lines
+                .push(format!("📎 {} file attachment(s)", input_text_files.len()));
+        }
+        let task_text = compose_task_with_text_files(&command, &input_text_files);
+
         let config_toml = match &self.config_toml {
             Some(c) => c.clone(),
             None => {
@@ -598,7 +687,7 @@ impl Session {
                         &config_toml,
                         secrets,
                         build_info,
-                        &command,
+                        &task_text,
                         // Multimodal: web/API callers pass pre-loaded sidecar
                         // entries here; THQ-dispatched text-only commands
                         // arrive with an empty vec.
@@ -1266,5 +1355,71 @@ danger_accept_invalid_certs = true
             Some(true),
             "TLS flag untouched in the providers table on literal override"
         );
+    }
+}
+
+#[cfg(test)]
+mod compose_task_tests {
+    use super::*;
+
+    fn file(mime: &str, filename: &str, content: &str) -> TextFileAttachment {
+        TextFileAttachment {
+            mime: mime.to_string(),
+            filename: filename.to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    #[test]
+    fn no_files_returns_command_unchanged() {
+        assert_eq!(compose_task_with_text_files("do the thing", &[]), "do the thing");
+    }
+
+    #[test]
+    fn single_file_uses_standard_fence() {
+        let out = compose_task_with_text_files(
+            "summarize this",
+            &[file("text/markdown", "notes.md", "# Hello\n\nworld")],
+        );
+        assert!(out.starts_with("summarize this"), "got: {}", out);
+        assert!(out.contains("[Attached file: notes.md (text/markdown, 14 bytes)]"), "got: {}", out);
+        assert!(out.contains("```md\n# Hello\n\nworld\n```"), "got: {}", out);
+    }
+
+    #[test]
+    fn content_with_fences_grows_the_fence() {
+        let content = "```rust\nfn main() {}\n```\ndone";
+        let out = compose_task_with_text_files("check", &[file("text/plain", "code.txt", content)]);
+        // Content contains 3-backtick runs → fence must be 4 backticks so
+        // the file content cannot escape its own block.
+        assert!(out.contains("````txt\n"), "got: {}", out);
+        assert!(out.ends_with("\n````"), "got: {}", out);
+    }
+
+    #[test]
+    fn extensionless_filename_falls_back_to_text_info_string() {
+        let out = compose_task_with_text_files("read", &[file("text/plain", "Makefile", "all:")]);
+        assert!(out.contains("```text\nall:\n```"), "got: {}", out);
+    }
+
+    #[test]
+    fn multiple_files_preserve_order() {
+        let out = compose_task_with_text_files(
+            "compare",
+            &[
+                file("text/plain", "a.txt", "AAA"),
+                file("text/markdown", "b.md", "BBB"),
+            ],
+        );
+        let a = out.find("[Attached file: a.txt").expect("a header");
+        let b = out.find("[Attached file: b.md").expect("b header");
+        assert!(a < b, "files must appear in attachment order");
+    }
+
+    #[test]
+    fn bytes_in_header_reflect_content_length() {
+        let content = "héllo"; // 'é' is 2 bytes UTF-8 → 6 bytes total
+        let out = compose_task_with_text_files("t", &[file("text/plain", "u.txt", content)]);
+        assert!(out.contains("(text/plain, 6 bytes)"), "got: {}", out);
     }
 }
