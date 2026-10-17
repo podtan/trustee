@@ -2,6 +2,76 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.21.1] - 2026-10-17
+
+### Fixed
+
+- **Thinking block renders for vLLM-served thinking models (Pardis GLM-5.3-Flash; nghr 5fc21214)** — trustee providers inherit abk 0.20.1: both inbound reasoning parse sites (`response.rs` non-streaming, `sse.rs` streaming) now accept the `reasoning` key (vLLM ≥0.30 `--reasoning-parser` shape) alongside `reasoning_content` (z.ai/DeepSeek/OpenRouter standard), `reasoning_content` taking precedence. Previously the thinking block rendered on z.ai but not on self-hosted vLLM endpoints — thinking tokens were generated and billed but never displayed. Patch bump of the whole internal dep tree (core 0.8.6 → tui 0.4.7 / api 0.19.14 → root 0.21.1) with exact pins moved in the same release per the crates.io publish doctrine.
+
+## [0.21.0] - 2026-10-03
+
+### Changed
+
+- abk 0.20 (MCP Streamable HTTP transport) propagated through the internal dep tree — trustee 0.21.0 wave (core 0.8.5, tui 0.4.6, api 0.19.13).
+
+## [0.20.0] - 2026-10-01
+
+### Added
+
+- Text and markdown file attachments — opencode-pattern synthetic text inlining (3fb1c61). Version bumps the attachments commit owed: trustee-core 0.8.4 + trustee-api 0.19.12 legs (677fdc4).
+
+## [0.19.11] - 2026-09-30
+
+### Fixed
+
+- abk 0.19 (`danger_accept_invalid_certs`) propagated through the internal dep tree — the publish order that dead tags v0.19.9/v0.19.10 missed; both dead tags disclosed, fix-forward (c6d63ea).
+
+## [0.19.9] / [0.19.10] - 2026-09-30
+
+**DEAD TAGS (pushed, never published — verify failures; disclosed per doctrine):** v0.19.9 — abk `crate::cli` ungated refs under trustee-api's feature set; v0.19.10 — stale published trustee-core pin (two abk versions in one verify graph). Lessons codified in the crates.io publish doctrine.
+
+## [0.19.6] - 2026-09-16
+
+### Changed
+
+- Declared dispatch identity + loud guards (incident fc94aea9).
+
+## [0.19.5] - 2026-09-16
+
+### Changed
+
+- mcp_credentials verbatim embed + orphan reclaim (issue 567a0f40). NOTE: crates.io leg missed (tag-only ship) — disclosed.
+
+## [0.19.4] - 2026-09-16
+
+### Changed
+
+- The 16F dispatch table follows the applier — bind→live in one pull cycle, no restart to (un)bind.
+
+## [0.19.3] - 2026-09-16
+
+### Changed
+
+- Identity anchor: profile-bound namespaces (ec3e0622 rotation-class root fix) + console dispatch bridge for the THQ port.
+
+## [0.19.2] - 2026-09-14
+
+### Fixed
+
+- Secrets materialization resolves bare-token/JSON shapes; empty-.env bug closed (self-heals on first pull).
+
+## [0.19.1] - 2026-09-14
+
+### Changed
+
+- desired_state gates the applier + launch-semantics contract (idle retired) + naming rule.
+
+## [0.19.0] - 2026-09-14
+
+### Added
+
+- Materialization applier + secrets never in logs + version wire-up.
+
 ## [0.18.0] - 2026-09-13
 
 ### Changed
