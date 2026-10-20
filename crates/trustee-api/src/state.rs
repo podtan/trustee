@@ -223,6 +223,69 @@ pub struct McpLoaderEntry {
 /// Minimum delay before retrying a failed MCP loader build (16C).
 pub const MCP_BUILD_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Maximum age of a cached MCP toolset manifest (42131deb).
+///
+/// The 16C fingerprint covers the LOCAL config only — a served-surface
+/// change behind a byte-identical config (bridge/spec deploy) leaves the
+/// fingerprint matching while the cached tool list goes stale: phantom
+/// tools for every fresh session until a restart. Past this age the next
+/// fresh-session dispatch REBUILDS the loader (fresh connect re-lists the
+/// server's tools), bounding the phantom window to ≤ 10 minutes with no
+/// operator action.
+pub const MCP_TOOLSET_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Why a cached MCP loader entry was (or wasn't) reused (42131deb).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LoaderFreshness {
+    /// Fingerprint matches and the entry is young — reuse.
+    Fresh,
+    /// Effective config content changed — rebuild (existing 16C behavior).
+    ConfigChanged,
+    /// Entry older than [`MCP_TOOLSET_MAX_AGE`] — the SERVED surface may
+    /// have changed under an unchanged local config; rebuild so the next
+    /// fresh session re-lists the server's tools.
+    AgedOut,
+    /// Degraded entry still inside the retry backoff — fail loud.
+    Backoff(std::time::Duration),
+}
+
+/// Pure staleness decision for a cache entry — unit-testable; the async
+/// cache path consumes it verbatim (b597c9e9 decide-fn pattern).
+pub(crate) fn loader_freshness(
+    entry_fingerprint: u64,
+    entry_built_at: chrono::DateTime<chrono::Utc>,
+    entry_degraded: Option<&str>,
+    entry_failed_at: Option<chrono::DateTime<chrono::Utc>>,
+    wanted_fingerprint: u64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> LoaderFreshness {
+    // Degraded entries first: a poison entry never sticks forever, but it
+    // is held back for the retry window regardless of age/changes.
+    if entry_degraded.is_some() {
+        if let Some(failed_at) = entry_failed_at {
+            let backoff = chrono::Duration::from_std(MCP_BUILD_RETRY_BACKOFF)
+                .unwrap_or_else(|_| chrono::Duration::seconds(30));
+            if now < failed_at + backoff {
+                return LoaderFreshness::Backoff(
+                    (failed_at + backoff - now)
+                        .to_std()
+                        .unwrap_or_default(),
+                );
+            }
+        }
+    }
+    if wanted_fingerprint != entry_fingerprint {
+        return LoaderFreshness::ConfigChanged;
+    }
+    let max_age = chrono::Duration::from_std(MCP_TOOLSET_MAX_AGE)
+        .unwrap_or_else(|_| chrono::Duration::seconds(600));
+    if now > entry_built_at + max_age {
+        LoaderFreshness::AgedOut
+    } else {
+        LoaderFreshness::Fresh
+    }
+}
+
 /// 16F: per-agent dispatch target — THQ agent_name → the agent-user that
 /// THQ-dispatched sessions must run AS.
 ///
@@ -1009,6 +1072,20 @@ impl ServerState {
             None
         };
 
+        // 92a36073 boot-surface: a MATERIALIZED namespace without per-user
+        // credentials is the shadowing scenario — say so NOW, not in
+        // forensics after a global token answered for it.
+        if let Some(ref user_home) = user_home {
+            if materialized_user_missing_env(user_home) {
+                tracing::warn!(
+                    "user namespace {} is materialized but has NO per-user .env — \
+                     ${{…}} references will fall through to process env \
+                     (global ~/.trustee/.env) and execute under the GLOBAL principal",
+                    &user_hash[..8.min(user_hash.len())]
+                );
+            }
+        }
+
         session.project_id = Some(format!("web{}", &user_hash[..16]));
 
         // ── Per-user .env (Task 2) ──────────────────────────────────────
@@ -1036,7 +1113,11 @@ impl ServerState {
 
         // ── ${VAR} substitution (Task 4) ────────────────────────────────
         if let Some(ref mut config_toml) = session.config_toml {
-            substitute_env_vars(config_toml, &merged_secrets);
+            substitute_env_vars(
+                config_toml,
+                &merged_secrets,
+                &format!("user {}", &user_hash[..8.min(user_hash.len())]),
+            );
         }
 
         // ── Strip per-user secrets (Task 5) ────────────────────────────
@@ -1192,7 +1273,14 @@ impl ServerState {
         }
 
         // Substitute ${VAR} from merged secrets
-        substitute_env_vars(&mut resolved, &merged_secrets);
+        substitute_env_vars(
+            &mut resolved,
+            &merged_secrets,
+            &format!(
+                "resolve_user_config user {}",
+                &trustee_core::user_hash(user_key)[..8]
+            ),
+        );
 
         Some(resolved)
     }
@@ -1224,17 +1312,38 @@ impl ServerState {
         let resolved = self.resolve_user_config(&user_key);
         let fingerprint = fingerprint_mcp_section(resolved.as_deref());
 
-        // Fast path: fresh, non-degraded entry.
+        // Fast path: non-degraded entry that is fresh AND content-current.
         if let Some(entry) = self.mcp_loaders.get(&user_hash) {
-            if entry.degraded.is_none() {
-                if entry.fingerprint == fingerprint {
-                    return Ok(entry.loader.clone());
+            match loader_freshness(
+                entry.fingerprint,
+                entry.built_at,
+                entry.degraded.as_deref(),
+                entry.failed_at,
+                fingerprint,
+                chrono::Utc::now(),
+            ) {
+                LoaderFreshness::Fresh => return Ok(entry.loader.clone()),
+                LoaderFreshness::ConfigChanged => {
+                    // fall through to the rebuild path below
                 }
-            } else if let (Some(err), Some(failed_at)) = (&entry.degraded, entry.failed_at) {
-                let backoff = chrono::Duration::from_std(MCP_BUILD_RETRY_BACKOFF)
-                    .unwrap_or_else(|_| chrono::Duration::seconds(30));
-                if chrono::Utc::now() < failed_at + backoff {
-                    return Err(err.clone());
+                LoaderFreshness::AgedOut => {
+                    // 42131deb: the served surface may have changed behind
+                    // a byte-identical config — rebuild (re-lists tools).
+                    tracing::info!(
+                        "MCP toolset for user {} is {}s old (max {}s) — rebuilding \
+                         to re-list the served surface (phantom-tool guard)",
+                        &user_hash[..8.min(user_hash.len())],
+                        (chrono::Utc::now() - entry.built_at).num_seconds(),
+                        MCP_TOOLSET_MAX_AGE.as_secs()
+                    );
+                }
+                LoaderFreshness::Backoff(remaining) => {
+                    let err = entry
+                        .degraded
+                        .clone()
+                        .unwrap_or_else(|| "previous MCP loader build failed; retry after backoff".to_string());
+                    let _ = remaining;
+                    return Err(err);
                 }
             }
         }
@@ -1249,7 +1358,15 @@ impl ServerState {
 
         // Double-check: another task may have built while we waited.
         if let Some(entry) = self.mcp_loaders.get(&user_hash) {
-            if entry.degraded.is_none() && entry.fingerprint == fingerprint {
+            if loader_freshness(
+                entry.fingerprint,
+                entry.built_at,
+                entry.degraded.as_deref(),
+                entry.failed_at,
+                fingerprint,
+                chrono::Utc::now(),
+            ) == LoaderFreshness::Fresh
+            {
                 return Ok(entry.loader.clone());
             }
         }
@@ -1734,12 +1851,37 @@ fn collect_unresolved_placeholders(value: &toml::Value, out: &mut Vec<String>) {
     }
 }
 
-fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<String, String>) {
+/// Where a `${VAR}` answer came from (92a36073 credential provenance).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SecretSource {
+    /// The secrets map (shared secrets + per-user `.env`, user wins) — the
+    /// attributed, per-identity answer.
+    SecretsMap,
+    /// The PROCESS environment — for the trustee service that is the global
+    /// `~/.trustee/.env` loaded at boot. When this answers for a per-user
+    /// namespace, the per-user credential did NOT answer and a global
+    /// credential did: actions execute under the global principal. Never
+    /// silent — every occurrence is logged at ERROR with the variable named.
+    ProcessEnv,
+    /// Found nowhere; the literal `${…}` remains (the fc94aea9 guard).
+    Unresolved,
+}
+
+/// One resolved (or unresolved) variable from [`substitute_env_vars`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EnvVarResolution {
+    pub name: String,
+    pub source: SecretSource,
+}
+
+fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<String, String>, ctx: &str) -> Vec<EnvVarResolution> {
     // Simple state machine: scan for ${, read until }, replace.
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
-    let mut unresolved: Vec<&str> = Vec::new();
+    // One entry per DISTINCT variable, first sighting wins (a var used
+    // twice resolves from the same source both times).
+    let mut report: Vec<EnvVarResolution> = Vec::new();
 
     while i < bytes.len() {
         if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
@@ -1747,20 +1889,27 @@ fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<Strin
             if let Some(end) = s[i + 2..].find('}') {
                 let var_name = &s[i + 2..i + 2 + end];
                 // Look up in per-user secrets first, then process env
-                if let Some(value) = secrets.get(var_name) {
-                    result.push_str(value);
+                let (replacement, source) = if let Some(value) = secrets.get(var_name) {
+                    (value.clone(), SecretSource::SecretsMap)
                 } else if let Ok(value) = std::env::var(var_name) {
-                    result.push_str(&value);
+                    (value, SecretSource::ProcessEnv)
                 } else {
                     // Not found — leave as-is BUT NOT SILENTLY (incident
                     // fc94aea9, T3): an unresolved ${VAR} once rode to
                     // production authentication as the literal credential.
                     // Every leftover is named, every time.
-                    result.push_str(&s[i..i + 2 + end + 1]);
-                    if !unresolved.contains(&var_name) {
-                        unresolved.push(var_name);
-                    }
+                    (
+                        s[i..i + 2 + end + 1].to_string(),
+                        SecretSource::Unresolved,
+                    )
+                };
+                if !report.iter().any(|r| r.name == var_name) {
+                    report.push(EnvVarResolution {
+                        name: var_name.to_string(),
+                        source,
+                    });
                 }
+                result.push_str(&replacement);
                 i = i + 2 + end + 1;
             } else {
                 // No closing } — copy as-is
@@ -1773,12 +1922,43 @@ fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<Strin
         }
     }
 
+    // 92a36073 — never-silent credential provenance. A process-env answer
+    // for a per-user namespace is the global-token shadowing hazard: the
+    // global principal is about to execute what the per-user identity
+    // should have. ERROR level, EVERY occurrence (no dedup across calls).
+    for r in &report {
+        match r.source {
+            SecretSource::ProcessEnv => tracing::error!(
+                "CREDENTIAL PROVENANCE [{}]: ${{{}}} resolved from PROCESS ENV \
+                 (global ~/.trustee/.env at boot) — no per-user/profile secret \
+                 answered; calls using it execute under the GLOBAL principal. \
+                 Supply the exact-case key in the per-user .env / profile \
+                 secrets to restore attribution.",
+                ctx,
+                r.name
+            ),
+            SecretSource::Unresolved => {
+                // Compose the leftover list for the existing loud line.
+            }
+            SecretSource::SecretsMap => tracing::debug!(
+                "CREDENTIAL PROVENANCE [{}]: ${{{}}} resolved from profile/user secrets",
+                ctx,
+                r.name
+            ),
+        }
+    }
+    let unresolved: Vec<&str> = report
+        .iter()
+        .filter(|r| r.source == SecretSource::Unresolved)
+        .map(|r| r.name.as_str())
+        .collect();
     if !unresolved.is_empty() {
         tracing::warn!(
-            "ENV SUBSTITUTION LEFT {} UNRESOLVED: {} — the literal ${{…}} remains in the \
+            "ENV SUBSTITUTION LEFT {} UNRESOLVED [{}]: {} — the literal ${{…}} remains in the \
              effective config; supply the key in the profile secrets (exact-case KEY=VALUE) \
              or the environment",
             unresolved.len(),
+            ctx,
             unresolved
                 .iter()
                 .map(|v| format!("${{{v}}}"))
@@ -1788,6 +1968,15 @@ fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<Strin
     }
 
     *s = result;
+    report
+}
+
+/// 92a36073 boot-surface check: is a MATERIALIZED namespace missing its
+/// per-user credentials? A directory without a `.env` is exactly the
+/// shadowing scenario (rotated/empty home + global token downstream) —
+/// surface it at boot, not in forensics. Pure so it stays unit-tested.
+pub(crate) fn materialized_user_missing_env(user_home: &std::path::Path) -> bool {
+    user_home.is_dir() && !user_home.join(".env").exists()
 }
 
 // ---------------------------------------------------------------------------
@@ -2184,6 +2373,60 @@ mod mcp_loader_cache_tests {
             "good user has no [mcp] → disabled marker"
         );
     }
+
+    #[tokio::test]
+    async fn aged_out_entry_rebuilds_without_restart() {
+        // THE 42131deb guard: a served-surface change behind a byte-identical
+        // config must be reflected in the NEXT fresh session's manifest —
+        // simulated by rewinding built_at past MCP_TOOLSET_MAX_AGE; the next
+        // dispatch must NOT reuse the stale Arc (it rebuilds + re-lists).
+        let state = state_with_shared("[server]\nport = 8080\n");
+        let user = TempUser::new("agedout");
+        let ts = Arc::new(pep::MemoryTokenStore::new());
+
+        user.write_overlay("[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"v1\"\nurl = \"http://127.0.0.1:9/sse\"\n");
+        let v1 = state
+            .get_or_build_mcp_loader(&user.key, &ts)
+            .await
+            .expect("initial build");
+        let v1 = v1.expect("enabled [mcp] → loader");
+
+        // Simulate time: the entry is now older than the max age, config
+        // byte-identical (fingerprint UNCHANGED — that's the trap).
+        {
+            let mut entry = state
+                .mcp_loaders
+                .get_mut(&trustee_core::user_hash(&user.key))
+                .unwrap();
+            entry.built_at =
+                chrono::Utc::now() - chrono::Duration::seconds(601);
+        }
+
+        let v2 = state
+            .get_or_build_mcp_loader(&user.key, &ts)
+            .await
+            .expect("aged-out dispatch rebuilds");
+        let v2 = v2.expect("rebuilt loader present");
+        assert!(
+            !Arc::ptr_eq(&v1, &v2),
+            "aged-out entry must NOT be reused — fresh connect re-lists the served surface"
+        );
+        let entry = state
+            .mcp_loaders
+            .get(&trustee_core::user_hash(&user.key))
+            .unwrap();
+        assert!(
+            chrono::Utc::now() - entry.built_at < chrono::Duration::seconds(5),
+            "built_at refreshed by the rebuild"
+        );
+
+        // And a young, unchanged entry still hits (no rebuild churn).
+        let v3 = state
+            .get_or_build_mcp_loader(&user.key, &ts)
+            .await
+            .expect("fresh dispatch");
+        assert!(Arc::ptr_eq(&v2, &v3.unwrap()), "young entry hits the cache");
+    }
 }
 
 #[cfg(test)]
@@ -2311,7 +2554,7 @@ token = "${OTHER_TOKEN}"
         let mut secrets = std::collections::HashMap::new();
         secrets.insert("A_TOKEN".to_string(), "resolved-value".to_string());
         let mut s = "x = \"${A_TOKEN}\" y = \"${MISSING_TOKEN}\"".to_string();
-        substitute_env_vars(&mut s, &secrets);
+        let report = substitute_env_vars(&mut s, &secrets, "test");
         assert!(
             s.contains("resolved-value"),
             "declared key resolves: {s}"
@@ -2320,4 +2563,118 @@ token = "${OTHER_TOKEN}"
             s.contains("${MISSING_TOKEN}"),
             "undeclared key keeps the literal (the loader guard turns this into a loud failure): {s}"
         );
+        // 92a36073: the report names each distinct variable and its source.
+        assert_eq!(report.len(), 2, "one entry per distinct var: {report:?}");
+        assert!(report.contains(&EnvVarResolution {
+            name: "A_TOKEN".to_string(),
+            source: SecretSource::SecretsMap
+        }));
+        assert!(report.contains(&EnvVarResolution {
+            name: "MISSING_TOKEN".to_string(),
+            source: SecretSource::Unresolved
+        }));
     }
+
+    #[test]
+    fn substitute_env_vars_reports_process_env_shadow() {
+        // 92a36073: a var ABSENT from the per-user/profile secrets but set
+        // in the process environment is the global-token shadowing shape —
+        // it must be REPORTED as ProcessEnv, and the secrets map must still
+        // win when it DOES carry the key.
+        let var = format!(
+            "RAVAND_PROVENANCE_TEST_{}",
+            std::process::id()
+        );
+        std::env::set_var(&var, "global-env-answer");
+
+        // Absent from secrets → process env answers → ProcessEnv reported.
+        let mut secrets = std::collections::HashMap::new();
+        let mut s = format!("x = \"${{{var}}}\"");
+        let report = substitute_env_vars(&mut s, &secrets, "test-shadow");
+        assert!(s.contains("global-env-answer"), "process env answered: {s}");
+        assert_eq!(
+            report,
+            vec![EnvVarResolution {
+                name: var.clone(),
+                source: SecretSource::ProcessEnv
+            }]
+        );
+
+        // Same var present in secrets → secrets WIN (per-user precedence
+        // unchanged), reported as SecretsMap.
+        secrets.insert(var.clone(), "per-user-answer".to_string());
+        let mut s2 = format!("x = \"${{{var}}}\"");
+        let report2 = substitute_env_vars(&mut s2, &secrets, "test-wins");
+        assert!(s2.contains("per-user-answer"), "user secrets win: {s2}");
+        assert_eq!(
+            report2,
+            vec![EnvVarResolution {
+                name: var.clone(),
+                source: SecretSource::SecretsMap
+            }]
+        );
+
+        std::env::remove_var(&var);
+    }
+
+    #[test]
+    fn materialized_user_missing_env_only_fires_on_dir_without_env() {
+        // 92a36073 boot-surface: warn shape is dir-present + .env-absent.
+        let base = std::env::temp_dir().join(format!(
+            "trustee-envcheck-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+
+        // Not materialized at all → NOT the warning shape.
+        assert!(!materialized_user_missing_env(&base.join("ghost")));
+
+        // Materialized WITHOUT .env → the warning shape.
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(materialized_user_missing_env(&base));
+
+        // Materialized WITH .env → not the warning shape.
+        std::fs::write(base.join(".env"), "K=V\n").unwrap();
+        assert!(!materialized_user_missing_env(&base));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn loader_freshness_decides_all_four_states() {
+        let now = chrono::Utc::now();
+        let fp = 0xABCD_u64;
+        let young = now - chrono::Duration::seconds(60);
+        let old = now - chrono::Duration::seconds(601);
+
+        // Fresh: same fingerprint, young entry.
+        assert_eq!(
+            loader_freshness(fp, young, None, None, fp, now),
+            LoaderFreshness::Fresh
+        );
+        // ConfigChanged: fingerprint differs wins over age.
+        assert_eq!(
+            loader_freshness(fp, old, None, None, 0x1234, now),
+            LoaderFreshness::ConfigChanged
+        );
+        // AgedOut: same fingerprint past the max age — the 42131deb guard.
+        assert_eq!(
+            loader_freshness(fp, old, None, None, fp, now),
+            LoaderFreshness::AgedOut
+        );
+        // Backoff: degraded inside the retry window, even old + unchanged.
+        let failed = now - chrono::Duration::seconds(10);
+        match loader_freshness(fp, old, Some("boom"), Some(failed), fp, now) {
+            LoaderFreshness::Backoff(remaining) => {
+                assert!(remaining.as_secs() >= 15, "~20s left: {remaining:?}");
+            }
+            other => panic!("expected Backoff, got {other:?}"),
+        }
+        // Degraded but PAST backoff → age rules apply (rebuild proceeds).
+        let failed_long = now - chrono::Duration::seconds(120);
+        assert_eq!(
+            loader_freshness(fp, old, Some("boom"), Some(failed_long), fp, now),
+            LoaderFreshness::AgedOut
+        );
+    }
+
