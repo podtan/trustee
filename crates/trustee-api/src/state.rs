@@ -681,6 +681,24 @@ impl ServerState {
         }
     }
 
+    /// Read the destroy-tombstone stamp for a chain, if one exists.
+    ///
+    /// 7df3cae2 (tombstone-shadow class): a destroyed chain whose
+    /// checkpoints sit intact on disk must be DISCLOSED, never shadowed by
+    /// a lying generic absence — readers use this stamp to answer
+    /// tombstoned-but-non-empty loudly. `None` = no marker (chain either
+    /// alive/resumable or genuinely absent).
+    pub fn chain_tombstone_stamp(&self, user_key: &str, chain_id: &str) -> Option<String> {
+        let path = self.tombstone_path(user_key, chain_id)?;
+        let text = std::fs::read_to_string(&path).ok()?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
     /// Look up a live session by any id; on a miss, transparently restore
     /// the checkpoint chain from disk.
     ///

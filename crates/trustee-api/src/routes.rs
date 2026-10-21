@@ -277,6 +277,10 @@ pub struct ResumeResponse {
     pub session_id: String,
     pub checkpoint_id: String,
     pub iteration: u32,
+    /// 7df3cae2: present when the resumed chain carries a destroy tombstone —
+    /// the explicit resume is honored, but the destruction is DISCLOSED
+    /// (tombstoned-but-non-empty loudly), never swallowed.
+    pub tombstoned_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -292,6 +296,10 @@ pub struct SessionHistoryResponse {
     pub iteration: u32,
     pub total_messages: usize,
     pub messages: Vec<trustee_core::sessions::HistoryMessage>,
+    /// 7df3cae2: destroy-tombstone stamp when the chain was explicitly
+    /// destroyed while its transcript stays preserved on disk — the console
+    /// renders the disclosure instead of a silent, unexplained legacy view.
+    pub tombstoned_at: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +395,30 @@ pub struct ModelsResponse {
 // ---------------------------------------------------------------------------
 
 /// Build a SessionResponse from a locked session.
+/// 7df3cae2 (tombstone-shadow class): a destroy-tombstoned chain must answer
+/// LOUDLY and specifically — never the generic lying "Session not found".
+/// The chain EXISTS (destroyed by explicit user terminate) while its
+/// checkpoints sit intact on disk; the auto-restore refusal is by design,
+/// but the refusal must name itself. Falls back to the generic 404 only when
+/// no tombstone exists (genuinely unknown id).
+fn loud_tombstoned_chain_error(
+    state: &ServerState,
+    user_key: &str,
+    session_id: &str,
+    status: StatusCode,
+    verb: &str,
+) -> (StatusCode, String) {
+    match state.chain_tombstone_stamp(user_key, session_id) {
+        Some(stamp) => (
+            status,
+            format!(
+                "chain {session_id} was DESTROYED {stamp} — {verb} refused (destroyed chains never auto-resurrect); transcript preserved on disk: GET /sessions/{session_id}/history reads it, POST /sessions/{session_id}/resume restores it explicitly"
+            ),
+        ),
+        None => (StatusCode::NOT_FOUND, "Session not found".to_string()),
+    }
+}
+
 fn session_to_response(session: &trustee_core::session::Session) -> SessionResponse {
     let workflow_state = match session.workflow_state {
         trustee_core::types::WorkflowState::Idle => "Idle",
@@ -882,6 +914,9 @@ pub async fn resume_session(
         session_id: new_sid.clone(),
         checkpoint_id,
         iteration,
+        // 7df3cae2: explicit resume of a destroyed chain is honored — the
+        // user asked — but the destruction is disclosed on the wire.
+        tombstoned_at: state.chain_tombstone_stamp(&user_key, &checkpoint_session_id),
     });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
@@ -903,6 +938,11 @@ pub async fn get_session_history(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // 7df3cae2: a served transcript for a destroyed chain rides WITH the
+    // destruction stamp — tombstoned-but-non-empty must be loud, and the
+    // pre-0.9.5 Amad-nox corpus is exactly this shape.
+    let tombstoned_at = state.chain_tombstone_stamp(&user_key, &session_id);
+
     match history {
         Some(h) => {
             let resp = Json(SessionHistoryResponse {
@@ -912,6 +952,7 @@ pub async fn get_session_history(
                 iteration: h.iteration,
                 total_messages: h.total_messages,
                 messages: h.messages,
+                tombstoned_at,
             });
             Ok(with_rolling_cookie(resp.into_response(), cookie))
         }
@@ -1079,7 +1120,18 @@ pub async fn get_live_session(
     let (_live_key, session_arc, _ws_tx) = state
         .get_or_restore_session_by_any_id(&user_key, &session_id)
         .await
-        .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
+        .ok_or_else(|| {
+            // 7df3cae2: absence must say WHICH absence. A destroy-tombstoned
+            // chain is not "not found" — it exists, destroyed, transcript
+            // preserved. (Status stays 404: there is no live session.)
+            loud_tombstoned_chain_error(
+                &state,
+                &user_key,
+                &session_id,
+                StatusCode::NOT_FOUND,
+                "no live session",
+            )
+        })?;
 
     let session = session_arc.lock().await;
     let resp = Json(session_to_response(&session));
@@ -1101,7 +1153,17 @@ pub async fn post_command_session(
     let (live_key, session_arc, ws_tx) = state
         .get_or_restore_session_by_any_id(&user_key, &session_id)
         .await
-        .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
+        .ok_or_else(|| {
+            // 7df3cae2: commanding a destroyed chain is a CONFLICT (the chain
+            // exists, destroyed), never a lying "not found".
+            loud_tombstoned_chain_error(
+                &state,
+                &user_key,
+                &session_id,
+                StatusCode::CONFLICT,
+                "command",
+            )
+        })?;
 
     // Get token_store from user's session collection
     let token_store = {
@@ -1141,7 +1203,17 @@ pub async fn post_cancel_session(
     let (_live_key, session_arc, ws_tx) = state
         .get_or_restore_session_by_any_id(&user_key, &session_id)
         .await
-        .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
+        .ok_or_else(|| {
+            // 7df3cae2: cancelling a destroyed chain is a CONFLICT, never a
+            // lying "not found".
+            loud_tombstoned_chain_error(
+                &state,
+                &user_key,
+                &session_id,
+                StatusCode::CONFLICT,
+                "cancel",
+            )
+        })?;
 
     let cancelled = {
         let session = session_arc.lock().await;
@@ -1178,7 +1250,17 @@ pub async fn post_handoff_session(
     let (_live_key, session_arc, _ws_tx) = state
         .get_or_restore_session_by_any_id(&user_key, &session_id)
         .await
-        .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
+        .ok_or_else(|| {
+            // 7df3cae2: handing off from a destroyed chain is a CONFLICT,
+            // never a lying "not found".
+            loud_tombstoned_chain_error(
+                &state,
+                &user_key,
+                &session_id,
+                StatusCode::CONFLICT,
+                "handoff",
+            )
+        })?;
 
     let mut session = session_arc.lock().await;
     session.request_handoff(String::new());
@@ -1752,5 +1834,113 @@ mod attachment_tests {
         .unwrap();
         assert_eq!(req.attachments.len(), 1);
         assert!(req.attachments[0].filename.is_none());
+    }
+}
+
+#[cfg(test)]
+mod tombstone_disclosure_tests {
+    use super::*;
+    use crate::state::ServerState;
+    use trustee_core::session::Session;
+
+    /// Deterministic throwaway user (restore_tests pattern, state.rs).
+    struct TempUser {
+        key: String,
+    }
+
+    impl TempUser {
+        fn new(tag: &str) -> Self {
+            let key = format!("tomb-disclose-{tag}-{}@test.invalid", std::process::id());
+            let home = dirs::home_dir()
+                .expect("HOME available in test env")
+                .join(".trustee")
+                .join("users")
+                .join(trustee_core::user_hash(&key));
+            std::fs::create_dir_all(home).expect("create user home");
+            Self { key }
+        }
+    }
+
+    fn fresh_state() -> ServerState {
+        let (session, _rx) = Session::new();
+        let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(16);
+        let mut state = ServerState::new(session, ws_tx, None);
+        state.config_toml = Some("[agent]\nname = \"trustee\"\n".to_string());
+        state
+    }
+
+    /// Destroy a session attached to a fixed chain id → the marker exists.
+    async fn destroyed_chain(state: &ServerState, user: &TempUser, chain: &str) {
+        let sid = state
+            .create_session(&user.key, None, None, true)
+            .await
+            .expect("create session");
+        let (session, _ws) = state.get_session(&user.key, &sid).await.unwrap();
+        {
+            let mut s = session.lock().await;
+            s.session_id = Some(chain.to_string());
+        }
+        state.destroy_session(&user.key, &sid).await.expect("destroy");
+    }
+
+    /// 7df3cae2: a destroy-tombstoned chain must answer LOUDLY and
+    /// specifically — status the caller asked for, body naming the
+    /// destruction, the preserved transcript, and both recovery lanes.
+    /// Never the generic lying "Session not found".
+    #[tokio::test]
+    async fn tombstoned_chain_error_names_the_destruction() {
+        let state = fresh_state();
+        let user = TempUser::new("loud");
+        let chain = "session_2026_10_04_07_24_feedface";
+        destroyed_chain(&state, &user, chain).await;
+
+        let (status, body) =
+            loud_tombstoned_chain_error(&state, &user.key, chain, StatusCode::CONFLICT, "command");
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("DESTROYED"), "body must name the destruction: {body}");
+        assert!(body.contains(chain), "body must name the chain: {body}");
+        assert!(
+            body.contains("/history"),
+            "body must point at the preserved transcript: {body}"
+        );
+        assert!(
+            body.contains("/resume"),
+            "body must point at the explicit restore lane: {body}"
+        );
+
+        // No tombstone → genuinely unknown id → the generic honest 404.
+        let (status2, body2) = loud_tombstoned_chain_error(
+            &state,
+            &user.key,
+            "session_2099_01_01_00_00_unknown0",
+            StatusCode::CONFLICT,
+            "command",
+        );
+        assert_eq!(status2, StatusCode::NOT_FOUND);
+        assert_eq!(body2, "Session not found");
+    }
+
+    /// 7df3cae2: the tombstone stamp reader — Some(stamp) for a destroyed
+    /// chain, None for anything else; the stamp is the marker's timestamp.
+    #[tokio::test]
+    async fn chain_tombstone_stamp_roundtrips() {
+        let state = fresh_state();
+        let user = TempUser::new("stamp");
+        let chain = "session_2026_10_04_07_24_c0ffee00";
+        destroyed_chain(&state, &user, chain).await;
+
+        let stamp = state
+            .chain_tombstone_stamp(&user.key, chain)
+            .expect("destroyed chain must carry a stamp");
+        assert!(
+            stamp.starts_with("20"),
+            "stamp must be a timestamp, got: {stamp}"
+        );
+        assert!(
+            state
+                .chain_tombstone_stamp(&user.key, "session_2099_01_01_00_00_nomarker")
+                .is_none(),
+            "unknown chain must carry no stamp"
+        );
     }
 }
