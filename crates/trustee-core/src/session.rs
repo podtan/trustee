@@ -234,6 +234,17 @@ pub struct Session {
     /// Surfaced in live-session listings so the UI can show lineage
     /// (Bug 5: "name rotated silently" → "name · ↻2").
     pub handoff_count: u32,
+
+    /// Shared compaction-status handle (abk 0.21.4).
+    ///
+    /// The session owns the handle and threads a clone through the run's
+    /// `RunContext`; abk's compaction loop stamps `in_progress`/`started_at`
+    /// while a summarization run is in flight and records the durable `last`
+    /// trace on completion. trustee-api reads it in the live-session payload
+    /// so consoles can show "compacting…" state that survives a refresh
+    /// (the /compact command never enters the transcript — it is intercepted
+    /// before becoming a task message).
+    pub compaction_status: abk::resume::SharedCompactionStatus,
 }
 
 impl Session {
@@ -279,6 +290,9 @@ impl Session {
             rotating_from_handoff: false,
             briefing_born: false,
             handoff_count: 0,
+            compaction_status: std::sync::Arc::new(std::sync::Mutex::new(
+                abk::resume::CompactionStatus::default(),
+            )),
         };
         (session, workflow_rx)
     }
@@ -327,12 +341,27 @@ impl Session {
                 if self.workflow_state == WorkflowState::Running {
                     self.workflow_state = WorkflowState::Cancelling;
                 }
+                // abk 0.21.4 defensive clear: the compaction loop clears its
+                // own in_progress stamp, but a cancel-mid-compaction aborts
+                // the run task before that clear runs — the workflow-end
+                // boundary is the session-owned backstop (last is kept).
+                if let Ok(mut s) = self.compaction_status.lock() {
+                    s.in_progress = false;
+                    s.started_at = None;
+                    s.reason = None;
+                }
             }
             TuiMessage::WorkflowError(err) => {
                 self.output_lines.push(format!("✗ Error: {}", err));
                 self.output_lines.push("".to_string());
                 if self.workflow_state == WorkflowState::Running {
                     self.workflow_state = WorkflowState::Cancelling;
+                }
+                // Same defensive clear as WorkflowCompleted (cancel/abort backstop).
+                if let Ok(mut s) = self.compaction_status.lock() {
+                    s.in_progress = false;
+                    s.started_at = None;
+                    s.reason = None;
                 }
             }
             TuiMessage::TodoUpdate(content) => {
@@ -607,6 +636,7 @@ impl Session {
         let session_name = self.session_name.clone();
         let home_dir = self.home_dir.clone();
         let mcp_loader = self.mcp_loader.clone();
+        let compaction_status = self.compaction_status.clone();
 
         self.backup_resume_info = self.resume_info.clone();
         let resume_info = self.resume_info.take();
@@ -668,6 +698,13 @@ impl Session {
             if let Some(loader) = &mcp_loader {
                 run_ctx = run_ctx.with_mcp_loader(loader.clone());
             }
+
+            // abk 0.21.4: thread the shared compaction-status handle through
+            // the run context — abk's compaction loop stamps in_progress/
+            // started_at while a summarization run is in flight and records
+            // the durable last trace on completion; trustee-api reads the
+            // same handle in the live payload (console "compacting…" banner).
+            run_ctx = run_ctx.with_compaction_status(compaction_status);
 
             // Run the entire workflow inside a TUI-mode scope and a
             // per-task logger scope. This replaces the old process-global
@@ -1421,5 +1458,54 @@ mod compose_task_tests {
         let content = "héllo"; // 'é' is 2 bytes UTF-8 → 6 bytes total
         let out = compose_task_with_text_files("t", &[file("text/plain", "u.txt", content)]);
         assert!(out.contains("(text/plain, 6 bytes)"), "got: {}", out);
+    }
+}
+
+#[cfg(test)]
+mod compaction_status_tests {
+    use super::*;
+
+    /// abk 0.21.4: the session owns a shared compaction-status handle; the
+    /// run's RunContext carries a CLONE of the same Arc (threaded in
+    /// execute_command), so stamps made inside the run are visible to the
+    /// session — and to trustee-api's live payload — without any polling.
+    #[test]
+    fn session_status_handle_is_shared_state() {
+        let (mut session, _rx) = Session::new();
+        assert!(!session.compaction_status.lock().unwrap().in_progress);
+
+        // Simulate the run-side stamp (what abk's compaction loop does via
+        // the RunContext handle clone).
+        let run_side = session.compaction_status.clone();
+        abk::agent::compaction::stamp_compaction_begin(Some(&run_side), "manual");
+        assert!(session.compaction_status.lock().unwrap().in_progress);
+
+        // The session-owned backstop on workflow end: in_progress clears,
+        // the durable last trace survives.
+        abk::agent::compaction::stamp_compaction_end(
+            Some(&run_side),
+            Some(&abk::agent::compaction::CompactionOutcome {
+                tokens_before: 641_717,
+                tokens_after: 169_970,
+                summary_chars: 4_200,
+                reason: "manual".to_string(),
+            }),
+        );
+        {
+            let s = session.compaction_status.lock().unwrap();
+            assert!(!s.in_progress);
+            let last = s.last.clone().expect("last trace recorded");
+            assert_eq!(last.tokens_after, 169_970);
+        }
+
+        // The defensive clear on WorkflowCompleted/WorkflowError: in_progress
+        // drops even when the run-side clear never ran (cancel-mid-compaction
+        // aborts the task), and last is PRESERVED.
+        abk::agent::compaction::stamp_compaction_begin(Some(&run_side), "auto");
+        assert!(session.compaction_status.lock().unwrap().in_progress);
+        session.handle_workflow_message(TuiMessage::WorkflowError("cancelled".to_string()));
+        let s = session.compaction_status.lock().unwrap();
+        assert!(!s.in_progress, "workflow-end backstop must clear in_progress");
+        assert!(s.last.is_some(), "backstop keeps the durable last trace");
     }
 }

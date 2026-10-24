@@ -42,6 +42,13 @@ pub struct SessionResponse {
     pub session_name: Option<String>,
     pub project_name: Option<String>,
     pub session_id: Option<String>,
+    /// abk 0.21.4: live compaction status — `in_progress` while a
+    /// summarization run is in flight (the /compact command never enters the
+    /// transcript — it is intercepted before becoming a task message), plus
+    /// the durable `last` trace. Additive field: old consoles ignore it;
+    /// new consoles render a "compacting…" banner that survives a refresh
+    /// (the tombstone-disclosure pattern, pairing-safe both directions).
+    pub compaction: abk::resume::CompactionStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -448,6 +455,13 @@ fn session_to_response(session: &trustee_core::session::Session) -> SessionRespo
         session_name: session.session_name.clone(),
         project_name: session.project_name.clone(),
         session_id: session.session_id.clone(),
+        // std Mutex, never held across an await — the session lock is already
+        // held by the caller, so this is a short nested critical section.
+        compaction: session
+            .compaction_status
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default(),
     }
 }
 
