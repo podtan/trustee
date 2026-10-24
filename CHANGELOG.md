@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.0] - 2026-10-24
+
+### Added
+
+- **Session compaction rides abk 0.21 (conservative v1; owner order 2026-10-24)** — `/compact` task and the opt-in `[compaction] auto` gate now work in every trustee session surface (CLI / web / xagent) with ZERO trustee-side code: the command text flows through the existing execute_command → run_task path, abk intercepts it after the checkpoint restore (compact → checkpoint → return; the fresh resumed chain continues compacted via the standard TaskResult.resume_info → Session feedback at session.rs:730), and the auto gate runs pre-request in abk's orchestration loop off the same config TOML trustee already passes. DEFAULT OFF (`[compaction].auto = false`): no behavior change until an explicit `/compact` or a config flip (deploy lane). Mechanism, scope, and non-goals: abk 0.21.0 changelog; design of record = nghr doc 57ef6f9a.
+
+### Changed
+
+- abk pin 0.20 → 0.21 propagated through the internal dep tree in the same release (crates.io publish doctrine): core 0.8.7, tui 0.4.8, api 0.19.17, root 0.22.0.
+
 ## [0.21.1] - 2026-10-17
 
 ### Fixed
