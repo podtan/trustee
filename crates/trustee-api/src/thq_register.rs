@@ -476,9 +476,6 @@ impl Enrollment {
                                 }
                             }
 
-                            let busy = process_busy(&state).await;
-                            // `profiles` was extracted above for the bound-set
-                            // signature — the same array drives the state report.
                             for p in &profiles {
                                 let Some(pid) = p.get("profile_id").and_then(|v| v.as_str())
                                 else {
@@ -487,7 +484,15 @@ impl Enrollment {
                                 // Launch-semantics contract (v0.19.1): the
                                 // observed string is PER PROFILE — derived
                                 // from what the applier actually did.
-                                let observed = report.observed_for(pid, busy);
+                                // v0.19.19 (defect 3d497e9f): the busy
+                                // component is PER-AGENT — THIS profile's
+                                // own user bucket, not the process. The
+                                // process-wide scan made every profile
+                                // report "running" when ANY agent had a
+                                // live session (the owner-hit: desired=
+                                // running profiles never started).
+                                let agent_busy = agent_busy(&state, pid).await;
+                                let observed = report.observed_for(pid, agent_busy);
                                 match report_state(&client, &cfg, &cred, pid, &observed).await {
                                     StateOutcome::Ok => {}
                                     StateOutcome::Forbidden => {
@@ -776,19 +781,37 @@ fn truncate(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-/// Process-wide health: busy = ANY live session in ANY user bucket is
-/// Running. The runtime IS the process — per-user state is irrelevant
-/// here (that is the three-concept boundary).
+/// Per-agent health (defect 3d497e9f): busy = ANY live session whose home
+/// namespace is THIS profile's (`user_hash(profile_id)`) is Running. The
+/// per-profile state report must derive its predicate from the profile's
+/// OWN scope — the old process-wide scan (`process_busy`, every user
+/// bucket) made every profile report "running" when ANY agent had a live
+/// session, while the caller-bucket-scoped sessions API said [].
 ///
+/// The namespace match rides the session's own `home_dir` (set at creation
+/// by `apply_user_isolation` from the effective user key — the dispatch
+/// entry's `user_key` = the profile_id for materialized agents), so the
+/// identity holds regardless of which bucket key the session landed under.
 /// DashMap guards are dropped before any await (house pattern).
-async fn process_busy(state: &crate::state::ServerState) -> bool {
-    let mut handles = Vec::new();
+async fn agent_busy(state: &crate::state::ServerState, profile_id: &str) -> bool {
+    let namespace = trustee_core::user_hash(profile_id);
+    let mut ours = Vec::new();
     for user in state.sessions.iter() {
         for entry in user.value().sessions.iter() {
-            handles.push(entry.value().session.clone());
+            let session = entry.value().session.clone();
+            let is_ours = session
+                .lock()
+                .await
+                .home_dir
+                .as_ref()
+                .map(|h| h.to_string_lossy().contains(&namespace))
+                .unwrap_or(false);
+            if is_ours {
+                ours.push(session);
+            }
         }
     }
-    for session in handles {
+    for session in ours {
         if session.lock().await.workflow_state == trustee_core::types::WorkflowState::Running {
             return true;
         }
@@ -1179,19 +1202,47 @@ agent_name = "nox"
     #[tokio::test]
     async fn fresh_process_is_not_busy() {
         let state = open_state();
-        assert!(!process_busy(&state).await);
+        assert!(!agent_busy(&state, "prof-1111").await);
     }
 
     #[tokio::test]
-    async fn any_running_session_makes_process_busy() {
+    async fn running_session_in_own_namespace_makes_agent_busy() {
         let state = open_state();
-        // default bucket, first session — flip it to Running
+        let pid = "prof-1111";
+        let namespace = trustee_core::user_hash(pid);
+        // default bucket, first session — point its home at the profile's
+        // namespace (what apply_user_isolation does for dispatched
+        // sessions), flip it to Running.
         let session = {
             let user = state.sessions.get("default").unwrap();
             let entry = user.value().sessions.get("default").unwrap();
-            entry.value().session.clone()
+            let s = entry.value().session.clone();
+            s.lock().await.home_dir =
+                Some(std::path::PathBuf::from(format!("/tmp/x/users/{namespace}")));
+            s
         };
         session.lock().await.workflow_state = trustee_core::types::WorkflowState::Running;
-        assert!(process_busy(&state).await);
+        assert!(agent_busy(&state, pid).await);
+    }
+
+    /// THE REGRESSION PIN (defect 3d497e9f): another agent's live session
+    /// must NOT report THIS profile running — the process-wide scan did
+    /// exactly that and desired=running profiles never started.
+    #[tokio::test]
+    async fn running_session_in_another_namespace_does_not_make_agent_busy() {
+        let state = open_state();
+        let session = {
+            let user = state.sessions.get("default").unwrap();
+            let entry = user.value().sessions.get("default").unwrap();
+            let s = entry.value().session.clone();
+            s.lock().await.home_dir =
+                Some(std::path::PathBuf::from("/tmp/x/users/other-namespace"));
+            s
+        };
+        session.lock().await.workflow_state = trustee_core::types::WorkflowState::Running;
+        assert!(
+            !agent_busy(&state, "prof-1111").await,
+            "another agent's live session must NOT report this profile running"
+        );
     }
 }

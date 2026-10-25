@@ -76,10 +76,18 @@ impl ApplyReport {
     /// The observed_state string the state-report lane sends for this
     /// profile — the LAUNCH SEMANTICS contract (Paydar item 2, decided:
     /// option (b) refined). The ladder tells the truth per profile:
-    /// - process has live sessions            → "running"
+    /// - THIS AGENT has live sessions         → "running"
     /// - materialized, ready, not yet used    → "materialized"
     /// - desired_state gated it               → "stopped"
     /// - apply failed                         → "failed"
+    ///
+    /// v0.19.19 (defect 3d497e9f): `busy` is PER-AGENT — the caller passes
+    /// the profile's OWN user-bucket health (`agent_busy`, the session's
+    /// home namespace = user_hash(profile_id)), never the process-wide
+    /// scan. The old process-wide predicate made every profile report
+    /// "running" when ANY agent had a live session — the owner-hit:
+    /// desired=running profiles never started, and the thq profiles table
+    /// displayed the same lie.
     pub fn observed_for(&self, profile_id: &str, busy: bool) -> String {
         let Some(p) = self.profiles.iter().find(|p| p.profile_id == profile_id) else {
             return if busy {
