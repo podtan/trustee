@@ -220,6 +220,10 @@ pub fn current_target_triple() -> &'static str {
     { "aarch64-unknown-linux-gnu" }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     { "x86_64-unknown-linux-gnu" }
+    #[cfg(all(target_os = "android", target_arch = "aarch64"))]
+    { "aarch64-linux-android" }
+    #[cfg(all(target_os = "android", target_arch = "x86_64"))]
+    { "x86_64-linux-android" }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     { "aarch64-apple-darwin" }
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -231,6 +235,8 @@ pub fn current_target_triple() -> &'static str {
     #[cfg(not(any(
         all(target_os = "linux", target_arch = "aarch64"),
         all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "android", target_arch = "aarch64"),
+        all(target_os = "android", target_arch = "x86_64"),
         all(target_os = "macos", target_arch = "aarch64"),
         all(target_os = "macos", target_arch = "x86_64"),
         all(target_os = "windows", target_arch = "x86_64"),
