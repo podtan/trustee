@@ -749,8 +749,24 @@ async fn run_web_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let agent_name = "trustee";
     let (config_path, secrets_path, _, _) = get_config_paths(agent_name);
 
-    let local_secrets = load_env_file(&secrets_path)
-        .map_err(|e| format!("Failed to read secrets from {}: {}", secrets_path.display(), e))?;
+    // WEB MODE ONLY (550504c4, Hamrah 2026-10-26): the .env is OPTIONAL here —
+    // secrets can come via the process environment (Android: the app passes
+    // them from the Keystore via ProcessBuilder, no file ever touches disk).
+    // The desktop TUI/CLI sites KEEP the .env hard error (owner constraint:
+    // desktop flow unchanged). Guard (Rahnama/PM): a missing .env warns LOUD
+    // at startup — silent-start with an empty secrets map must not happen.
+    let local_secrets = if secrets_path.exists() {
+        load_env_file(&secrets_path)
+            .map_err(|e| format!("Failed to read secrets from {}: {}", secrets_path.display(), e))?
+    } else {
+        eprintln!(
+            "⚠️  No secrets file at {} — continuing with process-env secrets only. \
+             ${{VAR}} references in the config resolve from the environment; \
+             if none are set, LLM/MCP auth WILL fail with a clear error at first use.",
+            secrets_path.display()
+        );
+        HashMap::new()
+    };
 
     let (user_config_toml, secrets) = match load_remote_config(&local_secrets).await {
         Some((remote_config, remote_secrets)) => {
