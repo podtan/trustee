@@ -1056,6 +1056,13 @@ impl ServerState {
     /// checkpoint data from disk (history, session list, session detail)
     /// and must NOT create ghost sessions as a side effect.
     pub fn get_user_home_dir(&self, user_key: &str) -> Option<std::path::PathBuf> {
+        // TRUSTEE_CLASSIC_HOME=1 (Android single-user loopback, Hamrah
+        // 2026-10-26): use the CLASSIC home — the same one the command path
+        // and the CLI write to — so the session list/resume/history see the
+        // real sessions instead of an empty users/{hash}/ namespace.
+        if std::env::var("TRUSTEE_CLASSIC_HOME").as_deref() == Ok("1") {
+            return dirs::home_dir().map(|home| home.join(".trustee"));
+        }
         let user_key = effective_user_key(user_key);
         let hash = trustee_core::user_hash(&user_key);
         dirs::home_dir().map(|home| home.join(".trustee").join("users").join(&hash))
@@ -1078,6 +1085,14 @@ impl ServerState {
     /// Hashing goes through the single consolidated [`trustee_core::user_hash`]
     /// so the web path and the CLI path can never drift apart.
     fn apply_user_isolation(&self, session: &mut Session, user_key: &str) {
+        // TRUSTEE_CLASSIC_HOME=1 (Android single-user loopback): the classic
+        // home — the per-user isolation only applies in multi-user web mode.
+        if std::env::var("TRUSTEE_CLASSIC_HOME").as_deref() == Ok("1") {
+            if let Some(home) = dirs::home_dir() {
+                session.home_dir = Some(home.join(".trustee"));
+            }
+            return;
+        }
         let user_key = effective_user_key(user_key);
         let user_hash = trustee_core::user_hash(&user_key);
 

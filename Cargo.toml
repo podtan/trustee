@@ -60,3 +60,12 @@ trustee-upgrade = { version = "0.1.2", path = "crates/trustee-upgrade" }
 [workspace]
 members = ["crates/trustee-api", "crates/trustee-core", "crates/trustee-tui", "crates/trustee-web", "crates/trustee-upgrade"]
 resolver = "2"
+
+# Android build profile (Hamrah 2026-10-26): size-optimized for the mobile lib.
+# The desktop release profile is UNCHANGED — this profile is only used by the
+# android builds (cargo ndk --profile android-release).
+[profile.android-release]
+inherits = "release"
+lto = "thin"
+opt-level = "s"
+strip = true
