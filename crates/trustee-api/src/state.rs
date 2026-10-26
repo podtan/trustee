@@ -538,6 +538,13 @@ impl ServerState {
             &uuid::Uuid::new_v4().to_string()[..8]
         );
 
+        // PIN the session identity (Hamrah 2026-10-26, restore-reattach fix):
+        // the registry key IS the disk chain id. Without this, the first
+        // command's abk run auto-generates a DIFFERENT session_id for the
+        // on-disk checkpoint chain, and get_or_restore_session_by_any_id can
+        // never find the chain by the live id after an engine restart.
+        session.session_id = Some(session_id.clone());
+
         let now = chrono::Utc::now();
 
         // Insert into user's sessions DashMap
