@@ -864,7 +864,7 @@ pub async fn resume_session(
     .unwrap_or_else(|| format!("Resumed: {}", checkpoint_session_id));
 
     let new_sid = state
-        .create_session(&user_key, Some(session_name), None, false)
+        .create_session(&user_key, Some(session_name), None, true)
         .await
         .map_err(|e| match e {
             crate::state::SessionError::MaxSessionsReached(n) => {
