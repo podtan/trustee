@@ -46,10 +46,7 @@ pub(crate) fn effective_user_key(user_key: &str) -> String {
 
 /// Wrap a dispatched handler so every user-key-derived resolution inside it
 /// pins to the binding's key (see [`USER_KEY_OVERRIDE`]).
-pub(crate) async fn in_dispatch_scope<F: std::future::Future>(
-    user_key: &str,
-    fut: F,
-) -> F::Output {
+pub(crate) async fn in_dispatch_scope<F: std::future::Future>(user_key: &str, fut: F) -> F::Output {
     USER_KEY_OVERRIDE.scope(user_key.to_string(), fut).await
 }
 
@@ -108,9 +105,8 @@ pub fn apply_home_links() -> Vec<String> {
             }
             match std::fs::rename(&from_dir, &to_dir) {
                 Ok(()) => {
-                    let msg = format!(
-                        "home link applied: {from} → {to} (config/sessions restored)"
-                    );
+                    let msg =
+                        format!("home link applied: {from} → {to} (config/sessions restored)");
                     tracing::info!("home_links: {msg}");
                     report.push(msg);
                 }
@@ -267,9 +263,7 @@ pub(crate) fn loader_freshness(
                 .unwrap_or_else(|_| chrono::Duration::seconds(30));
             if now < failed_at + backoff {
                 return LoaderFreshness::Backoff(
-                    (failed_at + backoff - now)
-                        .to_std()
-                        .unwrap_or_default(),
+                    (failed_at + backoff - now).to_std().unwrap_or_default(),
                 );
             }
         }
@@ -318,7 +312,10 @@ pub fn service_issuers_from_config(config_toml: &str) -> Vec<String> {
     let Ok(v) = config_toml.parse::<toml::Value>() else {
         return Vec::new();
     };
-    let Some(creds) = v.get("mcp").and_then(|m| m.get("credentials")).and_then(|c| c.as_table())
+    let Some(creds) = v
+        .get("mcp")
+        .and_then(|m| m.get("credentials"))
+        .and_then(|c| c.as_table())
     else {
         return Vec::new();
     };
@@ -399,7 +396,9 @@ impl ServerState {
             token_store,
             active_session_id: Mutex::new(String::new()),
         };
-        user_sessions.sessions.insert("default".to_string(), initial_entry);
+        user_sessions
+            .sessions
+            .insert("default".to_string(), initial_entry);
 
         sessions.insert("default".to_string(), user_sessions);
 
@@ -475,7 +474,22 @@ impl ServerState {
     ///
     /// Creates a fresh `Session::new()`, copies shared config, sets per-user
     /// isolation, creates a broadcast channel, spawns a drain task, and inserts
-    /// into the user's session DashMap. The new session becomes the "active" one.
+    /// into the user's session DashMap.
+    ///
+    /// The session identity is PINNED here (c2f9508, restore-reattach fix):
+    /// `session.session_id` = the registry key, so the disk checkpoint chain id
+    /// and the live session id coincide and `get_or_restore_session_by_any_id`
+    /// can re-attach a client by the id it already holds after an engine
+    /// restart. The abk first-command auto-derive still fires for TUI/desktop
+    /// sessions (no registry key there). Resumed sessions overwrite the pin
+    /// with the resumed chain id (routes::resume_session) — chain semantics
+    /// preserved.
+    ///
+    /// `activate` opts the new session in as the "active" one: fresh-start
+    /// paths pass `true`; `resume_session` passes `false` — resuming a
+    /// checkpoint never hijacks the caller's active-session pointer (the
+    /// session-scoped consumers re-point themselves from the returned id; the
+    /// first session-scoped command flips the pointer MRU).
     pub async fn create_session(
         &self,
         user_key: &str,
@@ -576,12 +590,7 @@ impl ServerState {
             .get(&session_id)
             .map(|e| e.session.clone());
         if let Some(session_arc) = session_arc {
-            self.spawn_user_drain_task(
-                session_id.clone(),
-                session_arc,
-                ws_tx_entry,
-                workflow_rx,
-            );
+            self.spawn_user_drain_task(session_id.clone(), session_arc, ws_tx_entry, workflow_rx);
         }
 
         Ok(session_id)
@@ -756,13 +765,10 @@ impl ServerState {
 
         // The chain must exist on disk with at least one checkpoint;
         // otherwise this id is genuinely unknown → 404 semantics.
-        let info = trustee_core::sessions::create_resume_info(
-            &config_toml,
-            chain_id,
-            home_dir.as_deref(),
-        )
-        .await
-        .ok()??;
+        let info =
+            trustee_core::sessions::create_resume_info(&config_toml, chain_id, home_dir.as_deref())
+                .await
+                .ok()??;
 
         // Single-flight per chain id: racing lookups dedupe on the DashMap
         // entry — the first insert wins, the loser adopts the winner.
@@ -863,7 +869,8 @@ impl ServerState {
     }
 
     /// List all active sessions for a user, sorted by last_active desc.
-    pub async fn list_sessions(&self, user_key: &str) -> Vec<SessionListItem> {        let Some(user_sessions) = self.sessions.get(user_key) else {
+    pub async fn list_sessions(&self, user_key: &str) -> Vec<SessionListItem> {
+        let Some(user_sessions) = self.sessions.get(user_key) else {
             return Vec::new();
         };
 
@@ -1038,7 +1045,11 @@ impl ServerState {
     pub async fn ensure_user_session(
         &self,
         user_key: &str,
-    ) -> (Arc<Mutex<Session>>, broadcast::Sender<String>, Arc<pep::MemoryTokenStore>) {
+    ) -> (
+        Arc<Mutex<Session>>,
+        broadcast::Sender<String>,
+        Arc<pep::MemoryTokenStore>,
+    ) {
         let (_id, session, ws_tx, token_store) = self.ensure_active_session(user_key).await;
         (session, ws_tx, token_store)
     }
@@ -1067,7 +1078,21 @@ impl ServerState {
         // 2026-10-26): use the CLASSIC home — the same one the command path
         // and the CLI write to — so the session list/resume/history see the
         // real sessions instead of an empty users/{hash}/ namespace.
+        //
+        // LEAK GUARD (Ravand 2026-10-27 review): under this gate EVERY user
+        // shares the classic home — per-user checkpoint isolation is OFF.
+        // That is correct ONLY for the single-user loopback. If the env is
+        // set on a multi-user server by accident, all users would see each
+        // other's checkpoint chains — say so LOUD, once, at first use.
         if std::env::var("TRUSTEE_CLASSIC_HOME").as_deref() == Ok("1") {
+            static GATE_WARNED: std::sync::Once = std::sync::Once::new();
+            GATE_WARNED.call_once(|| {
+                tracing::warn!(
+                    "TRUSTEE_CLASSIC_HOME=1 — ALL users share the classic home \
+                     (~/.trustee); per-user checkpoint isolation is OFF. \
+                     Single-user loopback ONLY — unset this env on multi-user servers."
+                );
+            });
             return dirs::home_dir().map(|home| home.join(".trustee"));
         }
         let user_key = effective_user_key(user_key);
@@ -1079,7 +1104,10 @@ impl ServerState {
     ///
     /// Returns `(config_toml, home_dir)`. If config is not loaded,
     /// config_toml will be None.
-    pub fn get_user_config_and_home(&self, user_key: &str) -> (Option<String>, Option<std::path::PathBuf>) {
+    pub fn get_user_config_and_home(
+        &self,
+        user_key: &str,
+    ) -> (Option<String>, Option<std::path::PathBuf>) {
         (self.config_toml.clone(), self.get_user_home_dir(user_key))
     }
 
@@ -1145,7 +1173,8 @@ impl ServerState {
 
         // ── Per-user config overlay (Task 3) ────────────────────────────
         if let Some(ref user_home) = user_home {
-            if let Some(merged) = self.merge_user_config(user_home, session.config_toml.as_deref()) {
+            if let Some(merged) = self.merge_user_config(user_home, session.config_toml.as_deref())
+            {
                 session.config_toml = Some(merged);
                 tracing::debug!("Merged per-user config into session");
             }
@@ -1220,10 +1249,7 @@ impl ServerState {
             return None;
         }
         let user_config_toml = std::fs::read_to_string(&user_config_path).ok()?;
-        let shared = shared_config
-            .unwrap_or("")
-            .parse::<toml::Value>()
-            .ok()?;
+        let shared = shared_config.unwrap_or("").parse::<toml::Value>().ok()?;
         let overlay = user_config_toml.parse::<toml::Value>().ok()?;
 
         let allowed = |section: &str| {
@@ -1378,10 +1404,9 @@ impl ServerState {
                     );
                 }
                 LoaderFreshness::Backoff(remaining) => {
-                    let err = entry
-                        .degraded
-                        .clone()
-                        .unwrap_or_else(|| "previous MCP loader build failed; retry after backoff".to_string());
+                    let err = entry.degraded.clone().unwrap_or_else(|| {
+                        "previous MCP loader build failed; retry after backoff".to_string()
+                    });
                     let _ = remaining;
                     return Err(err);
                 }
@@ -1562,8 +1587,7 @@ impl ServerState {
                     }
                 }
 
-                let json =
-                    serde_json::to_string(&SerializableMessage(&msg)).unwrap_or_default();
+                let json = serde_json::to_string(&SerializableMessage(&msg)).unwrap_or_default();
                 let _ = ws_tx.send(json);
             }
             tracing::debug!("Drain task ended for session: {}", session_id);
@@ -1614,8 +1638,7 @@ impl ServerState {
                     }
                 }
 
-                let json =
-                    serde_json::to_string(&SerializableMessage(&msg)).unwrap_or_default();
+                let json = serde_json::to_string(&SerializableMessage(&msg)).unwrap_or_default();
                 let _ = ws_tx.send(json);
             }
             tracing::debug!("Drain task ended for session: {}", session_id);
@@ -1651,13 +1674,10 @@ impl ServerState {
             .get(axum::http::header::COOKIE)
             .and_then(|v| v.to_str().ok())
             .and_then(|cookies| {
-                cookies
-                    .split(';')
-                    .map(|c| c.trim())
-                    .find_map(|c| {
-                        c.strip_prefix(&format!("{}=", auth.config.cookie_name))
-                            .map(|s| s.to_string())
-                    })
+                cookies.split(';').map(|c| c.trim()).find_map(|c| {
+                    c.strip_prefix(&format!("{}=", auth.config.cookie_name))
+                        .map(|s| s.to_string())
+                })
             });
 
         if let Some(session_id) = cookie_session_id {
@@ -1773,10 +1793,7 @@ impl<'a> serde::Serialize for SerializableMessage<'a> {
                 s.serialize_field("state", "Idle")?;
                 s.end()
             }
-            TuiMessage::ToolPending {
-                tool_name,
-                hint,
-            } => {
+            TuiMessage::ToolPending { tool_name, hint } => {
                 let mut s = serializer.serialize_struct("msg", 3)?;
                 s.serialize_field("type", "ToolPending")?;
                 s.serialize_field("tool_name", tool_name)?;
@@ -1914,7 +1931,11 @@ pub(crate) struct EnvVarResolution {
     pub source: SecretSource,
 }
 
-fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<String, String>, ctx: &str) -> Vec<EnvVarResolution> {
+fn substitute_env_vars(
+    s: &mut String,
+    secrets: &std::collections::HashMap<String, String>,
+    ctx: &str,
+) -> Vec<EnvVarResolution> {
     // Simple state machine: scan for ${, read until }, replace.
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
@@ -1938,10 +1959,7 @@ fn substitute_env_vars(s: &mut String, secrets: &std::collections::HashMap<Strin
                     // fc94aea9, T3): an unresolved ${VAR} once rode to
                     // production authentication as the literal credential.
                     // Every leftover is named, every time.
-                    (
-                        s[i..i + 2 + end + 1].to_string(),
-                        SecretSource::Unresolved,
-                    )
+                    (s[i..i + 2 + end + 1].to_string(), SecretSource::Unresolved)
                 };
                 if !report.iter().any(|r| r.name == var_name) {
                     report.push(EnvVarResolution {
@@ -2112,8 +2130,14 @@ mod tests {
 
         let merged_val = parse(&merged);
         let expected = parse("[server]\nport = 8080\n\n[mcp]\nmode = \"user\"\n");
-        assert_eq!(merged_val, expected, "merged config must be shared + [mcp] overlay only");
-        assert!(merged_val.get("auth").is_none(), "overlay [auth] must be dropped");
+        assert_eq!(
+            merged_val, expected,
+            "merged config must be shared + [mcp] overlay only"
+        );
+        assert!(
+            merged_val.get("auth").is_none(),
+            "overlay [auth] must be dropped"
+        );
     }
 
     /// (b) No overlay file → merge is a no-op (None), shared config untouched.
@@ -2438,8 +2462,7 @@ mod mcp_loader_cache_tests {
                 .mcp_loaders
                 .get_mut(&trustee_core::user_hash(&user.key))
                 .unwrap();
-            entry.built_at =
-                chrono::Utc::now() - chrono::Duration::seconds(601);
+            entry.built_at = chrono::Utc::now() - chrono::Duration::seconds(601);
         }
 
         let v2 = state
@@ -2525,7 +2548,10 @@ mod restore_tests {
             s.session_id = Some("session_2026_09_04_10_00_aaaabbbb".to_string());
         }
 
-        state.destroy_session(&user.key, &sid).await.expect("destroy");
+        state
+            .destroy_session(&user.key, &sid)
+            .await
+            .expect("destroy");
 
         let path = state
             .tombstone_path(&user.key, "session_2026_09_04_10_00_aaaabbbb")
@@ -2537,7 +2563,10 @@ mod restore_tests {
             .create_session(&user.key, None, None, true)
             .await
             .expect("create second session");
-        state.destroy_session(&user.key, &sid2).await.expect("destroy 2");
+        state
+            .destroy_session(&user.key, &sid2)
+            .await
+            .expect("destroy 2");
         // (No assertion beyond "no panic": session_id was None → no new markers.)
     }
 
@@ -2549,15 +2578,17 @@ mod restore_tests {
         let state = fresh_state();
         let user = TempUser::new("shapes");
         assert!(state.tombstone_path(&user.key, "default").is_none());
-        let out = state.get_or_restore_session_by_any_id(&user.key, "default").await;
+        let out = state
+            .get_or_restore_session_by_any_id(&user.key, "default")
+            .await;
         assert!(out.is_none());
     }
 }
 
-    #[test]
-    fn collect_unresolved_placeholders_walks_the_tree() {
-        let section: toml::Value = toml::from_str(
-            r#"
+#[test]
+fn collect_unresolved_placeholders_walks_the_tree() {
+    let section: toml::Value = toml::from_str(
+        r#"
 [credentials.farzan_service_account]
 service_token = "${FARZAN_SERVICE_ACCOUNT}"
 issuer_url = "https://ok.example"
@@ -2572,149 +2603,142 @@ name = "other"
 url = "https://other.example"
 token = "${OTHER_TOKEN}"
 "#,
-        )
-        .unwrap();
-        let mut out = Vec::new();
-        collect_unresolved_placeholders(&section, &mut out);
-        out.sort();
-        assert_eq!(
-            out,
-            vec!["${FARZAN_SERVICE_ACCOUNT}".to_string(), "${OTHER_TOKEN}".to_string()],
-            "every leftover placeholder in the [mcp] tree must be collected, deduped"
-        );
-        // clean section → nothing
-        let clean: toml::Value = toml::from_str("[x]\ny = \"z\"\n").unwrap();
-        let mut out2 = Vec::new();
-        collect_unresolved_placeholders(&clean, &mut out2);
-        assert!(out2.is_empty());
-    }
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    collect_unresolved_placeholders(&section, &mut out);
+    out.sort();
+    assert_eq!(
+        out,
+        vec![
+            "${FARZAN_SERVICE_ACCOUNT}".to_string(),
+            "${OTHER_TOKEN}".to_string()
+        ],
+        "every leftover placeholder in the [mcp] tree must be collected, deduped"
+    );
+    // clean section → nothing
+    let clean: toml::Value = toml::from_str("[x]\ny = \"z\"\n").unwrap();
+    let mut out2 = Vec::new();
+    collect_unresolved_placeholders(&clean, &mut out2);
+    assert!(out2.is_empty());
+}
 
-    #[test]
-    fn substitute_env_vars_resolves_and_keeps_leftovers_deterministically() {
-        let mut secrets = std::collections::HashMap::new();
-        secrets.insert("A_TOKEN".to_string(), "resolved-value".to_string());
-        let mut s = "x = \"${A_TOKEN}\" y = \"${MISSING_TOKEN}\"".to_string();
-        let report = substitute_env_vars(&mut s, &secrets, "test");
-        assert!(
-            s.contains("resolved-value"),
-            "declared key resolves: {s}"
-        );
-        assert!(
-            s.contains("${MISSING_TOKEN}"),
-            "undeclared key keeps the literal (the loader guard turns this into a loud failure): {s}"
-        );
-        // 92a36073: the report names each distinct variable and its source.
-        assert_eq!(report.len(), 2, "one entry per distinct var: {report:?}");
-        assert!(report.contains(&EnvVarResolution {
-            name: "A_TOKEN".to_string(),
+#[test]
+fn substitute_env_vars_resolves_and_keeps_leftovers_deterministically() {
+    let mut secrets = std::collections::HashMap::new();
+    secrets.insert("A_TOKEN".to_string(), "resolved-value".to_string());
+    let mut s = "x = \"${A_TOKEN}\" y = \"${MISSING_TOKEN}\"".to_string();
+    let report = substitute_env_vars(&mut s, &secrets, "test");
+    assert!(s.contains("resolved-value"), "declared key resolves: {s}");
+    assert!(
+        s.contains("${MISSING_TOKEN}"),
+        "undeclared key keeps the literal (the loader guard turns this into a loud failure): {s}"
+    );
+    // 92a36073: the report names each distinct variable and its source.
+    assert_eq!(report.len(), 2, "one entry per distinct var: {report:?}");
+    assert!(report.contains(&EnvVarResolution {
+        name: "A_TOKEN".to_string(),
+        source: SecretSource::SecretsMap
+    }));
+    assert!(report.contains(&EnvVarResolution {
+        name: "MISSING_TOKEN".to_string(),
+        source: SecretSource::Unresolved
+    }));
+}
+
+#[test]
+fn substitute_env_vars_reports_process_env_shadow() {
+    // 92a36073: a var ABSENT from the per-user/profile secrets but set
+    // in the process environment is the global-token shadowing shape —
+    // it must be REPORTED as ProcessEnv, and the secrets map must still
+    // win when it DOES carry the key.
+    let var = format!("RAVAND_PROVENANCE_TEST_{}", std::process::id());
+    std::env::set_var(&var, "global-env-answer");
+
+    // Absent from secrets → process env answers → ProcessEnv reported.
+    let mut secrets = std::collections::HashMap::new();
+    let mut s = format!("x = \"${{{var}}}\"");
+    let report = substitute_env_vars(&mut s, &secrets, "test-shadow");
+    assert!(s.contains("global-env-answer"), "process env answered: {s}");
+    assert_eq!(
+        report,
+        vec![EnvVarResolution {
+            name: var.clone(),
+            source: SecretSource::ProcessEnv
+        }]
+    );
+
+    // Same var present in secrets → secrets WIN (per-user precedence
+    // unchanged), reported as SecretsMap.
+    secrets.insert(var.clone(), "per-user-answer".to_string());
+    let mut s2 = format!("x = \"${{{var}}}\"");
+    let report2 = substitute_env_vars(&mut s2, &secrets, "test-wins");
+    assert!(s2.contains("per-user-answer"), "user secrets win: {s2}");
+    assert_eq!(
+        report2,
+        vec![EnvVarResolution {
+            name: var.clone(),
             source: SecretSource::SecretsMap
-        }));
-        assert!(report.contains(&EnvVarResolution {
-            name: "MISSING_TOKEN".to_string(),
-            source: SecretSource::Unresolved
-        }));
-    }
+        }]
+    );
 
-    #[test]
-    fn substitute_env_vars_reports_process_env_shadow() {
-        // 92a36073: a var ABSENT from the per-user/profile secrets but set
-        // in the process environment is the global-token shadowing shape —
-        // it must be REPORTED as ProcessEnv, and the secrets map must still
-        // win when it DOES carry the key.
-        let var = format!(
-            "RAVAND_PROVENANCE_TEST_{}",
-            std::process::id()
-        );
-        std::env::set_var(&var, "global-env-answer");
+    std::env::remove_var(&var);
+}
 
-        // Absent from secrets → process env answers → ProcessEnv reported.
-        let mut secrets = std::collections::HashMap::new();
-        let mut s = format!("x = \"${{{var}}}\"");
-        let report = substitute_env_vars(&mut s, &secrets, "test-shadow");
-        assert!(s.contains("global-env-answer"), "process env answered: {s}");
-        assert_eq!(
-            report,
-            vec![EnvVarResolution {
-                name: var.clone(),
-                source: SecretSource::ProcessEnv
-            }]
-        );
+#[test]
+fn materialized_user_missing_env_only_fires_on_dir_without_env() {
+    // 92a36073 boot-surface: warn shape is dir-present + .env-absent.
+    let base = std::env::temp_dir().join(format!("trustee-envcheck-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
 
-        // Same var present in secrets → secrets WIN (per-user precedence
-        // unchanged), reported as SecretsMap.
-        secrets.insert(var.clone(), "per-user-answer".to_string());
-        let mut s2 = format!("x = \"${{{var}}}\"");
-        let report2 = substitute_env_vars(&mut s2, &secrets, "test-wins");
-        assert!(s2.contains("per-user-answer"), "user secrets win: {s2}");
-        assert_eq!(
-            report2,
-            vec![EnvVarResolution {
-                name: var.clone(),
-                source: SecretSource::SecretsMap
-            }]
-        );
+    // Not materialized at all → NOT the warning shape.
+    assert!(!materialized_user_missing_env(&base.join("ghost")));
 
-        std::env::remove_var(&var);
-    }
+    // Materialized WITHOUT .env → the warning shape.
+    std::fs::create_dir_all(&base).unwrap();
+    assert!(materialized_user_missing_env(&base));
 
-    #[test]
-    fn materialized_user_missing_env_only_fires_on_dir_without_env() {
-        // 92a36073 boot-surface: warn shape is dir-present + .env-absent.
-        let base = std::env::temp_dir().join(format!(
-            "trustee-envcheck-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&base);
+    // Materialized WITH .env → not the warning shape.
+    std::fs::write(base.join(".env"), "K=V\n").unwrap();
+    assert!(!materialized_user_missing_env(&base));
 
-        // Not materialized at all → NOT the warning shape.
-        assert!(!materialized_user_missing_env(&base.join("ghost")));
+    let _ = std::fs::remove_dir_all(&base);
+}
 
-        // Materialized WITHOUT .env → the warning shape.
-        std::fs::create_dir_all(&base).unwrap();
-        assert!(materialized_user_missing_env(&base));
+#[test]
+fn loader_freshness_decides_all_four_states() {
+    let now = chrono::Utc::now();
+    let fp = 0xABCD_u64;
+    let young = now - chrono::Duration::seconds(60);
+    let old = now - chrono::Duration::seconds(601);
 
-        // Materialized WITH .env → not the warning shape.
-        std::fs::write(base.join(".env"), "K=V\n").unwrap();
-        assert!(!materialized_user_missing_env(&base));
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn loader_freshness_decides_all_four_states() {
-        let now = chrono::Utc::now();
-        let fp = 0xABCD_u64;
-        let young = now - chrono::Duration::seconds(60);
-        let old = now - chrono::Duration::seconds(601);
-
-        // Fresh: same fingerprint, young entry.
-        assert_eq!(
-            loader_freshness(fp, young, None, None, fp, now),
-            LoaderFreshness::Fresh
-        );
-        // ConfigChanged: fingerprint differs wins over age.
-        assert_eq!(
-            loader_freshness(fp, old, None, None, 0x1234, now),
-            LoaderFreshness::ConfigChanged
-        );
-        // AgedOut: same fingerprint past the max age — the 42131deb guard.
-        assert_eq!(
-            loader_freshness(fp, old, None, None, fp, now),
-            LoaderFreshness::AgedOut
-        );
-        // Backoff: degraded inside the retry window, even old + unchanged.
-        let failed = now - chrono::Duration::seconds(10);
-        match loader_freshness(fp, old, Some("boom"), Some(failed), fp, now) {
-            LoaderFreshness::Backoff(remaining) => {
-                assert!(remaining.as_secs() >= 15, "~20s left: {remaining:?}");
-            }
-            other => panic!("expected Backoff, got {other:?}"),
+    // Fresh: same fingerprint, young entry.
+    assert_eq!(
+        loader_freshness(fp, young, None, None, fp, now),
+        LoaderFreshness::Fresh
+    );
+    // ConfigChanged: fingerprint differs wins over age.
+    assert_eq!(
+        loader_freshness(fp, old, None, None, 0x1234, now),
+        LoaderFreshness::ConfigChanged
+    );
+    // AgedOut: same fingerprint past the max age — the 42131deb guard.
+    assert_eq!(
+        loader_freshness(fp, old, None, None, fp, now),
+        LoaderFreshness::AgedOut
+    );
+    // Backoff: degraded inside the retry window, even old + unchanged.
+    let failed = now - chrono::Duration::seconds(10);
+    match loader_freshness(fp, old, Some("boom"), Some(failed), fp, now) {
+        LoaderFreshness::Backoff(remaining) => {
+            assert!(remaining.as_secs() >= 15, "~20s left: {remaining:?}");
         }
-        // Degraded but PAST backoff → age rules apply (rebuild proceeds).
-        let failed_long = now - chrono::Duration::seconds(120);
-        assert_eq!(
-            loader_freshness(fp, old, Some("boom"), Some(failed_long), fp, now),
-            LoaderFreshness::AgedOut
-        );
+        other => panic!("expected Backoff, got {other:?}"),
     }
-
+    // Degraded but PAST backoff → age rules apply (rebuild proceeds).
+    let failed_long = now - chrono::Duration::seconds(120);
+    assert_eq!(
+        loader_freshness(fp, old, Some("boom"), Some(failed_long), fp, now),
+        LoaderFreshness::AgedOut
+    );
+}

@@ -7,14 +7,14 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, State,
     },
-    response::{IntoResponse, Json, Response},
     http::{header, StatusCode},
+    response::{IntoResponse, Json, Response},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::ServerState;
 use crate::state::SessionError;
+use crate::ServerState;
 
 /// Attach a `Set-Cookie` header to a response if the cookie value is present.
 fn with_rolling_cookie(mut response: Response, cookie: Option<String>) -> Response {
@@ -107,13 +107,11 @@ pub const MAX_TEXT_BYTES: usize = 256 * 1024; // 256 KiB
 pub const ATTACH_BODY_LIMIT: usize = 40 * 1024 * 1024; // 40 MiB
 
 /// Accepted image MIME types (mirrors abk's file-extension whitelist).
-pub const ALLOWED_IMAGE_MIMES: [&str; 4] =
-    ["image/jpeg", "image/png", "image/gif", "image/webp"];
+pub const ALLOWED_IMAGE_MIMES: [&str; 4] = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 
 /// Accepted text MIME types. `text/x-markdown` is accepted and normalized
 /// to `text/markdown`.
-pub const ALLOWED_TEXT_MIMES: [&str; 3] =
-    ["text/plain", "text/markdown", "text/x-markdown"];
+pub const ALLOWED_TEXT_MIMES: [&str; 3] = ["text/plain", "text/markdown", "text/x-markdown"];
 
 /// Validated attachment set: image sidecars (umf wire form) plus decoded
 /// text files (inlined into the task text by the session layer).
@@ -143,14 +141,7 @@ fn decode_attachment_base64(
     let cleaned: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
     base64::engine::general_purpose::STANDARD
         .decode(cleaned.as_bytes())
-        .map_err(|e| {
-            format!(
-                "Attachment {} ({}): invalid base64: {}",
-                idx + 1,
-                name,
-                e
-            )
-        })
+        .map_err(|e| format!("Attachment {} ({}): invalid base64: {}", idx + 1, name, e))
 }
 
 /// Validate request attachments and split them into image sidecars and
@@ -186,8 +177,7 @@ pub fn validate_attachments(inputs: &[AttachmentInput]) -> Result<ValidatedAttac
                 ));
             }
             use base64::Engine as _;
-            let cleaned_b64 =
-                base64::engine::general_purpose::STANDARD.encode(&decoded);
+            let cleaned_b64 = base64::engine::general_purpose::STANDARD.encode(&decoded);
             let display_name = if name.is_empty() {
                 format!(
                     "attachment-{}.{}",
@@ -233,11 +223,12 @@ pub fn validate_attachments(inputs: &[AttachmentInput]) -> Result<ValidatedAttac
             } else {
                 name.to_string()
             };
-            out.text_files.push(trustee_core::session::TextFileAttachment {
-                mime,
-                filename,
-                content,
-            });
+            out.text_files
+                .push(trustee_core::session::TextFileAttachment {
+                    mime,
+                    filename,
+                    content,
+                });
         } else {
             return Err(format!(
                 "Attachment {} ({}): unsupported type '{}' — expected one of {} (images) or {} (text/markdown files)",
@@ -561,7 +552,10 @@ pub async fn list_models(
         .map(|ps| ps.iter().map(|(_, v)| to_info(v)).collect::<Vec<_>>())
         .unwrap_or_default();
 
-    let resp = Json(ModelsResponse { provider, providers });
+    let resp = Json(ModelsResponse {
+        provider,
+        providers,
+    });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
@@ -781,13 +775,17 @@ pub async fn get_session_detail(
         }
     };
 
-    let detail = trustee_core::sessions::get_session_detail(&config_toml, &session_id, home_dir.as_deref())
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let detail =
+        trustee_core::sessions::get_session_detail(&config_toml, &session_id, home_dir.as_deref())
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     match detail {
         Some((session, checkpoints)) => {
-            let resp = Json(SessionDetailResponse { session, checkpoints });
+            let resp = Json(SessionDetailResponse {
+                session,
+                checkpoints,
+            });
             Ok(with_rolling_cookie(resp.into_response(), cookie))
         }
         None => Err((StatusCode::NOT_FOUND, "Session not found".to_string())),
@@ -863,13 +861,21 @@ pub async fn resume_session(
     .map(|d| format!("Resumed: {}", d))
     .unwrap_or_else(|| format!("Resumed: {}", checkpoint_session_id));
 
+    // activate=false (documented design, restored 2026-10-27): resuming a
+    // checkpoint must NOT hijack the caller's active-session pointer — on a
+    // multi-session server a resume from one client would silently re-point
+    // every legacy-route client onto the resumed chain. Both consumers are
+    // session-scoped and re-point themselves from this response's session_id
+    // (the THQ console and the Android app post-4801f26); the first
+    // session-scoped command flips the pointer MRU (post_command_session).
     let new_sid = state
-        .create_session(&user_key, Some(session_name), None, true)
+        .create_session(&user_key, Some(session_name), None, false)
         .await
         .map_err(|e| match e {
-            crate::state::SessionError::MaxSessionsReached(n) => {
-                (StatusCode::TOO_MANY_REQUESTS, format!("Max {} sessions reached", n))
-            }
+            crate::state::SessionError::MaxSessionsReached(n) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("Max {} sessions reached", n),
+            ),
             crate::state::SessionError::NotFound(_) => {
                 (StatusCode::NOT_FOUND, "Session not found".to_string())
             }
@@ -880,10 +886,10 @@ pub async fn resume_session(
 
     // 4. Load checkpoint data into the new session
     {
-        let (session_arc, _ws_tx) = state
-            .get_session(&user_key, &new_sid)
-            .await
-            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Failed to get new session".to_string()))?;
+        let (session_arc, _ws_tx) = state.get_session(&user_key, &new_sid).await.ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to get new session".to_string(),
+        ))?;
 
         let mut session = session_arc.lock().await;
         session.resume_info = Some(resume_info);
@@ -912,10 +918,10 @@ pub async fn resume_session(
     }
 
     // 5. Broadcast resume event on the new session's WS
-    let (_, ws_tx) = state
-        .get_session(&user_key, &new_sid)
-        .await
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Failed to get session WS".to_string()))?;
+    let (_, ws_tx) = state.get_session(&user_key, &new_sid).await.ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Failed to get session WS".to_string(),
+    ))?;
     let msg = serde_json::json!({
         "type": "SessionResumed",
         "session_id": checkpoint_session_id,
@@ -996,7 +1002,10 @@ pub async fn set_session_name(
         session.session_name = Some(req.name.clone());
     }
 
-    let resp = Json(SetNameResponse { accepted: true, name: req.name });
+    let resp = Json(SetNameResponse {
+        accepted: true,
+        name: req.name,
+    });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
@@ -1018,7 +1027,10 @@ pub async fn set_project_name(
         session.project_name = Some(req.name.clone());
     }
 
-    let resp = Json(SetNameResponse { accepted: true, name: req.name });
+    let resp = Json(SetNameResponse {
+        accepted: true,
+        name: req.name,
+    });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
@@ -1036,7 +1048,12 @@ pub async fn new_session(
             .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let session_id = state
-        .create_session(&user_key, req.session_name.clone(), req.identity.clone(), true)
+        .create_session(
+            &user_key,
+            req.session_name.clone(),
+            req.identity.clone(),
+            true,
+        )
         .await
         .map_err(|e| match e {
             SessionError::MaxSessionsReached(n) => (
@@ -1079,7 +1096,12 @@ pub async fn create_session(
             .map_err(|s| (s, "Unauthorized".to_string()))?;
 
     let session_id = state
-        .create_session(&user_key, req.session_name.clone(), req.identity.clone(), true)
+        .create_session(
+            &user_key,
+            req.session_name.clone(),
+            req.identity.clone(),
+            true,
+        )
         .await
         .map_err(|e| match e {
             SessionError::MaxSessionsReached(n) => (
@@ -1113,7 +1135,10 @@ pub async fn create_session(
         }
     }
 
-    let resp = Json(CreateSessionResponse { session_id, accepted: true });
+    let resp = Json(CreateSessionResponse {
+        session_id,
+        accepted: true,
+    });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
@@ -1305,7 +1330,10 @@ pub async fn set_session_name_session(
         session.session_name = Some(req.name.clone());
     }
 
-    let resp = Json(SetNameResponse { accepted: true, name: req.name });
+    let resp = Json(SetNameResponse {
+        accepted: true,
+        name: req.name,
+    });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
 
@@ -1429,8 +1457,8 @@ async fn execute_command_inner(
 ) -> Result<(), (StatusCode, String)> {
     // Multimodal: validate attachments FIRST — a malformed or oversized
     // payload must fail with 400 before any session state is touched.
-    let attachments = validate_attachments(&req.attachments)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let attachments =
+        validate_attachments(&req.attachments).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let agent_name = {
         let session = session_arc.lock().await;
@@ -1450,11 +1478,13 @@ async fn execute_command_inner(
 
         // Handle session_id / resume_info (same as original post_command)
         if let Some(ref client_session_id) = req.session_id {
-            // NOTE: session.session_id is only ever set when None (pre-0.9.17
-            // semantics preserved) — it is never overwritten by a client id.
-            // Torpi/THQ consoles send the live registry key here; trustee-web
-            // sends the checkpoint-chain id from ResumeInfo. Clobbering the
-            // chain id with the registry key would corrupt checkpoint routing.
+            // NOTE: session.session_id is PINNED at creation (c2f9508 — the
+            // registry key) or set to the resumed chain id (resume_session) —
+            // it is never overwritten by a client id (pre-0.9.17 semantics
+            // preserved: clobbering the chain id with a client id would
+            // corrupt checkpoint routing). Torpi/THQ consoles send the live
+            // registry key here; trustee-web sends the checkpoint-chain id
+            // from ResumeInfo — both already match what the session holds.
             if session.session_id.is_none() {
                 session.session_id = Some(client_session_id.clone());
             }
@@ -1480,13 +1510,12 @@ async fn execute_command_inner(
             if session.resume_info.is_none() && !stale_during_rotation_window {
                 if let Some(ref config_toml) = session.config_toml.clone() {
                     let home_dir = session.home_dir.as_deref();
-                    if let Ok(Some(info)) =
-                        trustee_core::sessions::create_resume_info(
-                            config_toml,
-                            client_session_id,
-                            home_dir,
-                        )
-                        .await
+                    if let Ok(Some(info)) = trustee_core::sessions::create_resume_info(
+                        config_toml,
+                        client_session_id,
+                        home_dir,
+                    )
+                    .await
                     {
                         session.resume_info = Some(info);
                     }
@@ -1508,7 +1537,12 @@ async fn execute_command_inner(
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "Server overloaded".to_string()))?;
+            .map_err(|_| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Server overloaded".to_string(),
+                )
+            })?;
 
         // 16C: resolve the per-user MCP loader lazily at dispatch start so
         // overlay edits apply without session recreation; the fingerprint
@@ -1604,10 +1638,10 @@ async fn resolve_access_token_for_mcp(
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .and_then(|cookies| {
-            cookies
-                .split(';')
-                .map(|c| c.trim())
-                .find_map(|c| c.strip_prefix(&format!("{}=", auth.config.cookie_name)).map(|s| s.to_string()))
+            cookies.split(';').map(|c| c.trim()).find_map(|c| {
+                c.strip_prefix(&format!("{}=", auth.config.cookie_name))
+                    .map(|s| s.to_string())
+            })
         })
         .ok_or("no session cookie")?;
 
@@ -1839,8 +1873,7 @@ mod attachment_tests {
     #[test]
     fn test_command_request_attachments_default_empty() {
         // Old clients (no attachments field) must keep deserializing.
-        let req: CommandRequest =
-            serde_json::from_str(r#"{"command": "hello"}"#).unwrap();
+        let req: CommandRequest = serde_json::from_str(r#"{"command": "hello"}"#).unwrap();
         assert!(req.attachments.is_empty());
         let req: CommandRequest = serde_json::from_str(
             r#"{"command": "hi", "attachments": [{"mime": "image/png", "data": "AAAA"}]}"#,
@@ -1894,7 +1927,10 @@ mod tombstone_disclosure_tests {
             let mut s = session.lock().await;
             s.session_id = Some(chain.to_string());
         }
-        state.destroy_session(&user.key, &sid).await.expect("destroy");
+        state
+            .destroy_session(&user.key, &sid)
+            .await
+            .expect("destroy");
     }
 
     /// 7df3cae2: a destroy-tombstoned chain must answer LOUDLY and
@@ -1911,7 +1947,10 @@ mod tombstone_disclosure_tests {
         let (status, body) =
             loud_tombstoned_chain_error(&state, &user.key, chain, StatusCode::CONFLICT, "command");
         assert_eq!(status, StatusCode::CONFLICT);
-        assert!(body.contains("DESTROYED"), "body must name the destruction: {body}");
+        assert!(
+            body.contains("DESTROYED"),
+            "body must name the destruction: {body}"
+        );
         assert!(body.contains(chain), "body must name the chain: {body}");
         assert!(
             body.contains("/history"),
