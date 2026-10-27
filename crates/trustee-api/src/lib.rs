@@ -202,20 +202,14 @@ pub async fn run(
         .nest("/auth", auth::auth_routes())
         // Protected API routes
         .route("/api/v1/models", get(routes::list_models))
-        .route("/api/v1/session", get(routes::get_session))
-        .route(
-            "/api/v1/session/command",
-            post(routes::post_command).layer(axum::extract::DefaultBodyLimit::max(
-                routes::ATTACH_BODY_LIMIT,
-            )),
-        )
-        .route("/api/v1/session/cancel", post(routes::post_cancel))
-        .route("/api/v1/session/handoff", post(routes::post_handoff))
-        .route("/api/v1/session/stream", get(routes::ws_handler))
-        // Session naming
-        .route("/api/v1/session/name", post(routes::set_session_name))
-        .route("/api/v1/session/new", post(routes::new_session))
-        .route("/api/v1/project/name", post(routes::set_project_name))
+        // LEGACY ACTIVE-SESSION ROUTES RETIRED (2026-10-27, owner order):
+        // /api/v1/session, /session/command, /session/cancel, /session/handoff,
+        // /session/stream, /session/name, /session/new, /project/name — the
+        // mutable active-pointer surface. Every consumer is session-scoped
+        // (THQ console, trustee-web, Android app post-4801f26); the pointer
+        // machinery (ensure_active_session / active_session_id) is removed
+        // with them — it was the root of the resumed-session bug class
+        // (22f8745e).
         // Session discovery & resume
         // Session discovery & resume (checkpoint-based, existing)
         .route(

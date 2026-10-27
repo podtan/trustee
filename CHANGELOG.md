@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.0] - 2026-10-27
+
+### Removed
+
+- **Legacy active-session routes RETIRED (owner order 2026-10-27)** — the mutable active-pointer wire surface is gone: `GET /api/v1/session`, `POST /api/v1/session/command|cancel|handoff|name|new`, `GET /api/v1/session/stream`, `POST /api/v1/project/name`. Every consumer is session-scoped (THQ console `/console/agents/{id}/sessions/*`, trustee-web migrated in this release, Android app 4801f26); the engine ships embedded everywhere (Android jniLibs, desktop co-deployed) so there is no version-skew window. The pointer machinery (`UserSessions.active_session_id`, `ensure_active_session`, `ensure_user_session`, `set_active_session`, the `create_session(activate)` param, the destroy-time MRU re-pick) is removed with them — it was the root of the resumed-session bug class (22f8745e: the arbitrary DashMap-first fallback + the pointer hijack on resume). Session-scoped surface (complete): `POST /api/v1/sessions` (create — response `session_id` is the handle), `GET /api/v1/sessions/live`, `GET /api/v1/sessions/{id}/live` (live-first, restore-on-miss), `POST /api/v1/sessions/{id}/command|cancel|handoff|name|resume`, `GET /api/v1/sessions/{id}/stream|history`, `DELETE /api/v1/sessions/{id}`.
+
+### Changed
+
+- **trustee-web (bundled UI) fully migrated to the session-scoped surface** — the default view attaches to the newest live session (or creates one; `ensureAttachedSession`), the WS is session-scoped (`/sessions/{id}/stream`), the legacy `/session/*` fallbacks are gone, `startNewSession` uses the session-scoped create (the response's `session_id` becomes the handle), and `resumeSession` re-points to the resume response's `session_id` (its documented purpose).
+- MCP status/logout handlers read the shared config directly (the session's `config_toml` is a copy of it — per-user isolation touches home_dir/project_id, not the config) — no active-session dependency.
+- Version bumps per the crates.io publish doctrine: trustee-api 0.19.19 → 0.20.0, trustee-web 0.1.23 → 0.2.0 (breaking: route removal), root 0.22.2 → 0.23.0. trustee-core 0.8.8 unchanged (no changes).
+
+### Fixed
+
+- trustee-api review of the Android workstream's 4 engine commits (owner-directed, 16d91eb): the `TRUSTEE_CLASSIC_HOME=1` gate gains a loud once-only isolation warning (under the gate ALL users share the classic home — per-user checkpoint isolation OFF; single-user loopback ONLY — an accidental env-set on a multi-user server is now visible immediately); doc comments updated to the pinned session identity (c2f9508) and the retired activation semantics.
+
 ## [0.22.0] - 2026-10-24
 
 ### Added

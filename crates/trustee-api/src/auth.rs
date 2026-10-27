@@ -1574,7 +1574,7 @@ async fn mcp_login_handler(
 async fn mcp_callback_handler(
     State(state): State<crate::ServerState>,
     Query(query): Query<McpCallbackQuery>,
-    headers: axum::http::HeaderMap,
+    _headers: axum::http::HeaderMap,
 ) -> Result<Response, AuthError> {
     let auth = state.auth.as_ref().ok_or(AuthError::AuthNotConfigured)?;
 
@@ -1741,7 +1741,7 @@ pub(crate) async fn mcp_status_handler(
     use pep::{FileTokenStore, TokenStore};
 
     // Require auth
-    let (_cookie, user_key) = match crate::auth::check_auth(
+    let (_cookie, _user_key) = match crate::auth::check_auth(
         &state.auth,
         &headers,
         crate::auth::actions::VIEW_MCP_CREDENTIALS,
@@ -1754,16 +1754,14 @@ pub(crate) async fn mcp_status_handler(
         }
     };
 
-    // Parse MCP config from session
-    let config_toml = {
-        let (_sid, session_arc, _, _) = state.ensure_active_session(&user_key).await;
-        let session = session_arc.lock().await;
-        match &session.config_toml {
-            Some(t) => t.clone(),
-            None => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Config not loaded").into_response()
-            }
-        }
+    // Parse MCP config from the SHARED config — the session's config_toml is
+    // a copy of it (create_session clones state.config_toml; per-user
+    // isolation touches home_dir/project_id, not the config). Reading it
+    // directly removes the active-session dependency (legacy routes retired,
+    // pointer machinery removed — Ravand 2026-10-27).
+    let config_toml = match &state.config_toml {
+        Some(t) => t.clone(),
+        None => return (StatusCode::INTERNAL_SERVER_ERROR, "Config not loaded").into_response(),
     };
 
     let mcp_config: toml::Value = match toml::from_str(&config_toml) {
@@ -1771,10 +1769,16 @@ pub(crate) async fn mcp_status_handler(
         Err(_) => return Json(serde_json::json!([])).into_response(),
     };
 
+    // Agent name from the shared config ([agent].name) — same value the
+    // session carried (create_session copies it from the same config).
     let agent_name = {
-        let (_sid, session_arc, _, _) = state.ensure_active_session(&user_key).await;
-        let session = session_arc.lock().await;
-        session.agent_name.clone()
+        let table: toml::Table = toml::from_str(&config_toml).unwrap_or_default();
+        table
+            .get("agent")
+            .and_then(|a| a.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("trustee")
+            .to_string()
     };
     let token_store = FileTokenStore::new(&agent_name);
 
@@ -1888,7 +1892,7 @@ async fn mcp_logout_handler(
     use pep::{FileTokenStore, TokenStore};
 
     // Require auth
-    let (_cookie, user_key) = match crate::auth::check_auth(
+    let (_cookie, _user_key) = match crate::auth::check_auth(
         &state.auth,
         &headers,
         crate::auth::actions::UPDATE_MCP_CREDENTIALS,
@@ -1901,10 +1905,17 @@ async fn mcp_logout_handler(
         }
     };
 
+    // Agent name from the shared config ([agent].name) — same value the
+    // session carried (create_session copies it from the same config).
     let agent_name = {
-        let (_sid, session_arc, _, _) = state.ensure_active_session(&user_key).await;
-        let session = session_arc.lock().await;
-        session.agent_name.clone()
+        let config_toml = state.config_toml.clone().unwrap_or_default();
+        let table: toml::Table = toml::from_str(&config_toml).unwrap_or_default();
+        table
+            .get("agent")
+            .and_then(|a| a.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("trustee")
+            .to_string()
     };
     let token_store = FileTokenStore::new(&agent_name);
 
@@ -2105,7 +2116,6 @@ impl IntoResponse for AuthError {
 mod principal_tests {
     use super::*;
     use pep::oidc::types::JwtClaims;
-    use std::collections::HashMap;
 
     fn claims_with_role(role: serde_json::Value) -> JwtClaims {
         let mut c = JwtClaims::default();

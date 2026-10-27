@@ -1281,32 +1281,10 @@ function renderLines(lines) {
 }
 
 // --- WebSocket streaming ---
+// The legacy active-session connector (/api/v1/session/stream) is RETIRED —
+// the page always connects session-scoped (connectSessionWs).
 let wsReconnectDelay = 1000;
 const WS_MAX_RECONNECT_DELAY = 30000;
-
-function connectWS() {
-  const wsUrl = (API.startsWith('https') ? 'wss' : 'ws') + '://' + window.location.host + '/api/v1/session/stream';
-  ws = new WebSocket(wsUrl);
-
-  ws.onopen = () => {
-    wsReconnectDelay = 1000; // reset on successful connect
-  };
-
-  ws.onmessage = (event) => {
-    const msg = JSON.parse(event.data);
-    handleMessage(msg);
-  };
-
-  ws.onclose = () => {
-    setTimeout(() => {
-      if (!ws || ws.readyState === WebSocket.CLOSED) connectWS();
-    }, wsReconnectDelay);
-    // Exponential backoff with cap
-    wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_MAX_RECONNECT_DELAY);
-  };
-
-  ws.onerror = () => { ws.close(); };
-}
 
 function handleMessage(msg) {
   // The WS snapshot (first message after connect/reconnect — the only message
@@ -1553,9 +1531,47 @@ function appendDelta(delta, isReasoning) {
 }
 
 // --- Session state ---
+// Attach the page to a concrete session id — the session-scoped surface has
+// no "active session" concept; every call targets an id. On load: adopt the
+// newest live session; if none exist, create one (its session_id is the handle).
+async function ensureAttachedSession() {
+  if (currentSessionId) return currentSessionId;
+  try {
+    const res = await fetch(API + '/api/v1/sessions/live');
+    if (res.ok) {
+      const data = await res.json();
+      const live = data.sessions || [];
+      if (live.length) {
+        // Newest first (last_active, fall back to created_at)
+        live.sort((a, b) =>
+          new Date(b.last_active || b.created_at || 0) - new Date(a.last_active || a.created_at || 0));
+        currentSessionId = live[0].session_id;
+        window._hasSession = true;
+        return currentSessionId;
+      }
+    }
+    // No live sessions — create one
+    const created = await fetch(API + '/api/v1/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    if (created.ok) {
+      const data = await created.json();
+      if (data.session_id) {
+        currentSessionId = data.session_id;
+        return currentSessionId;
+      }
+    }
+  } catch (e) { /* server starting */ }
+  return null;
+}
+
 async function refreshSession() {
   try {
-    const res = await fetch(API + '/api/v1/session');
+    const sid = await ensureAttachedSession();
+    if (!sid) return;
+    const res = await fetch(API + '/api/v1/sessions/' + encodeURIComponent(sid) + '/live');
     if (!res.ok) return;
     const data = await res.json();
     renderLines(data.output_lines || []);
@@ -1582,7 +1598,8 @@ async function refreshSession() {
 // Lightweight refresh: only update MCP panel, don't touch output (preserves text selection)
 async function refreshMcpOnly() {
   try {
-    const res = await fetch(API + '/api/v1/session');
+    if (!currentSessionId) return;
+    const res = await fetch(API + '/api/v1/sessions/' + encodeURIComponent(currentSessionId) + '/live');
     if (!res.ok) return;
     const data = await res.json();
     renderMcp(data.mcp_servers || []);
@@ -1722,22 +1739,27 @@ async function sendCommand() {
   const sentAttachments = pendingAttachments;
   pendingAttachments = [];
   renderAttachChips();
+  // Attach first — the session-scoped surface has no "active session";
+  // every call targets an id.
+  const sid = await ensureAttachedSession();
+  if (!sid) {
+    pendingAttachments = sentAttachments;
+    renderAttachChips();
+    showToast('No session available — is the engine running?', 'error');
+    return;
+  }
   // Disable input immediately while server confirms and broadcasts state change
   document.getElementById('btn-send').disabled = true;
   document.getElementById('input').disabled = true;
 
-  // Session-scoped endpoint when attached to a specific live session —
-  // the legacy active-session route would send commands to the wrong
-  // session in multi-session mode.
-  const cmdUrl = currentSessionId
-    ? API + '/api/v1/sessions/' + encodeURIComponent(currentSessionId) + '/command'
-    : API + '/api/v1/session/command';
+  // Session-scoped command — targets THIS session (no active-pointer race).
+  const cmdUrl = API + '/api/v1/sessions/' + encodeURIComponent(sid) + '/command';
   await fetch(cmdUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       command: cmd,
-      session_id: currentSessionId,
+      session_id: sid,
       ...(selectedModel ? { model: selectedModel } : {}),
       ...(sentAttachments.length ? { attachments: sentAttachments } : {}),
     }),
@@ -1777,18 +1799,15 @@ async function sendCommand() {
 }
 
 async function cancelWorkflow() {
-  // Session-scoped when attached to a specific session, else legacy active-session
-  if (currentSessionId) {
-    await fetch(API + '/api/v1/sessions/' + encodeURIComponent(currentSessionId) + '/cancel', { method: 'POST' });
-  } else {
-    await fetch(API + '/api/v1/session/cancel', { method: 'POST' });
-  }
+  // Session-scoped — targets THIS session (the legacy active route is retired)
+  if (!currentSessionId) return;
+  await fetch(API + '/api/v1/sessions/' + encodeURIComponent(currentSessionId) + '/cancel', { method: 'POST' });
 }
 
 async function doHandoff() {
-  // Use the session-scoped route so the correct session is targeted in
-  // multi-session mode (Bug 9)
-  await fetch(API + '/api/v1/sessions/' + encodeURIComponent(currentSessionId || '') + '/handoff', { method: 'POST' });
+  // Session-scoped — targets THIS session (the legacy active route is retired)
+  if (!currentSessionId) return;
+  await fetch(API + '/api/v1/sessions/' + encodeURIComponent(currentSessionId) + '/handoff', { method: 'POST' });
 }
 
 // --- Event listeners ---
@@ -2166,11 +2185,12 @@ async function terminateLiveSession(sessionId) {
       showToast('Terminate failed.', 'error');
       return;
     }
-    // If we were attached to it, detach back to the default stream
+    // If we were attached to it, re-attach to the newest live session
+    // (or create one) — the legacy default stream is retired.
     if (currentSessionId === sessionId) {
       currentSessionId = null;
       if (ws) { ws.onclose = null; ws.close(); ws = null; }
-      connectWS();
+      ensureAttachedSession().then((sid) => { if (sid) connectSessionWs(sid); });
     }
     showToast('Session terminated', 'success');
     fetchSessions();
@@ -2201,7 +2221,7 @@ function connectSessionWs(sessionId) {
   ws.onclose = () => {
     setTimeout(() => {
       if (currentSessionId) connectSessionWs(currentSessionId);
-      else if (!ws || ws.readyState === WebSocket.CLOSED) connectWS();
+      else ensureAttachedSession().then((sid) => { if (sid) connectSessionWs(sid); });
     }, wsReconnectDelay);
     wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_MAX_RECONNECT_DELAY);
   };
@@ -2289,7 +2309,9 @@ function renderSessionCards(sessions) {
 
 async function startNewSession() {
   try {
-    const res = await fetch(API + '/api/v1/session/new', {
+    // Session-scoped create — the response's session_id is the handle
+    // (the legacy /session/new active-route is retired).
+    const res = await fetch(API + '/api/v1/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
@@ -2304,12 +2326,14 @@ async function startNewSession() {
       return;
     }
 
-    // Clear output immediately for the new session
-    currentSessionId = null;
+    // Attach to the created session and connect its stream
+    const data = await res.json();
+    currentSessionId = data.session_id || null;
     window._hasSession = true;
     outputEl.innerHTML = '';
     updateState('Idle');
     closeSessionsOverlay();
+    if (currentSessionId) connectSessionWs(currentSessionId);
   } catch (e) {
     showToast('Failed to start new session.', 'error');
   }
@@ -2317,7 +2341,9 @@ async function startNewSession() {
 
 async function saveSessionName(name) {
   try {
-    await fetch(API + '/api/v1/session/name', {
+    // Session-scoped rename (the legacy /session/name active-route is retired)
+    if (!currentSessionId) return;
+    await fetch(API + '/api/v1/sessions/' + encodeURIComponent(currentSessionId) + '/name', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
@@ -2354,6 +2380,11 @@ async function resumeSession(sessionId, checkpointCount) {
     closeSessionsOverlay();
     outputEl.innerHTML = '';
     window._hasSession = true;
+
+    // Re-point to the resume response's session_id — the live handle for
+    // everything after (its documented purpose). The history fetch below
+    // keeps the checkpoint id (it reads disk).
+    if (data.session_id) currentSessionId = data.session_id;
 
     // Resume banner
     const banner = document.createElement('div');
@@ -2748,8 +2779,10 @@ handleMessage = function(msg) {
   checkMcpCallback();
   const authed = await checkAuth();
   if (authed) {
-    refreshSession();
-    connectWS();
+    ensureAttachedSession().then((sid) => {
+      refreshSession();
+      if (sid) connectSessionWs(sid);
+    });
     fetchModels(); // populate model menu value (no overlay shown)
   }
 })();

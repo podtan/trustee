@@ -144,8 +144,6 @@ pub struct UserSessions {
     pub sessions: DashMap<String, UserSessionEntry>,
     /// Shared token store for all this user's sessions (MCP credential isolation).
     pub token_store: Arc<pep::MemoryTokenStore>,
-    /// Which session_id is "active" for legacy /session/* routes.
-    pub active_session_id: Mutex<String>,
 }
 
 /// Summary of an active session for listing (serializable for API responses).
@@ -394,7 +392,6 @@ impl ServerState {
         let user_sessions = UserSessions {
             sessions: DashMap::new(),
             token_store,
-            active_session_id: Mutex::new(String::new()),
         };
         user_sessions
             .sessions
@@ -485,17 +482,14 @@ impl ServerState {
     /// with the resumed chain id (routes::resume_session) — chain semantics
     /// preserved.
     ///
-    /// `activate` opts the new session in as the "active" one: fresh-start
-    /// paths pass `true`; `resume_session` passes `false` — resuming a
-    /// checkpoint never hijacks the caller's active-session pointer (the
-    /// session-scoped consumers re-point themselves from the returned id; the
-    /// first session-scoped command flips the pointer MRU).
+    /// There is NO "active session" concept anymore — the legacy
+    /// active-pointer surface was retired (2026-10-27, owner order); every
+    /// consumer targets a session id via the session-scoped routes.
     pub async fn create_session(
         &self,
         user_key: &str,
         session_name: Option<String>,
         identity: Option<String>,
-        activate: bool,
     ) -> Result<String, SessionError> {
         // Get or create the user's UserSessions entry
         let user_sessions = self
@@ -504,7 +498,6 @@ impl ServerState {
             .or_insert_with(|| UserSessions {
                 sessions: DashMap::new(),
                 token_store: Arc::new(pep::MemoryTokenStore::new()),
-                active_session_id: Mutex::new(String::new()),
             });
 
         // Check session limit
@@ -571,18 +564,6 @@ impl ServerState {
                 last_active: Arc::new(Mutex::new(now)),
             },
         );
-
-        // Set as active session only when the caller opts in.
-        //
-        // `resume_session` passes `activate: false` so resuming an arbitrary
-        // checkpoint never hijacks the caller's current active live session
-        // pointer. `new_session` / `create_session` (fresh-start paths) pass
-        // `activate: true` to keep the existing "new session becomes active"
-        // behavior. This keeps the per-user active pointer under UI control
-        // rather than letting any authenticated client overwrite it.
-        if activate {
-            *user_sessions.active_session_id.lock().await = session_id.clone();
-        }
 
         // Spawn drain task
         let session_arc = user_sessions
@@ -778,7 +759,6 @@ impl ServerState {
             .or_insert_with(|| UserSessions {
                 sessions: DashMap::new(),
                 token_store: Arc::new(pep::MemoryTokenStore::new()),
-                active_session_id: Mutex::new(String::new()),
             });
 
         if let Some(existing) = user_sessions.sessions.get(chain_id) {
@@ -939,128 +919,7 @@ impl ServerState {
             self.write_tombstone(user_key, &chain_id);
         }
 
-        // If this was the active session, pick a new active
-        let mut active_id = user_sessions.active_session_id.lock().await;
-        if &*active_id == session_id {
-            // Pick the most recently active remaining session
-            let mut newest: Option<(String, chrono::DateTime<chrono::Utc>)> = None;
-            for entry in user_sessions.sessions.iter() {
-                let la = entry.last_active.lock().await;
-                if newest.as_ref().map_or(true, |(_, t)| *la > *t) {
-                    newest = Some((entry.key().clone(), *la));
-                }
-            }
-            *active_id = newest.map(|(id, _)| id).unwrap_or_default();
-        }
-
         Ok(())
-    }
-
-    /// Get or create the user's "active" session for legacy routes.
-    ///
-    /// Behavior:
-    /// 1. If user has no sessions → create one
-    /// 2. If active session exists → return it
-    /// 3. If active session was destroyed → create a new one
-    ///
-    /// Returns: (session_id, session_arc, ws_tx, token_store)
-    pub async fn ensure_active_session(
-        &self,
-        user_key: &str,
-    ) -> (
-        String,
-        Arc<Mutex<Session>>,
-        broadcast::Sender<String>,
-        Arc<pep::MemoryTokenStore>,
-    ) {
-        // Get or create user's UserSessions
-        let token_store = {
-            let user_sessions = self
-                .sessions
-                .entry(user_key.to_string())
-                .or_insert_with(|| UserSessions {
-                    sessions: DashMap::new(),
-                    token_store: Arc::new(pep::MemoryTokenStore::new()),
-                    active_session_id: Mutex::new(String::new()),
-                });
-            user_sessions.token_store.clone()
-        };
-
-        // Check if active session exists
-        let active_id = {
-            let user_sessions = self.sessions.get(user_key).unwrap();
-            let guard = user_sessions.active_session_id.lock().await;
-            guard.clone()
-        };
-
-        if !active_id.is_empty() {
-            if let Some((session, ws_tx)) = self.get_session(user_key, &active_id).await {
-                return (active_id, session, ws_tx, token_store);
-            }
-            // Active session was destroyed, fall through to create
-        }
-
-        // Need to create a new session
-        // For the "default" user, we may already have a "default" session entry
-        // from ServerState::new() — check for it
-        let existing_session: Option<(String, Arc<Mutex<Session>>, broadcast::Sender<String>)> = {
-            let user_sessions = self.sessions.get(user_key).unwrap();
-            let result = user_sessions.sessions.iter().next().map(|first| {
-                (
-                    first.key().clone(),
-                    first.session.clone(),
-                    first.ws_tx.clone(),
-                )
-            });
-            result
-        };
-        if let Some((id, session, ws_tx)) = existing_session {
-            let now = chrono::Utc::now();
-            if let Some(entry) = self.sessions.get(user_key) {
-                if let Some(e) = entry.sessions.get(&id) {
-                    *e.last_active.lock().await = now;
-                }
-                *entry.active_session_id.lock().await = id.clone();
-            }
-
-            return (id, session, ws_tx, token_store);
-        }
-
-        // Create a brand new session
-        let session_id = self
-            .create_session(user_key, None, None, true)
-            .await
-            .unwrap_or_else(|_| "default".to_string());
-
-        let (session, ws_tx) = self
-            .get_session(user_key, &session_id)
-            .await
-            .expect("just-created session must exist");
-
-        (session_id, session, ws_tx, token_store)
-    }
-
-    /// DEPRECATED: Use ensure_active_session() instead.
-    /// Kept for backward compatibility — same 3-tuple return type.
-    pub async fn ensure_user_session(
-        &self,
-        user_key: &str,
-    ) -> (
-        Arc<Mutex<Session>>,
-        broadcast::Sender<String>,
-        Arc<pep::MemoryTokenStore>,
-    ) {
-        let (_id, session, ws_tx, token_store) = self.ensure_active_session(user_key).await;
-        (session, ws_tx, token_store)
-    }
-
-    /// Set a session as the user's active session.
-    pub async fn set_active_session(&self, user_key: &str, session_id: &str) {
-        if let Some(user_sessions) = self.sessions.get(user_key) {
-            if user_sessions.sessions.contains_key(session_id) {
-                *user_sessions.active_session_id.lock().await = session_id.to_string();
-            }
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -2251,8 +2110,14 @@ mod tests {
         let key_a = "agent-farzan";
         let key_b = "agent-paydar";
 
-        let (sid_a, session_a, _tx_a, _ts_a) = state.ensure_active_session(key_a).await;
-        let (_sid_b, _session_b, _tx_b, _ts_b) = state.ensure_active_session(key_b).await;
+        let sid_a = state
+            .create_session(key_a, None, None)
+            .await
+            .expect("create session");
+        let _sid_b = state
+            .create_session(key_b, None, None)
+            .await
+            .expect("create session");
 
         // Each agent resolves its own session; B cannot see A's by id.
         assert!(
@@ -2263,7 +2128,6 @@ mod tests {
             state.get_session_by_any_id(key_b, &sid_a).await.is_none(),
             "cross-agent session access must be 404/None"
         );
-        assert!(Arc::strong_count(&session_a) >= 1);
 
         // Same isolation path as humans: home dir = users_root/user_hash(key).
         if let Some(home) = state.get_user_home_dir(key_a) {
@@ -2537,7 +2401,7 @@ mod restore_tests {
         let state = fresh_state();
         let user = TempUser::new("tombstone");
         let sid = state
-            .create_session(&user.key, None, None, true)
+            .create_session(&user.key, None, None)
             .await
             .expect("create session");
 
@@ -2560,7 +2424,7 @@ mod restore_tests {
 
         // And a fresh live session with NO chain id must not tombstone anything.
         let sid2 = state
-            .create_session(&user.key, None, None, true)
+            .create_session(&user.key, None, None)
             .await
             .expect("create second session");
         state
