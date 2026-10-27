@@ -1536,10 +1536,28 @@ async fn execute_command_inner(
 
         session.token_store = Some(token_store.clone());
         session.workflow_permit = Some(permit);
+        let command = req.command.clone();
         session.input = req.command;
         session.input_images = attachments.images;
         session.input_text_files = attachments.text_files;
         session.execute_command();
+
+        // Broadcast the user's command echo to live WS clients (Hamrah
+        // 2026-10-27 finding): execute_command pushes '> {command}' DIRECTLY
+        // into output_lines (trustee-core session.rs) — a direct mutation,
+        // not a TuiMessage — so the drain never carries it and connected WS
+        // clients never receive the user's own bubble while the WS is live
+        // (the poll is suppressed; the echo only arrives via the snapshot or
+        // the poll). RAW ws_tx.send, NOT a TuiMessage through the drain:
+        // handle_workflow_message would push it into output_lines AGAIN (the
+        // line doubled). Sent while the session lock is still held so the
+        // echo lands on the WS BEFORE the drain's StateChanged/workflow
+        // events — the bubble arrives first, matching the transcript order.
+        let echo = serde_json::json!({
+            "type": "OutputLine",
+            "line": format!("> {}", command),
+        });
+        let _ = ws_tx.send(echo.to_string());
     }
 
     let state_msg = serde_json::json!({"type": "StateChanged", "state": "Running"});

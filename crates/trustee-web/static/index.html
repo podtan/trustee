@@ -1285,6 +1285,10 @@ function renderLines(lines) {
 // the page always connects session-scoped (connectSessionWs).
 let wsReconnectDelay = 1000;
 const WS_MAX_RECONNECT_DELAY = 30000;
+// The last command this client sent — the engine's '> {command}' WS echo
+// (0.23.4) is deduped against it in appendOutput (the optimistic bubble
+// already rendered it). Null for clients that did not send.
+let lastSentCommand = null;
 
 function handleMessage(msg) {
   // The WS snapshot (first message after connect/reconnect — the only message
@@ -1307,14 +1311,23 @@ function handleMessage(msg) {
       break;
     case 'WorkflowCompleted':
       closeAgentBubble();
+      // The engine pushes '✓ Workflow completed' into output_lines but
+      // broadcasts it as a WorkflowCompleted message (not an OutputLine) —
+      // render it live here or the completion line is invisible until the
+      // next poll/rebuild (the same live-fidelity class as the command echo).
+      appendOutput('✓ Workflow completed');
       updateState('Idle');
       break;
     case 'WorkflowError':
       closeAgentBubble();
+      // Same class: the '✗ Error: …' line is pushed into output_lines but
+      // broadcast as a WorkflowError message — render the text live.
+      if (msg.error) appendOutput('✗ Error: ' + msg.error);
       updateState('Idle');
       break;
     case 'WorkflowCancelled':
       closeAgentBubble();
+      appendOutput('⏹ Workflow cancelled');
       updateState('Idle');
       break;
     case 'TodoUpdate':
@@ -1380,6 +1393,30 @@ function handleMessage(msg) {
 function appendOutput(line) {
   // Hide noisy API call lines in web UI
   if (shouldHideLine(line)) return;
+  // The engine broadcasts the user's own '> {command}' echo at command
+  // acceptance (0.23.4). The sender already rendered it optimistically —
+  // skip the echo when it matches the last sent command; OTHER clients
+  // (no optimistic render of their own) render it as a bubble, mirroring
+  // renderLines' transcript rendering.
+  if (line.startsWith('> ')) {
+    const echoText = line.slice(2);
+    if (lastSentCommand && echoText === lastSentCommand) {
+      lastSentCommand = null;
+      return;
+    }
+    closeAgentBubble();
+    closeReasoningSection();
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-user';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = echoText;
+    wrap.appendChild(bubble);
+    addCopyAction(wrap, echoText);
+    outputEl.appendChild(wrap);
+    if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
+    return;
+  }
   // Blank separator lines from the stream state machine are visual spacers,
   // not content. Don't let them close the reasoning section or agent bubble —
   // the next real content delta (StreamDelta/ReasoningDelta) handles that.
@@ -1752,26 +1789,17 @@ async function sendCommand() {
   document.getElementById('btn-send').disabled = true;
   document.getElementById('input').disabled = true;
 
-  // Session-scoped command — targets THIS session (no active-pointer race).
-  const cmdUrl = API + '/api/v1/sessions/' + encodeURIComponent(sid) + '/command';
-  await fetch(cmdUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      command: cmd,
-      session_id: sid,
-      ...(selectedModel ? { model: selectedModel } : {}),
-      ...(sentAttachments.length ? { attachments: sentAttachments } : {}),
-    }),
-  });
-  // State change is now broadcast via WebSocket (StateChanged message)
-  // so we don't call updateState('Running') here — avoids race conditions
-  // where a WorkflowCompleted arrives before this point.
-  // Clear output for new session
+  // Clear output for a new session and render the user bubble BEFORE the
+  // fetch: the engine broadcasts the '> {command}' echo on the WS at command
+  // acceptance (0.23.4), which can arrive before the POST resolves — a
+  // post-fetch wipe would eat the bubble, and a post-fetch render would race
+  // the WS echo (double bubble). The echo is deduped in appendOutput via
+  // lastSentCommand.
   if (!window._hasSession) {
     outputEl.innerHTML = '';
     window._hasSession = true;
   }
+  lastSentCommand = cmd;
   // Render user message as a chat bubble (right-aligned, boxed) with
   // attachment thumbnails when present.
   const wrap = document.createElement('div');
@@ -1796,6 +1824,22 @@ async function sendCommand() {
   addCopyAction(wrap, cmd);
   outputEl.appendChild(wrap);
   if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
+
+  // Session-scoped command — targets THIS session (no active-pointer race).
+  const cmdUrl = API + '/api/v1/sessions/' + encodeURIComponent(sid) + '/command';
+  await fetch(cmdUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      command: cmd,
+      session_id: sid,
+      ...(selectedModel ? { model: selectedModel } : {}),
+      ...(sentAttachments.length ? { attachments: sentAttachments } : {}),
+    }),
+  });
+  // State change is now broadcast via WebSocket (StateChanged message)
+  // so we don't call updateState('Running') here — avoids race conditions
+  // where a WorkflowCompleted arrives before this point.
 }
 
 async function cancelWorkflow() {

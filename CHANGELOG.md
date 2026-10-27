@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.4] - 2026-10-27
+
+### Fixed
+
+- **The user's own command bubble never reached live WS clients (Hamrah's engine-side finding, session.rs:611)** — `execute_command` pushed the `> {command}` echo DIRECTLY into `output_lines` (a direct mutation, not a TuiMessage), so the drain never carried it and connected WS clients never received the user's own bubble while the WS was live (the poll is suppressed; the echo only arrived via the snapshot or the poll). **Fix:** `execute_command_inner` now broadcasts the echo as a RAW `ws_tx.send` of `{"type":"OutputLine","line":"> {command}"}` at command acceptance — NOT a TuiMessage through the drain (handle_workflow_message would push it into output_lines AGAIN — the line doubled). Sent while the session lock is still held so the echo lands on the WS BEFORE the drain's StateChanged/workflow events — the bubble arrives first, matching the transcript order.
+- **The final workflow error/completion/cancel line was invisible to live WS clients (same live-fidelity class, found during the echo verification)** — the engine pushes `✗ Error: …` / `✓ Workflow completed` / `⏹ Workflow cancelled` into `output_lines` but broadcasts them as `WorkflowError`/`WorkflowCompleted`/`WorkflowCancelled` messages (not OutputLines); the web UIs' handlers only flipped the state and never rendered the text — the line was invisible until the next poll/rebuild. **Fix:** trustee-web renders the text live (`appendOutput('✗ Error: ' + msg.error)` etc.); the THQ console gets the same fix (thq 0.12.7).
+
+### Changed
+
+- trustee-web: the user bubble now renders optimistically BEFORE the command POST (the engine's WS echo can arrive before the POST resolves — a post-fetch wipe would eat it, a post-fetch render would race it), and `appendOutput` dedups the engine's `> {command}` WS echo against `lastSentCommand` (the sender already rendered it; OTHER clients render it as a bubble, mirroring `renderLines`).
+- trustee-web 0.2.2 → 0.2.3, trustee-api 0.20.3 → 0.20.4 (the echo broadcast), root 0.23.4.
+
 ## [0.23.3] - 2026-10-27
 
 ### Fixed
