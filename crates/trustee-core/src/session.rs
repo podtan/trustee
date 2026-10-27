@@ -15,8 +15,7 @@ use abk::context::RunContext;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::types::{
-    AutoHandoffConfig, BuildInfo, McpServerInfo, McpServerStatus,
-    TuiMessage, WorkflowState,
+    AutoHandoffConfig, BuildInfo, McpServerInfo, McpServerStatus, TuiMessage, WorkflowState,
 };
 
 /// Truncate a first-command string into a display session name.
@@ -89,10 +88,7 @@ fn fence_for(content: &str) -> String {
 /// file as an opencode-style synthetic block — header line (name, mime,
 /// size) + fenced content. The visible transcript keeps echoing the RAW
 /// command; only the model sees the composed form.
-pub fn compose_task_with_text_files(
-    command: &str,
-    files: &[TextFileAttachment],
-) -> String {
+pub fn compose_task_with_text_files(command: &str, files: &[TextFileAttachment]) -> String {
     if files.is_empty() {
         return command.to_string();
     }
@@ -376,9 +372,17 @@ impl Session {
                 self.output_lines.push(label);
                 self.pending_tool_lines.push((tool_name, idx, hint));
             }
-            TuiMessage::ToolDone { tool_name, success, hint } => {
+            TuiMessage::ToolDone {
+                tool_name,
+                success,
+                hint,
+            } => {
                 let status = if success { "✓" } else { "✗" };
-                if let Some(pos) = self.pending_tool_lines.iter().position(|(n, _, _)| *n == tool_name) {
+                if let Some(pos) = self
+                    .pending_tool_lines
+                    .iter()
+                    .position(|(n, _, _)| *n == tool_name)
+                {
                     let (_, idx, pending_hint) = self.pending_tool_lines.remove(pos);
                     let h = hint.or(pending_hint);
                     let label = match &h {
@@ -431,7 +435,10 @@ impl Session {
                         .map(|v| v.to_lowercase().contains("debug"))
                         .unwrap_or(false)
                     {
-                        self.output_lines.push("🔄 Session preserved — next command will continue this session".to_string());
+                        self.output_lines.push(
+                            "🔄 Session preserved — next command will continue this session"
+                                .to_string(),
+                        );
                     }
                 }
                 if self.workflow_state == WorkflowState::Idle && self.handoff_pending {
@@ -464,14 +471,28 @@ impl Session {
                     ));
                 }
             }
-            TuiMessage::McpServerStatus { name, connected, tool_count, error } => {
-                let status = if connected { McpServerStatus::Connected } else { McpServerStatus::Failed };
+            TuiMessage::McpServerStatus {
+                name,
+                connected,
+                tool_count,
+                error,
+            } => {
+                let status = if connected {
+                    McpServerStatus::Connected
+                } else {
+                    McpServerStatus::Failed
+                };
                 if let Some(existing) = self.mcp_servers.iter_mut().find(|s| s.name == name) {
                     existing.status = status;
                     existing.tool_count = tool_count;
                     existing.error = error;
                 } else {
-                    self.mcp_servers.push(McpServerInfo { name, status, tool_count, error });
+                    self.mcp_servers.push(McpServerInfo {
+                        name,
+                        status,
+                        tool_count,
+                        error,
+                    });
                 }
             }
             TuiMessage::HandoffReady(briefing) => {
@@ -536,7 +557,8 @@ impl Session {
 
         if self.workflow_state != WorkflowState::Idle {
             self.pending_command = Some(command);
-            self.output_lines.push("⏳ Previous workflow finishing — command queued".to_string());
+            self.output_lines
+                .push("⏳ Previous workflow finishing — command queued".to_string());
             self.input.clear();
             return;
         }
@@ -557,7 +579,7 @@ impl Session {
             self.briefing_born = false;
         }
 
-// Transcript gate (Bug 2): never wipe the visible transcript for a
+        // Transcript gate (Bug 2): never wipe the visible transcript for a
         // session that has rotated its chain identity. This covers the
         // briefing run itself (rotating_from_handoff) AND any later command
         // that lands on the non-continuation path (e.g. after a failed
@@ -609,7 +631,8 @@ impl Session {
         let config_toml = match &self.config_toml {
             Some(c) => c.clone(),
             None => {
-                self.output_lines.push("✗ Error: Configuration not loaded".to_string());
+                self.output_lines
+                    .push("✗ Error: Configuration not loaded".to_string());
                 self.output_lines.push("".to_string());
                 return;
             }
@@ -661,8 +684,7 @@ impl Session {
                 Arc::new(crate::session::TuiForwardSink::new(tx.clone()));
 
             // Build RunContext from session fields for stateless operation
-            let mut run_ctx = RunContext::new()
-                .with_agent_name(agent_name.clone());
+            let mut run_ctx = RunContext::new().with_agent_name(agent_name.clone());
 
             // Set home_dir for per-user isolation if provided
             if let Some(ref dir) = home_dir {
@@ -715,7 +737,8 @@ impl Session {
                     None::<&std::path::Path>,
                     Some("INFO"),
                     Some(&agent_name),
-                ).unwrap_or_else(|_| abk::observability::Logger::new(None, Some("INFO")).unwrap())
+                )
+                .unwrap_or_else(|_| abk::observability::Logger::new(None, Some("INFO")).unwrap())
             };
 
             let result = abk::observability::with_logger(scope_logger, async {
@@ -759,12 +782,14 @@ impl Session {
             };
 
             // Capture session_id from resume_info before it's moved into the channel
-            let title_session_id = task_result.resume_info
+            let title_session_id = task_result
+                .resume_info
                 .as_ref()
                 .map(|ri| ri.session_id.clone());
 
             tx.send(msg).ok();
-            tx.send(TuiMessage::ResumeInfo(task_result.resume_info)).ok();
+            tx.send(TuiMessage::ResumeInfo(task_result.resume_info))
+                .ok();
 
             // Solution B: After successful completion, spawn a lightweight LLM call
             // to generate a descriptive session title. The title is:
@@ -815,7 +840,9 @@ impl Session {
                                     &title_config,
                                     sid,
                                     &title,
-                                ).await {
+                                )
+                                .await
+                                {
                                     let _ = e; // non-fatal
                                 }
                             }
@@ -823,7 +850,9 @@ impl Session {
                             title_tx.send(TuiMessage::SessionTitleUpdated(title)).ok();
                         }
                         Ok(None) => {}
-                        Err(e) => { let _ = e; }
+                        Err(e) => {
+                            let _ = e;
+                        }
                     }
                 });
             }
@@ -867,7 +896,9 @@ impl Session {
                 // only appear after a page refresh (output_lines is served via
                 // the /api/v1/session poll, not pushed over WebSocket).
                 self.workflow_tx
-                    .send(TuiMessage::OutputLine("⏹ Cancelling before handoff...".to_string()))
+                    .send(TuiMessage::OutputLine(
+                        "⏹ Cancelling before handoff...".to_string(),
+                    ))
                     .ok();
             }
             WorkflowState::Cancelling => {
@@ -901,14 +932,16 @@ impl Session {
             return;
         }
         if self.resume_info.is_none() {
-            self.output_lines.push("ℹ Nothing to hand off — run a task first".to_string());
+            self.output_lines
+                .push("ℹ Nothing to hand off — run a task first".to_string());
             return;
         }
 
         let config_toml = match &self.config_toml {
             Some(c) => c.clone(),
             None => {
-                self.output_lines.push("✗ Error: Configuration not loaded".to_string());
+                self.output_lines
+                    .push("✗ Error: Configuration not loaded".to_string());
                 return;
             }
         };
@@ -935,7 +968,8 @@ impl Session {
             Some(ri) => ri,
             None => {
                 // Already checked is_none() above — defensive only.
-                self.output_lines.push("ℹ Nothing to hand off — run a task first".to_string());
+                self.output_lines
+                    .push("ℹ Nothing to hand off — run a task first".to_string());
                 return;
             }
         };
@@ -951,7 +985,9 @@ impl Session {
         // pushes this line to output_lines (via handle_workflow_message) AND
         // broadcasts StateChanged(Running) + OutputLine to WS clients.
         self.workflow_tx
-            .send(TuiMessage::OutputLine("🔀 Generating session handoff briefing...".to_string()))
+            .send(TuiMessage::OutputLine(
+                "🔀 Generating session handoff briefing...".to_string(),
+            ))
             .ok();
 
         tokio::spawn(async move {
@@ -974,8 +1010,7 @@ impl Session {
             };
 
             // Build RunContext for stateless operation — same fields as execute_command
-            let mut run_ctx = RunContext::new()
-                .with_agent_name(agent_name.clone());
+            let mut run_ctx = RunContext::new().with_agent_name(agent_name.clone());
 
             // Set home_dir for per-user isolation
             if let Some(ref dir) = home_dir {
@@ -999,11 +1034,11 @@ impl Session {
             }
 
             // Run inside per-task logger + TUI-mode scope (task-local, not process-global)
-            let scope_logger = abk::observability::Logger::with_agent_name(
-                None,
-                Some("INFO"),
-                Some(&agent_name),
-            ).unwrap_or_else(|_| abk::observability::Logger::new(None, Some("INFO")).unwrap());
+            let scope_logger =
+                abk::observability::Logger::with_agent_name(None, Some("INFO"), Some(&agent_name))
+                    .unwrap_or_else(|_| {
+                        abk::observability::Logger::new(None, Some("INFO")).unwrap()
+                    });
 
             // Single direct LLM call — no agentic workflow loop. This is the fix
             // for the session-bricking bug: the full workflow ran tools, looped
@@ -1057,9 +1092,7 @@ fn inject_identity(config_toml: String, identity: &Option<String>) -> String {
         return config_toml;
     };
 
-    let lifecycle = table
-        .get_mut("lifecycle")
-        .and_then(|v| v.as_table_mut());
+    let lifecycle = table.get_mut("lifecycle").and_then(|v| v.as_table_mut());
 
     if let Some(lifecycle) = lifecycle {
         let existing = lifecycle
@@ -1067,10 +1100,7 @@ fn inject_identity(config_toml: String, identity: &Option<String>) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let combined = format!("{}\n\n{}", identity, existing);
-        lifecycle.insert(
-            "system_template".to_string(),
-            toml::Value::String(combined),
-        );
+        lifecycle.insert("system_template".to_string(), toml::Value::String(combined));
     } else {
         // No [lifecycle] section — create one with just the identity as template.
         let mut ltable = toml::value::Table::new();
@@ -1117,9 +1147,7 @@ fn inject_model(config_toml: String, model: Option<String>) -> String {
     let looks_like_provider = |v: &toml::Value| -> bool {
         v.as_table()
             .map(|t| {
-                t.contains_key("base_url")
-                    || t.contains_key("api_key")
-                    || t.contains_key("models")
+                t.contains_key("base_url") || t.contains_key("api_key") || t.contains_key("models")
             })
             .unwrap_or(false)
     };
@@ -1156,10 +1184,7 @@ fn inject_model(config_toml: String, model: Option<String>) -> String {
                 if looks_like_provider(entry) && offers_model(entry) {
                     let mut selected = entry.clone();
                     if let Some(st) = selected.as_table_mut() {
-                        st.insert(
-                            "model".to_string(),
-                            toml::Value::String(model_name.clone()),
-                        );
+                        st.insert("model".to_string(), toml::Value::String(model_name.clone()));
                         st.entry("provider_type".to_string())
                             .or_insert_with(|| toml::Value::String("openai".to_string()));
                     }
@@ -1172,10 +1197,7 @@ fn inject_model(config_toml: String, model: Option<String>) -> String {
 
     // Case 3: literal model string — set it on the current provider.
     if let Some(provider) = llm.get_mut("provider").and_then(|p| p.as_table_mut()) {
-        provider.insert(
-            "model".to_string(),
-            toml::Value::String(model_name.clone()),
-        );
+        provider.insert("model".to_string(), toml::Value::String(model_name.clone()));
     }
 
     toml::to_string(&table).unwrap_or(config_toml)
@@ -1243,8 +1265,13 @@ impl abk::orchestration::output::OutputSink for TuiForwardSink {
                 ))
             }
 
-            OutputEvent::IterationStarted { iteration, context_tokens } => {
-                let _ = self.tx.send(TuiMessage::ContextTokensUpdated(context_tokens));
+            OutputEvent::IterationStarted {
+                iteration,
+                context_tokens,
+            } => {
+                let _ = self
+                    .tx
+                    .send(TuiMessage::ContextTokensUpdated(context_tokens));
                 TuiMessage::OutputLine(format!(
                     "📡 Iteration {} | Context = {} tokens",
                     iteration, context_tokens
@@ -1259,7 +1286,11 @@ impl abk::orchestration::output::OutputSink for TuiForwardSink {
                 context_tokens,
                 tool_tokens,
             } => {
-                let mode = if streaming { "Streaming" } else { "Non-streaming" };
+                let mode = if streaming {
+                    "Streaming"
+                } else {
+                    "Non-streaming"
+                };
                 let total = context_tokens + tool_tokens;
                 let _ = self.tx.send(TuiMessage::ContextTokensUpdated(total));
                 // Blank line separator before each API call for readability
@@ -1272,7 +1303,10 @@ impl abk::orchestration::output::OutputSink for TuiForwardSink {
 
             OutputEvent::ToolsExecuting { tool_names, hints } => {
                 for (name, hint) in tool_names.into_iter().zip(hints.into_iter()) {
-                    let _ = self.tx.send(TuiMessage::ToolPending { tool_name: name, hint });
+                    let _ = self.tx.send(TuiMessage::ToolPending {
+                        tool_name: name,
+                        hint,
+                    });
                 }
                 self.stream_state.store(STREAM_IDLE, Ordering::Relaxed);
                 return;
@@ -1288,7 +1322,11 @@ impl abk::orchestration::output::OutputSink for TuiForwardSink {
                     let _ = self.tx.send(TuiMessage::TodoUpdate(content.clone()));
                 }
                 let hint = description;
-                let _ = self.tx.send(TuiMessage::ToolDone { tool_name, success, hint });
+                let _ = self.tx.send(TuiMessage::ToolDone {
+                    tool_name,
+                    success,
+                    hint,
+                });
                 self.stream_state.store(STREAM_IDLE, Ordering::Relaxed);
                 return;
             }
@@ -1313,7 +1351,12 @@ impl abk::orchestration::output::OutputSink for TuiForwardSink {
                 return;
             }
 
-            OutputEvent::McpServerStatus { name, connected, tool_count, error } => {
+            OutputEvent::McpServerStatus {
+                name,
+                connected,
+                tool_count,
+                error,
+            } => {
                 let _ = self.tx.send(TuiMessage::McpServerStatus {
                     name,
                     connected,
@@ -1360,7 +1403,9 @@ danger_accept_invalid_certs = true
         // Case 1: model override = provider KEY → whole ninfer entry is
         // swapped into llm.provider — the TLS flag must ride along.
         let swapped = inject_model(config_toml.to_string(), Some("ninfer".to_string()));
-        let table = swapped.parse::<toml::Value>().expect("swapped config parses");
+        let table = swapped
+            .parse::<toml::Value>()
+            .expect("swapped config parses");
         let provider = table
             .get("llm")
             .and_then(|l| l.get("provider"))
@@ -1372,7 +1417,9 @@ danger_accept_invalid_certs = true
             "swap selected the ninfer provider"
         );
         assert_eq!(
-            provider.get("danger_accept_invalid_certs").and_then(|v| v.as_bool()),
+            provider
+                .get("danger_accept_invalid_certs")
+                .and_then(|v| v.as_bool()),
             Some(true),
             "TLS flag survives the provider swap"
         );
@@ -1380,7 +1427,9 @@ danger_accept_invalid_certs = true
         // Case 3: literal model string → current provider is edited in
         // place; the flag (and everything else) must stay untouched.
         let literal = inject_model(config_toml.to_string(), Some("qwen3.8-27b".to_string()));
-        let table = literal.parse::<toml::Value>().expect("literal config parses");
+        let table = literal
+            .parse::<toml::Value>()
+            .expect("literal config parses");
         let providers = table
             .get("llm")
             .and_then(|l| l.get("providers"))
@@ -1388,7 +1437,9 @@ danger_accept_invalid_certs = true
             .and_then(|p| p.as_table())
             .expect("providers table untouched by literal override");
         assert_eq!(
-            providers.get("danger_accept_invalid_certs").and_then(|v| v.as_bool()),
+            providers
+                .get("danger_accept_invalid_certs")
+                .and_then(|v| v.as_bool()),
             Some(true),
             "TLS flag untouched in the providers table on literal override"
         );
@@ -1409,7 +1460,10 @@ mod compose_task_tests {
 
     #[test]
     fn no_files_returns_command_unchanged() {
-        assert_eq!(compose_task_with_text_files("do the thing", &[]), "do the thing");
+        assert_eq!(
+            compose_task_with_text_files("do the thing", &[]),
+            "do the thing"
+        );
     }
 
     #[test]
@@ -1419,7 +1473,11 @@ mod compose_task_tests {
             &[file("text/markdown", "notes.md", "# Hello\n\nworld")],
         );
         assert!(out.starts_with("summarize this"), "got: {}", out);
-        assert!(out.contains("[Attached file: notes.md (text/markdown, 14 bytes)]"), "got: {}", out);
+        assert!(
+            out.contains("[Attached file: notes.md (text/markdown, 14 bytes)]"),
+            "got: {}",
+            out
+        );
         assert!(out.contains("```md\n# Hello\n\nworld\n```"), "got: {}", out);
     }
 
@@ -1505,7 +1563,10 @@ mod compaction_status_tests {
         assert!(session.compaction_status.lock().unwrap().in_progress);
         session.handle_workflow_message(TuiMessage::WorkflowError("cancelled".to_string()));
         let s = session.compaction_status.lock().unwrap();
-        assert!(!s.in_progress, "workflow-end backstop must clear in_progress");
+        assert!(
+            !s.in_progress,
+            "workflow-end backstop must clear in_progress"
+        );
         assert!(s.last.is_some(), "backstop keeps the durable last trace");
     }
 }

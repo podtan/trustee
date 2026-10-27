@@ -13,7 +13,10 @@ use trustee_core::session::truncate_session_name;
 #[test]
 fn ascii_long_truncates_identically_to_legacy() {
     let cmd = "A".repeat(100);
-    assert_eq!(truncate_session_name(&cmd), format!("{}...", "A".repeat(77)));
+    assert_eq!(
+        truncate_session_name(&cmd),
+        format!("{}...", "A".repeat(77))
+    );
 }
 
 /// (a-boundary) Exactly 80 chars → returned unchanged (both legacy and new).
@@ -49,7 +52,10 @@ fn persian_short_unchanged() {
 fn char_boundary_exactly_at_77_same_as_legacy() {
     // 77 ASCII chars, then more: the char at byte 77 starts exactly at the cut.
     let cmd = format!("{}{}", "A".repeat(77), "BCDE");
-    assert_eq!(truncate_session_name(&cmd), format!("{}...", "A".repeat(77)));
+    assert_eq!(
+        truncate_session_name(&cmd),
+        format!("{}...", "A".repeat(77))
+    );
 }
 
 /// (d) 4-byte chars (CJK ideograph / emoji) straddling the byte-77 cut:
@@ -67,10 +73,19 @@ fn four_byte_char_straddling_cut_is_excluded_not_sliced() {
 /// ≥ what a bytewise cut would give (never longer than 77 bytes + "...").
 #[test]
 fn mixed_scripts_never_panic_and_stay_under_budget() {
-    let cmd = format!("{}{}{}", "abc ".repeat(10), "نص فارسی ".repeat(20), "🙂".repeat(30));
+    let cmd = format!(
+        "{}{}{}",
+        "abc ".repeat(10),
+        "نص فارسی ".repeat(20),
+        "🙂".repeat(30)
+    );
     let name = truncate_session_name(&cmd);
     assert!(name.ends_with("..."));
-    assert!(name.len() <= 80, "name body must stay within the byte budget, got {}", name.len());
+    assert!(
+        name.len() <= 80,
+        "name body must stay within the byte budget, got {}",
+        name.len()
+    );
     assert!(name.is_char_boundary(name.len() - 3)); // ellipsis split is a boundary
 }
 

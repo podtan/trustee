@@ -100,13 +100,23 @@ pub enum TuiMessage {
     /// new checkpoint-chain session ids so clients can adopt the new identity
     /// (tab title, history-load target) without inferring it from ResumeInfo.
     /// The live/in-memory registry key does NOT change — only the chain id.
-    SessionRotated { old: Option<String>, new: Option<String> },
+    SessionRotated {
+        old: Option<String>,
+        new: Option<String>,
+    },
     /// Handoff briefing failed/unavailable — session preserved, NO auto-execute.
     HandoffFailed,
     /// A native tool call has started (shows spinner)
-    ToolPending { tool_name: String, hint: Option<String> },
+    ToolPending {
+        tool_name: String,
+        hint: Option<String>,
+    },
     /// A native tool call has finished (replaces spinner with ✓/✗)
-    ToolDone { tool_name: String, success: bool, hint: Option<String> },
+    ToolDone {
+        tool_name: String,
+        success: bool,
+        hint: Option<String>,
+    },
     /// Context token count updated (for auto-handoff threshold checking)
     ContextTokensUpdated(usize),
     /// MCP server status update from agent initialization
