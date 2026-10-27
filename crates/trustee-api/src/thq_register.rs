@@ -223,8 +223,8 @@ impl ThqConfig {
     ///   disabled (never a silent skip).
     /// - `Ok(Some(cfg))` — the five-key config, validated and normalized.
     pub fn from_toml(config_toml: &str) -> Result<Option<Self>, String> {
-        let table: toml::Table = toml::from_str(config_toml)
-            .map_err(|e| format!("config is not valid TOML: {e}"))?;
+        let table: toml::Table =
+            toml::from_str(config_toml).map_err(|e| format!("config is not valid TOML: {e}"))?;
         let Some(thq) = table.get("thq").and_then(|v| v.as_table()) else {
             return Ok(None); // no [thq] — lane off
         };
@@ -386,7 +386,10 @@ impl Enrollment {
     fn forget_credential(&self) {
         if let Err(e) = std::fs::remove_file(&self.0.cred_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("THQ: cannot drop credential {}: {e}", self.0.cred_path.display());
+                tracing::warn!(
+                    "THQ: cannot drop credential {}: {e}",
+                    self.0.cred_path.display()
+                );
             }
         }
     }
@@ -456,7 +459,8 @@ impl Enrollment {
                                 "THQ pull payload (secrets REDACTED): {}",
                                 redact_payload(&payload)
                             );
-                            let report = crate::materialize::apply_profiles(&enrollment.0.home, &payload);
+                            let report =
+                                crate::materialize::apply_profiles(&enrollment.0.home, &payload);
                             // 0.19.4: the 16F dispatch table follows the applier
                             // — new/re-bound profiles become console-reachable
                             // within this pull cycle; drained/failed ones leave
@@ -471,14 +475,15 @@ impl Enrollment {
                                 tracing::info!(target: "thq", "THQ apply: {applied} profile(s) materialized");
                             }
                             for pr in &report.profiles {
-                                if let crate::materialize::ProfileOutcome::Failed { reason } = &pr.outcome {
+                                if let crate::materialize::ProfileOutcome::Failed { reason } =
+                                    &pr.outcome
+                                {
                                     tracing::warn!(target: "thq", "THQ apply: profile {} FAILED: {reason}", pr.profile_id);
                                 }
                             }
 
                             for p in &profiles {
-                                let Some(pid) = p.get("profile_id").and_then(|v| v.as_str())
-                                else {
+                                let Some(pid) = p.get("profile_id").and_then(|v| v.as_str()) else {
                                     continue;
                                 };
                                 // Launch-semantics contract (v0.19.1): the
@@ -649,9 +654,7 @@ async fn handle_enroll(
 /// The enroll route, merged into the main router. Uses an `Extension`
 /// layer (process-level handle), so it merges into any `Router<S>` — same
 /// shape as the xagent merge. No `[thq]` config → no route (404).
-pub fn enroll_route<S: Clone + Send + Sync + 'static>(
-    enrollment: Enrollment,
-) -> axum::Router<S> {
+pub fn enroll_route<S: Clone + Send + Sync + 'static>(enrollment: Enrollment) -> axum::Router<S> {
     axum::Router::new()
         .route("/thq/enroll", axum::routing::post(handle_enroll))
         .layer(axum::Extension(enrollment))
@@ -861,11 +864,7 @@ mod tests {
     }
 
     fn tmp(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "trustee-thq3-{}-{}",
-            tag,
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("trustee-thq3-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -945,7 +944,10 @@ runtime_name = "edge"
             1,
         );
         let err = ThqConfig::from_toml(&toml).expect_err("query in thq_url must fail loud");
-        assert!(err.contains("instance_id"), "error must redirect to instance_id: {err}");
+        assert!(
+            err.contains("instance_id"),
+            "error must redirect to instance_id: {err}"
+        );
     }
 
     #[test]
@@ -987,7 +989,10 @@ agent_name = "nox"
         // New keys present AND a leftover torpi_url: unknown-key error.
         let leftover = format!("{}\ntorpi_url = \"https://x.example\"", full_toml());
         let err = ThqConfig::from_toml(&leftover).expect_err("leftovers must fail loud");
-        assert!(err.contains("torpi_url"), "error must name the leftover key: {err}");
+        assert!(
+            err.contains("torpi_url"),
+            "error must name the leftover key: {err}"
+        );
 
         // agent_name (the pre-rename vocabulary) is equally foreign here.
         let leftover_agent = format!("{}\nagent_name = \"nox\"", full_toml());
@@ -1067,7 +1072,11 @@ agent_name = "nox"
             use std::os::unix::fs::PermissionsExt;
             let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(file_mode, 0o600, "secret file is owner-only");
-            let dir_mode = std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777;
+            let dir_mode = std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
             assert_eq!(dir_mode, 0o700, "thq/ namespace is owner-only");
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -1079,7 +1088,10 @@ agent_name = "nox"
         let path = dir.join("runtime.json");
         std::fs::write(&path, "{not json").unwrap();
         let enr = Enrollment::with_cred_path(cfg(), path);
-        assert!(enr.load_credential().is_none(), "corruption self-heals via re-register");
+        assert!(
+            enr.load_credential().is_none(),
+            "corruption self-heals via re-register"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1154,7 +1166,11 @@ agent_name = "nox"
         let dir = tmp("enroll-rogue");
         let path = dir.join("runtime.json");
         let enr = Enrollment::with_cred_path(cfg(), path.clone());
-        let payload = enroll_payload(&enr, "https://rogue.example/?instance=leaf", "6f635fe4-4a06-42b0-8a62-276383488a9c");
+        let payload = enroll_payload(
+            &enr,
+            "https://rogue.example/?instance=leaf",
+            "6f635fe4-4a06-42b0-8a62-276383488a9c",
+        );
         let resp = enroll(&enr, &payload).await;
         assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
         assert!(
@@ -1184,7 +1200,11 @@ agent_name = "nox"
     async fn enroll_rejects_wrong_instance() {
         let dir = tmp("enroll-wronginst");
         let enr = Enrollment::with_cred_path(cfg(), dir.join("runtime.json"));
-        let payload = enroll_payload(&enr, "https://thq.tanbal.ir/?instance=other-leaf", "other-leaf");
+        let payload = enroll_payload(
+            &enr,
+            "https://thq.tanbal.ir/?instance=other-leaf",
+            "other-leaf",
+        );
         let resp = enroll(&enr, &payload).await;
         assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
         assert!(enr.load_credential().is_none());
@@ -1217,8 +1237,9 @@ agent_name = "nox"
             let user = state.sessions.get("default").unwrap();
             let entry = user.value().sessions.get("default").unwrap();
             let s = entry.value().session.clone();
-            s.lock().await.home_dir =
-                Some(std::path::PathBuf::from(format!("/tmp/x/users/{namespace}")));
+            s.lock().await.home_dir = Some(std::path::PathBuf::from(format!(
+                "/tmp/x/users/{namespace}"
+            )));
             s
         };
         session.lock().await.workflow_state = trustee_core::types::WorkflowState::Running;

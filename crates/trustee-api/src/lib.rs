@@ -9,12 +9,12 @@
 
 pub mod auth;
 pub mod identity;
-pub mod tls;
+mod materialize;
 mod routes;
 mod state;
-mod materialize;
 mod thq_dispatch;
 mod thq_register;
+pub mod tls;
 pub mod xagent;
 
 /// The BIN's version, injected by the `trustee` binary at startup
@@ -138,7 +138,11 @@ pub async fn run(
     // Extract agent name from config TOML for stateless operation
     if let Some(ref config_toml_str) = session.config_toml {
         if let Ok(table) = config_toml_str.parse::<toml::Value>() {
-            if let Some(name) = table.get("agent").and_then(|a| a.get("name")).and_then(|n| n.as_str()) {
+            if let Some(name) = table
+                .get("agent")
+                .and_then(|a| a.get("name"))
+                .and_then(|n| n.as_str())
+            {
                 session.agent_name = name.to_string();
             }
         }
@@ -214,12 +218,21 @@ pub async fn run(
         .route("/api/v1/project/name", post(routes::set_project_name))
         // Session discovery & resume
         // Session discovery & resume (checkpoint-based, existing)
-        .route("/api/v1/sessions", get(routes::list_sessions).post(routes::create_session))
+        .route(
+            "/api/v1/sessions",
+            get(routes::list_sessions).post(routes::create_session),
+        )
         .route("/api/v1/sessions/live", get(routes::list_live_sessions))
-        .route("/api/v1/sessions/{id}", get(routes::get_session_detail).delete(routes::destroy_session))
+        .route(
+            "/api/v1/sessions/{id}",
+            get(routes::get_session_detail).delete(routes::destroy_session),
+        )
         .route("/api/v1/sessions/{id}/live", get(routes::get_live_session))
         .route("/api/v1/sessions/{id}/resume", post(routes::resume_session))
-        .route("/api/v1/sessions/{id}/history", get(routes::get_session_history))
+        .route(
+            "/api/v1/sessions/{id}/history",
+            get(routes::get_session_history),
+        )
         // MSU: session-scoped live routes
         .route(
             "/api/v1/sessions/{id}/command",
@@ -227,10 +240,22 @@ pub async fn run(
                 routes::ATTACH_BODY_LIMIT,
             )),
         )
-        .route("/api/v1/sessions/{id}/cancel", post(routes::post_cancel_session))
-        .route("/api/v1/sessions/{id}/handoff", post(routes::post_handoff_session))
-        .route("/api/v1/sessions/{id}/name", post(routes::set_session_name_session))
-        .route("/api/v1/sessions/{id}/stream", get(routes::ws_session_handler))
+        .route(
+            "/api/v1/sessions/{id}/cancel",
+            post(routes::post_cancel_session),
+        )
+        .route(
+            "/api/v1/sessions/{id}/handoff",
+            post(routes::post_handoff_session),
+        )
+        .route(
+            "/api/v1/sessions/{id}/name",
+            post(routes::set_session_name_session),
+        )
+        .route(
+            "/api/v1/sessions/{id}/stream",
+            get(routes::ws_session_handler),
+        )
         // Static files from trustee-web
         .route("/", get(routes::serve_index))
         .route("/{file}", get(routes::serve_static))
@@ -301,9 +326,11 @@ pub async fn run(
                 let io = hyper_util::rt::TokioIo::new(tls_stream);
                 let svc = hyper_util::service::TowerToHyperService::new(app);
 
-                let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection_with_upgrades(io, svc)
-                    .await;
+                let _ = hyper_util::server::conn::auto::Builder::new(
+                    hyper_util::rt::TokioExecutor::new(),
+                )
+                .serve_connection_with_upgrades(io, svc)
+                .await;
             });
         }
     } else {

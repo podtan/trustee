@@ -151,7 +151,8 @@ pub async fn x_list_sessions(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
-    crate::state::in_dispatch_scope(&entry.user_key, routes::list_sessions(State(state), inner)).await
+    crate::state::in_dispatch_scope(&entry.user_key, routes::list_sessions(State(state), inner))
+        .await
 }
 
 pub async fn x_create_session(
@@ -166,7 +167,11 @@ pub async fn x_create_session(
     // her ~/.trustee/users/<hash>/config/trustee.toml — allowlisted since
     // the xagent-persona change), falling back to the shared config default.
     // An explicit identity in the create body still wins (caller override).
-    crate::state::in_dispatch_scope(&entry.user_key, routes::create_session(State(state), inner, Json(req))).await
+    crate::state::in_dispatch_scope(
+        &entry.user_key,
+        routes::create_session(State(state), inner, Json(req)),
+    )
+    .await
 }
 
 pub async fn x_list_live_sessions(
@@ -175,7 +180,11 @@ pub async fn x_list_live_sessions(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
-    crate::state::in_dispatch_scope(&entry.user_key, routes::list_live_sessions(State(state), inner)).await
+    crate::state::in_dispatch_scope(
+        &entry.user_key,
+        routes::list_live_sessions(State(state), inner),
+    )
+    .await
 }
 
 pub async fn x_get_session_detail(
@@ -184,7 +193,11 @@ pub async fn x_get_session_detail(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
-    crate::state::in_dispatch_scope(&entry.user_key, routes::get_session_detail(State(state), Path(session_id), inner)).await
+    crate::state::in_dispatch_scope(
+        &entry.user_key,
+        routes::get_session_detail(State(state), Path(session_id), inner),
+    )
+    .await
 }
 
 pub async fn x_destroy_session(
@@ -193,7 +206,11 @@ pub async fn x_destroy_session(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
-    crate::state::in_dispatch_scope(&entry.user_key, routes::destroy_session(State(state), inner, Path(session_id))).await
+    crate::state::in_dispatch_scope(
+        &entry.user_key,
+        routes::destroy_session(State(state), inner, Path(session_id)),
+    )
+    .await
 }
 
 pub async fn x_get_live_session(
@@ -202,7 +219,11 @@ pub async fn x_get_live_session(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
-    crate::state::in_dispatch_scope(&entry.user_key, routes::get_live_session(State(state), inner, Path(session_id))).await
+    crate::state::in_dispatch_scope(
+        &entry.user_key,
+        routes::get_live_session(State(state), inner, Path(session_id)),
+    )
+    .await
 }
 
 pub async fn x_resume_session(
@@ -212,7 +233,11 @@ pub async fn x_resume_session(
     body: Option<Json<routes::ResumeRequestBody>>,
 ) -> Result<Response, (StatusCode, String)> {
     let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
-    crate::state::in_dispatch_scope(&entry.user_key, routes::resume_session(State(state), Path(checkpoint_session_id), inner, body)).await
+    crate::state::in_dispatch_scope(
+        &entry.user_key,
+        routes::resume_session(State(state), Path(checkpoint_session_id), inner, body),
+    )
+    .await
 }
 
 pub async fn x_get_session_history(
@@ -221,7 +246,11 @@ pub async fn x_get_session_history(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
-    crate::state::in_dispatch_scope(&entry.user_key, routes::get_session_history(State(state), Path(session_id), inner)).await
+    crate::state::in_dispatch_scope(
+        &entry.user_key,
+        routes::get_session_history(State(state), Path(session_id), inner),
+    )
+    .await
 }
 
 pub async fn x_post_command_session(
@@ -231,7 +260,11 @@ pub async fn x_post_command_session(
     Json(req): Json<routes::CommandRequest>,
 ) -> Result<Response, (StatusCode, String)> {
     let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
-    crate::state::in_dispatch_scope(&entry.user_key, routes::post_command_session(State(state), inner, Path(session_id), Json(req))).await
+    crate::state::in_dispatch_scope(
+        &entry.user_key,
+        routes::post_command_session(State(state), inner, Path(session_id), Json(req)),
+    )
+    .await
 }
 
 pub async fn x_post_cancel_session(
@@ -240,7 +273,11 @@ pub async fn x_post_cancel_session(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
-    crate::state::in_dispatch_scope(&entry.user_key, routes::post_cancel_session(State(state), inner, Path(session_id))).await
+    crate::state::in_dispatch_scope(
+        &entry.user_key,
+        routes::post_cancel_session(State(state), inner, Path(session_id)),
+    )
+    .await
 }
 
 pub async fn x_post_handoff_session(
@@ -249,7 +286,11 @@ pub async fn x_post_handoff_session(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
-    crate::state::in_dispatch_scope(&entry.user_key, routes::post_handoff_session(State(state), inner, Path(session_id))).await
+    crate::state::in_dispatch_scope(
+        &entry.user_key,
+        routes::post_handoff_session(State(state), inner, Path(session_id)),
+    )
+    .await
 }
 
 pub async fn x_ws_session_handler(
@@ -286,13 +327,11 @@ pub async fn x_mcp_status(
     headers: HeaderMap,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
     let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
-    Ok(
-        crate::state::in_dispatch_scope(
-            &entry.user_key,
-            crate::auth::mcp_status_handler(State(state), inner),
-        )
-        .await,
+    Ok(crate::state::in_dispatch_scope(
+        &entry.user_key,
+        crate::auth::mcp_status_handler(State(state), inner),
     )
+    .await)
 }
 
 /// The `/xagent/{agent}/api/v1` route tree — merged into the main router.
@@ -346,10 +385,7 @@ pub fn router() -> axum::Router<ServerState> {
         // v0.19.8: the thq console's MCP Connections overlay relays
         // /api/v1/console/agents/{agent}/mcp/status → THIS route. Without it
         // the overlay 404s into a misleading "No MCP credentials" message.
-        .route(
-            "/xagent/{agent}/api/v1/mcp/status",
-            get(x_mcp_status),
-        )
+        .route("/xagent/{agent}/api/v1/mcp/status", get(x_mcp_status))
 }
 
 #[cfg(test)]

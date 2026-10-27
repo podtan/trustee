@@ -361,10 +361,7 @@ pub fn refresh_after_apply(
 
 /// Remove the dispatch entry (if any) whose `user_key` equals the profile id
 /// — the materialized-anchor form. Returns true when an entry was removed.
-fn remove_by_user_key(
-    table: &dashmap::DashMap<String, ThqDispatchEntry>,
-    user_key: &str,
-) -> bool {
+fn remove_by_user_key(table: &dashmap::DashMap<String, ThqDispatchEntry>, user_key: &str) -> bool {
     let key = table
         .iter()
         .find(|kv| kv.value().user_key == user_key)
@@ -583,7 +580,8 @@ owner_id = "d0f5c4ba-9c10-4ff7-85a4-f2c0e588a55a"
 
     #[test]
     fn read_overlay_service_issuer_picks_service_account_credential() {
-        let base = std::env::temp_dir().join(format!("trustee-dispatch-issuer-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("trustee-dispatch-issuer-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("config");
         std::fs::create_dir_all(&dir).unwrap();
@@ -606,7 +604,10 @@ owner_id = "d0f5c4ba-9c10-4ff7-85a4-f2c0e588a55a"
         // 0.19.6: [thq].issuer_url (verbatim copy of the profile's
         // identity_issuer_url) is the identity fact; the legacy
         // [mcp.credentials] scan is a fallback for hand-authored overlays.
-        let base = std::env::temp_dir().join(format!("trustee-dispatch-issuer-decl-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!(
+            "trustee-dispatch-issuer-decl-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("config");
         std::fs::create_dir_all(&dir).unwrap();
@@ -661,7 +662,10 @@ owner_id = "d0f5c4ba-9c10-4ff7-85a4-f2c0e588a55a"
         let agents = discover_user_agents_in(&base);
         let table: DashMap<String, ThqDispatchEntry> = DashMap::new();
         populate_into(&table, &agents);
-        assert!(table.get("ghost").is_none(), "unresolved credential must not dispatch");
+        assert!(
+            table.get("ghost").is_none(),
+            "unresolved credential must not dispatch"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }
@@ -815,28 +819,22 @@ mod service_token_declaration_tests {
     }
 }
 
-
 #[cfg(test)]
 mod refresh_tests {
     use super::*;
     use crate::materialize::{ApplyReport, ProfileOutcome, ProfileReport};
-    use std::path::PathBuf;
     use dashmap::DashMap;
+    use std::path::PathBuf;
 
     fn temp_home(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "trustee-disp-{tag}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("trustee-disp-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     fn make_materialized(home: &PathBuf, pid: &str, agent_name: &str, token_value: &str) {
-        let dir = home
-            .join("users")
-            .join(trustee_core::user_hash(pid));
+        let dir = home.join("users").join(trustee_core::user_hash(pid));
         std::fs::create_dir_all(dir.join("config")).unwrap();
         std::fs::write(
             dir.join("config").join("trustee.toml"),
@@ -845,15 +843,17 @@ mod refresh_tests {
             ),
         )
         .unwrap();
-        std::fs::write(dir.join(".env"), format!("FARZAN_SERVICE_ACCOUNT={token_value}\n")).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            format!("FARZAN_SERVICE_ACCOUNT={token_value}\n"),
+        )
+        .unwrap();
     }
 
     /// 0.19.7: the thq auto-wire embeds the minted token byte-verbatim —
     /// the overlay declares the LITERAL JWT, no .env involved.
     fn make_materialized_literal(home: &PathBuf, pid: &str, agent_name: &str, literal: &str) {
-        let dir = home
-            .join("users")
-            .join(trustee_core::user_hash(pid));
+        let dir = home.join("users").join(trustee_core::user_hash(pid));
         std::fs::create_dir_all(dir.join("config")).unwrap();
         std::fs::write(
             dir.join("config").join("trustee.toml"),
@@ -897,7 +897,10 @@ mod refresh_tests {
         refresh_after_apply(&table, &home, &report("prof-1", ProfileOutcome::Unchanged));
 
         assert_eq!(table.len(), 1, "no duplicate entries across pull cycles");
-        assert_eq!(table.get("Farzan").unwrap().service_token.as_deref(), Some("tok-1"));
+        assert_eq!(
+            table.get("Farzan").unwrap().service_token.as_deref(),
+            Some("tok-1")
+        );
     }
 
     #[test]
@@ -919,7 +922,10 @@ mod refresh_tests {
         };
         refresh_after_apply(&table, &home, &report("prof-1", outcome));
 
-        assert!(table.get("Farzan").is_none(), "drained profile must leave the table");
+        assert!(
+            table.get("Farzan").is_none(),
+            "drained profile must leave the table"
+        );
     }
 
     #[test]
@@ -938,7 +944,10 @@ mod refresh_tests {
         );
         refresh_after_apply(&table, &home, &report("prof-1", ProfileOutcome::Reclaimed));
 
-        assert!(table.get("Farzan").is_none(), "reclaimed profile must leave the table");
+        assert!(
+            table.get("Farzan").is_none(),
+            "reclaimed profile must leave the table"
+        );
     }
 
     #[test]
@@ -959,7 +968,10 @@ mod refresh_tests {
         };
         refresh_after_apply(&table, &home, &report("prof-1", outcome));
 
-        assert!(table.get("Farzan").is_none(), "stale entry must go on loud failure");
+        assert!(
+            table.get("Farzan").is_none(),
+            "stale entry must go on loud failure"
+        );
     }
 
     #[test]
@@ -977,10 +989,20 @@ mod refresh_tests {
         );
 
         // A DIFFERENT profile fails → removal is keyed, not wholesale.
-        refresh_after_apply(&table, &home, &report("prof-9", ProfileOutcome::Failed {
-            reason: "x".to_string(),
-        }));
-        assert!(table.contains_key("legacy-nox"), "unrelated legacy entry untouched");
+        refresh_after_apply(
+            &table,
+            &home,
+            &report(
+                "prof-9",
+                ProfileOutcome::Failed {
+                    reason: "x".to_string(),
+                },
+            ),
+        );
+        assert!(
+            table.contains_key("legacy-nox"),
+            "unrelated legacy entry untouched"
+        );
     }
 
     /// 0.19.7 — THE KAVOSH CASE (prod 2026-09-19): thq auto-wire embeds the
@@ -1009,7 +1031,11 @@ mod refresh_tests {
     fn literal_declaration_is_never_treated_as_a_variable_name() {
         let base = temp_users_dir("literal-not-var");
         let jwt = "eyJhbGciOiJIUzI1NiJ9.payload.sig";
-        std::fs::write(base.join(".env"), "eyJhbGciOiJIUzI1NiJ9.payload.sig=env-wins\n").unwrap();
+        std::fs::write(
+            base.join(".env"),
+            "eyJhbGciOiJIUzI1NiJ9.payload.sig=env-wins\n",
+        )
+        .unwrap();
         let cfg = DispatchConfig::from_toml(&format!(
             "[thq]\nagent_name = \"Kavosh\"\nowner_id = \"prof\"\nservice_token = \"{jwt}\"\n"
         ))
@@ -1032,10 +1058,20 @@ mod refresh_tests {
         make_materialized_literal(&home, "prof-kavosh", "Kavosh", jwt);
         let table: DashMap<String, ThqDispatchEntry> = DashMap::new();
 
-        refresh_after_apply(&table, &home, &report("prof-kavosh", ProfileOutcome::Applied));
+        refresh_after_apply(
+            &table,
+            &home,
+            &report("prof-kavosh", ProfileOutcome::Applied),
+        );
 
-        let e = table.get("Kavosh").expect("auto-wired agent must be dispatchable");
-        assert_eq!(e.service_token.as_deref(), Some(jwt), "byte-verbatim bearer");
+        let e = table
+            .get("Kavosh")
+            .expect("auto-wired agent must be dispatchable");
+        assert_eq!(
+            e.service_token.as_deref(),
+            Some(jwt),
+            "byte-verbatim bearer"
+        );
     }
 
     /// Req 2 (work order 2026-09-19): entries removed as unresolved must
@@ -1052,7 +1088,11 @@ mod refresh_tests {
         )
         .unwrap();
         // .env has the never-provisioned placeholder — house convention: NOT a value.
-        std::fs::write(dir.join(".env"), "FARZAN_SERVICE_ACCOUNT=${FARZAN_SERVICE_ACCOUNT}\n").unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "FARZAN_SERVICE_ACCOUNT=${FARZAN_SERVICE_ACCOUNT}\n",
+        )
+        .unwrap();
         let table: DashMap<String, ThqDispatchEntry> = DashMap::new();
 
         refresh_after_apply(&table, &home, &report("prof-1", ProfileOutcome::Applied));
@@ -1062,7 +1102,9 @@ mod refresh_tests {
         std::fs::write(dir.join(".env"), "FARZAN_SERVICE_ACCOUNT=fresh-token\n").unwrap();
         refresh_after_apply(&table, &home, &report("prof-1", ProfileOutcome::Unchanged));
 
-        let e = table.get("Farzan").expect("re-join on a later refresh, no restart");
+        let e = table
+            .get("Farzan")
+            .expect("re-join on a later refresh, no restart");
         assert_eq!(e.service_token.as_deref(), Some("fresh-token"));
     }
 }

@@ -112,10 +112,7 @@ impl IdentityRegistry {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                &self.path,
-                std::fs::Permissions::from_mode(0o600),
-            );
+            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
         }
     }
 }
@@ -125,10 +122,7 @@ mod tests {
     use super::*;
 
     fn registry(tag: &str) -> IdentityRegistry {
-        let dir = std::env::temp_dir().join(format!(
-            "trustee-ident-{tag}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("trustee-ident-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         IdentityRegistry::from_path(dir.join("identity_map.json"))
@@ -148,7 +142,11 @@ mod tests {
         let r = registry("mut");
         let first = r.pin("sub-1", "farzan");
         // Simulate a claims change: derived key flips to the sub fallback.
-        assert_eq!(r.pin("sub-1", "sub-1"), first, "claim mutation rotated the namespace");
+        assert_eq!(
+            r.pin("sub-1", "sub-1"),
+            first,
+            "claim mutation rotated the namespace"
+        );
         // And a totally different derived value still loses to the pin.
         assert_eq!(r.pin("sub-1", "ghost"), first);
     }
@@ -163,10 +161,8 @@ mod tests {
 
     #[test]
     fn pins_persist_across_reload() {
-        let dir = std::env::temp_dir().join(format!(
-            "trustee-ident-persist-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("trustee-ident-persist-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("identity_map.json");

@@ -246,7 +246,11 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let model = p.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let model = p
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let mcp_servers = p
         .get("mcp_servers")
         .and_then(|v| v.as_str())
@@ -342,7 +346,10 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
     }
     if !persona.is_empty() {
         let mut lifecycle = toml::Table::new();
-        lifecycle.insert("system_template".into(), toml::Value::String(persona.clone()));
+        lifecycle.insert(
+            "system_template".into(),
+            toml::Value::String(persona.clone()),
+        );
         overlay.insert("lifecycle".into(), toml::Value::Table(lifecycle));
     }
     if !model.is_empty() {
@@ -434,7 +441,10 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
     if !identity_service_token.is_empty() {
         let mut thq = toml::Table::new();
         thq.insert("agent_name".into(), toml::Value::String(name.clone()));
-        thq.insert("owner_id".into(), toml::Value::String(profile_id.to_string()));
+        thq.insert(
+            "owner_id".into(),
+            toml::Value::String(profile_id.to_string()),
+        );
         thq.insert(
             "service_token".into(),
             toml::Value::String(identity_service_token.clone()),
@@ -613,10 +623,7 @@ mod tests {
     use serde_json::json;
 
     fn tmp(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "trustee-mat-{tag}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("trustee-mat-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -650,14 +657,14 @@ mod tests {
     fn applies_profile_to_user_home() {
         let home = tmp("apply");
         let report = apply_profiles(&home, &fixture_payload("farzan_service_account=sec-ret-1"));
-        assert_eq!(
-            report.profiles[0].outcome,
-            ProfileOutcome::Applied
-        );
+        assert_eq!(report.profiles[0].outcome, ProfileOutcome::Applied);
 
         let ud = user_dir(&home, "prof-1111");
         let overlay = std::fs::read_to_string(ud.join("config").join("trustee.toml")).unwrap();
-        assert!(overlay.contains("name = \"Farzan\""), "prefix stripped: {overlay}");
+        assert!(
+            overlay.contains("name = \"Farzan\""),
+            "prefix stripped: {overlay}"
+        );
         assert!(
             !overlay.contains("Agent: Farzan"),
             "the [agent] name must not carry the title prefix"
@@ -666,7 +673,10 @@ mod tests {
             overlay.contains("Be helpful, concise, Persian-friendly."),
             "persona applied: {overlay}"
         );
-        assert!(overlay.contains("GLM-5.3-Flash@glm-zai"), "model pin applied");
+        assert!(
+            overlay.contains("GLM-5.3-Flash@glm-zai"),
+            "model pin applied"
+        );
         assert!(overlay.contains("[[mcp.servers]]"), "mcp fragment applied");
         assert!(overlay.contains("https://fame.example"));
 
@@ -684,12 +694,14 @@ mod tests {
             assert_eq!(mode, 0o600, "secrets .env is owner-only");
         }
 
-        let marker: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(ud.join("materialized.json")).unwrap(),
-        )
-        .unwrap();
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(ud.join("materialized.json")).unwrap())
+                .unwrap();
         assert_eq!(marker["profile_id"], "prof-1111");
-        assert_eq!(marker["name"], "Agent: Farzan", "marker keeps the RAW title");
+        assert_eq!(
+            marker["name"], "Agent: Farzan",
+            "marker keeps the RAW title"
+        );
         assert_eq!(marker["desired_state"], "running");
         assert_eq!(marker["mcp_applied"], true);
         let _ = std::fs::remove_dir_all(&home);
@@ -698,12 +710,14 @@ mod tests {
     #[test]
     fn second_pull_with_unchanged_content_skips_rewrite() {
         let home = tmp("idem");
-        assert_eq!(apply_profiles(&home, &fixture_payload("k=v")).applied().count(), 1);
-        let report = apply_profiles(&home, &fixture_payload("k=v"));
         assert_eq!(
-            report.profiles[0].outcome,
-            ProfileOutcome::Unchanged
+            apply_profiles(&home, &fixture_payload("k=v"))
+                .applied()
+                .count(),
+            1
         );
+        let report = apply_profiles(&home, &fixture_payload("k=v"));
+        assert_eq!(report.profiles[0].outcome, ProfileOutcome::Unchanged);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -718,11 +732,13 @@ mod tests {
         payload["profiles"][0]["identity_issuer_url"] =
             json!("https://idp.tanbal.ir/oauth2/openid/pdt-api");
         let report = apply_profiles(&home, &payload);
-        assert!(matches!(report.profiles[0].outcome, ProfileOutcome::Applied));
-        let overlay = std::fs::read_to_string(
-            user_dir(&home, "prof-1111").join("config/trustee.toml"),
-        )
-        .unwrap();
+        assert!(matches!(
+            report.profiles[0].outcome,
+            ProfileOutcome::Applied
+        ));
+        let overlay =
+            std::fs::read_to_string(user_dir(&home, "prof-1111").join("config/trustee.toml"))
+                .unwrap();
         let table: toml::Table = overlay.parse().unwrap();
         let thq = table
             .get("thq")
@@ -767,11 +783,13 @@ mod tests {
         );
         // NO identity_service_token declared
         let report = apply_profiles(&home, &payload);
-        assert!(matches!(report.profiles[0].outcome, ProfileOutcome::Applied));
-        let overlay = std::fs::read_to_string(
-            user_dir(&home, "prof-1111").join("config/trustee.toml"),
-        )
-        .unwrap();
+        assert!(matches!(
+            report.profiles[0].outcome,
+            ProfileOutcome::Applied
+        ));
+        let overlay =
+            std::fs::read_to_string(user_dir(&home, "prof-1111").join("config/trustee.toml"))
+                .unwrap();
         assert!(
             !overlay.contains("[thq]"),
             "no declaration → no anchor. Counting server credentials must never select an identity again"
@@ -791,11 +809,13 @@ mod tests {
         );
         payload["profiles"][0]["identity_service_token"] = json!("${ID_TOKEN}");
         let report = apply_profiles(&home, &payload);
-        assert!(matches!(report.profiles[0].outcome, ProfileOutcome::Applied));
-        let overlay = std::fs::read_to_string(
-            user_dir(&home, "prof-1111").join("config/trustee.toml"),
-        )
-        .unwrap();
+        assert!(matches!(
+            report.profiles[0].outcome,
+            ProfileOutcome::Applied
+        ));
+        let overlay =
+            std::fs::read_to_string(user_dir(&home, "prof-1111").join("config/trustee.toml"))
+                .unwrap();
         let table: toml::Table = overlay.parse().unwrap();
         assert_eq!(
             table["thq"]["service_token"].as_str(),
@@ -850,10 +870,12 @@ mod tests {
     #[test]
     fn json_object_secrets_flatten_to_env_entries() {
         let home = tmp("jsonsec");
-        let payload =
-            fixture_payload(r#"{"farzan_service_account":"tok-1","other_key":"val-2"}"#);
+        let payload = fixture_payload(r#"{"farzan_service_account":"tok-1","other_key":"val-2"}"#);
         let report = apply_profiles(&home, &payload);
-        assert!(matches!(report.profiles[0].outcome, ProfileOutcome::Applied));
+        assert!(matches!(
+            report.profiles[0].outcome,
+            ProfileOutcome::Applied
+        ));
         let env = std::fs::read_to_string(user_dir(&home, "prof-1111").join(".env")).unwrap();
         assert!(env.contains("farzan_service_account=tok-1\n"));
         assert!(env.contains("other_key=val-2\n"));
@@ -897,7 +919,9 @@ mod tests {
             report.profiles[0].outcome,
             ProfileOutcome::Failed { .. }
         ));
-        assert!(report.observed_for("prof-1111", false).starts_with("failed:"));
+        assert!(report
+            .observed_for("prof-1111", false)
+            .starts_with("failed:"));
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -924,7 +948,10 @@ mod tests {
         let report = apply_profiles(&home, &gated_payload("stopped"));
         assert_eq!(
             report.profiles[0].outcome,
-            ProfileOutcome::Gated { desired: "stopped".into(), drained: false }
+            ProfileOutcome::Gated {
+                desired: "stopped".into(),
+                drained: false
+            }
         );
         assert!(
             !user_dir(&home, "prof-1111").exists(),
@@ -958,17 +985,19 @@ mod tests {
         let report = apply_profiles(&home, &gated_payload("stopped"));
         assert_eq!(
             report.profiles[0].outcome,
-            ProfileOutcome::Gated { desired: "stopped".into(), drained: true }
+            ProfileOutcome::Gated {
+                desired: "stopped".into(),
+                drained: true
+            }
         );
         assert!(
             !ud.join("config").join("trustee.toml").exists(),
             "overlay removed on drain"
         );
         assert!(!ud.join(".env").exists(), "secrets removed on drain");
-        let marker: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(ud.join("materialized.json")).unwrap(),
-        )
-        .unwrap();
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(ud.join("materialized.json")).unwrap())
+                .unwrap();
         assert_eq!(marker["materialized"], false);
         assert_eq!(marker["desired_state"], "stopped");
 
@@ -1019,10 +1048,8 @@ mod v0195_credentials_tests {
     use serde_json::json;
 
     fn tmp(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "trustee-mat-0195-{tag}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("trustee-mat-0195-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1084,7 +1111,10 @@ mod v0195_credentials_tests {
             assert!(overlay.contains(line), "missing {line} in:\n{overlay}");
         }
         // the servers fragment survived the merge (key-context preserved)
-        assert!(overlay.contains("[[mcp.servers]]"), "servers side:\n{overlay}");
+        assert!(
+            overlay.contains("[[mcp.servers]]"),
+            "servers side:\n{overlay}"
+        );
         assert!(overlay.contains("credentials = \"farzan_service_account\""));
         // secrets landed
         let env = std::fs::read_to_string(
@@ -1102,13 +1132,18 @@ mod v0195_credentials_tests {
         let home = tmp("selfheal");
         let without = apply_profiles(&home, &payload_with_credentials("", "k=v"));
         assert_eq!(without.profiles[0].outcome, ProfileOutcome::Applied);
-        let with = apply_profiles(&home, &payload_with_credentials(KNOWN_GOOD_CREDENTIALS, "k=v"));
+        let with = apply_profiles(
+            &home,
+            &payload_with_credentials(KNOWN_GOOD_CREDENTIALS, "k=v"),
+        );
         assert_eq!(
             with.profiles[0].outcome,
             ProfileOutcome::Applied,
             "credentials addition must be a fingerprint MISS — re-materialization is the self-heal"
         );
-        assert!(overlay_of(&home, "prof-cred-1").contains("[mcp.credentials.farzan_service_account]"));
+        assert!(
+            overlay_of(&home, "prof-cred-1").contains("[mcp.credentials.farzan_service_account]")
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1158,7 +1193,10 @@ mod v0195_credentials_tests {
             !overlay.contains("mcp.credentials"),
             "empty credentials blob must fabricate nothing: {overlay}"
         );
-        assert!(overlay.contains("[[mcp.servers]]"), "servers still materialize");
+        assert!(
+            overlay.contains("[[mcp.servers]]"),
+            "servers still materialize"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1166,7 +1204,8 @@ mod v0195_credentials_tests {
     fn deleted_profile_is_reclaimed_from_home() {
         let home = tmp("reclaim");
         // bind two profiles
-        let mut payload = payload_with_credentials(KNOWN_GOOD_CREDENTIALS, "FARZAN_SERVICE_ACCOUNT=t");
+        let mut payload =
+            payload_with_credentials(KNOWN_GOOD_CREDENTIALS, "FARZAN_SERVICE_ACCOUNT=t");
         payload["profiles"][0]["profile_id"] = json!("prof-gone");
         payload["profiles"].as_array_mut().unwrap().push(json!({
             "profile_id": "prof-stays",
@@ -1192,13 +1231,24 @@ mod v0195_credentials_tests {
             .expect("reclaimed profile must be reported");
         assert_eq!(reclaimed.outcome, ProfileOutcome::Reclaimed);
 
-        let gone_dir = home.join("users").join(trustee_core::user_hash("prof-gone"));
-        assert!(!gone_dir.join("config").join("trustee.toml").exists(), "overlay removed");
+        let gone_dir = home
+            .join("users")
+            .join(trustee_core::user_hash("prof-gone"));
+        assert!(
+            !gone_dir.join("config").join("trustee.toml").exists(),
+            "overlay removed"
+        );
         assert!(!gone_dir.join(".env").exists(), "secrets removed");
-        assert!(!gone_dir.join("materialized.json").exists(), "marker removed");
+        assert!(
+            !gone_dir.join("materialized.json").exists(),
+            "marker removed"
+        );
         assert!(gone_dir.exists(), "the dir itself (history) is preserved");
         // the surviving profile is untouched
-        assert!(overlay_of(&home, "prof-stays").contains("[agent]"), "survivor intact");
+        assert!(
+            overlay_of(&home, "prof-stays").contains("[agent]"),
+            "survivor intact"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1227,11 +1277,17 @@ mod v0195_credentials_tests {
 
         let report = apply_profiles(&home, &json!({"profiles": [], "total": 0}));
         assert!(
-            report.profiles.iter().all(|p| p.outcome != ProfileOutcome::Reclaimed),
+            report
+                .profiles
+                .iter()
+                .all(|p| p.outcome != ProfileOutcome::Reclaimed),
             "nothing reclaimable: {:?}",
             report.profiles
         );
-        assert!(drained.join("materialized.json").exists(), "drained marker stays");
+        assert!(
+            drained.join("materialized.json").exists(),
+            "drained marker stays"
+        );
         assert!(foreign.join("keepme").exists(), "foreign dir untouched");
         let _ = std::fs::remove_dir_all(&home);
     }

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
+use crate::identity::IdentityRegistry;
 use axum::{
     body::Body,
     extract::{Query, State},
@@ -28,7 +29,6 @@ use pep::oidc::pkce_cookie::PkceCookieManager;
 use pep::oidc_client::OidcClient;
 use pep::oidc_resource_server::ResourceServerClient;
 use pep::session_manager::WebSessionManager;
-use crate::identity::IdentityRegistry;
 use pep::{DevConfig, JwtClaims, JwtValidationOptions, OidcClientConfig};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -411,7 +411,8 @@ impl AuthState {
         if PrincipalKind::from_role(claim_role(claims).as_deref()) == PrincipalKind::Agent {
             return claims.sub.clone();
         }
-        self.identity_registry.pin(claims.sub.as_str(), &jwt_user_key(claims))
+        self.identity_registry
+            .pin(claims.sub.as_str(), &jwt_user_key(claims))
     }
 
     /// 16F: set the service-account issuer fallback candidates.
