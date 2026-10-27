@@ -240,6 +240,21 @@ pub async fn x_resume_session(
     .await
 }
 
+/// POST /xagent/{agent}/api/v1/sessions/{id}/fork — explicit chain fork
+/// (the owner's feature; NEVER a side effect of resume).
+pub async fn x_fork_session(
+    State(state): State<ServerState>,
+    Path((agent, source_session_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let (inner, entry) = dispatch_context(&state, &agent, &headers).await?;
+    crate::state::in_dispatch_scope(
+        &entry.user_key,
+        routes::fork_session(State(state), Path(source_session_id), inner),
+    )
+    .await
+}
+
 pub async fn x_get_session_history(
     State(state): State<ServerState>,
     Path((agent, session_id)): Path<(String, String)>,
@@ -358,6 +373,10 @@ pub fn router() -> axum::Router<ServerState> {
         .route(
             "/xagent/{agent}/api/v1/sessions/{id}/resume",
             post(x_resume_session),
+        )
+        .route(
+            "/xagent/{agent}/api/v1/sessions/{id}/fork",
+            post(x_fork_session),
         )
         .route(
             "/xagent/{agent}/api/v1/sessions/{id}/history",

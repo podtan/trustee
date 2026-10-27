@@ -353,8 +353,146 @@ pub async fn create_resume_info(
 }
 
 // -----------------------------------------------------------------------
-// Chain forking (resume = fork; the c2f9508 invariant extended)
+// Resume-pointer (the resume handle's disk mapping) + chain forking
 // -----------------------------------------------------------------------
+
+/// Record on disk that `new_session_id` is a RESUME HANDLE for the chain
+/// `source_session_id`: the resumed session's dir is created (well-formed
+/// metadata, zero checkpoints — invisible in the session list, which only
+/// shows resumable chains) with the pointer in its session constants'
+/// `configuration.resumed_from`.
+///
+/// WHY (Ravand 2026-10-27, owner feedback): a resumed session CONTINUES the
+/// source chain — its checkpoints land under the SOURCE chain dir while its
+/// live registry id is a fresh key. The live-id → chain-id mapping must
+/// survive engine restarts, so it lives ON DISK (the session constants are
+/// write-once by design) — not in engine memory. Forking on resume was
+/// REVERTED (owner: resume = view/continue, fork = an explicit feature).
+pub async fn write_resume_pointer(
+    config_toml: &str,
+    source_session_id: &str,
+    new_session_id: &str,
+    home_dir: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    use abk::checkpoint::models::SessionConstants;
+
+    let manager = make_storage_manager(config_toml, home_dir, "trustee").await?;
+
+    let projects = manager
+        .list_projects()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
+
+    for project in &projects {
+        let project_storage = match manager
+            .get_project_storage_with_id(&project.project_path, &project.project_hash)
+            .await
+        {
+            Ok(ps) => ps,
+            Err(e) => {
+                tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
+                continue;
+            }
+        };
+
+        let sessions = match project_storage.list_sessions().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to list sessions for {}: {}",
+                    project.project_path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        if !sessions.iter().any(|s| s.session_id == source_session_id) {
+            continue;
+        }
+
+        // The resumed handle's dir: well-formed metadata (zero checkpoints —
+        // filtered from the resumable list) + the pointer in the constants.
+        let constants = SessionConstants {
+            task_description: None,
+            configuration: std::collections::HashMap::from([(
+                "resumed_from".to_string(),
+                serde_json::Value::String(source_session_id.to_string()),
+            )]),
+            working_directory: None,
+            max_iterations: 0,
+        };
+        project_storage
+            .create_session_with_description(new_session_id, None, Some(constants))
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create resume-handle dir for {}: {}",
+                    new_session_id,
+                    e
+                )
+            })?;
+        return Ok(());
+    }
+
+    anyhow::bail!("source session {} not found on disk", source_session_id)
+}
+
+/// Resolve a session id that may be a RESUME HANDLE: if the id's disk dir
+/// carries a `resumed_from` constant, return the SOURCE chain id it points
+/// at; otherwise None (the id is a plain chain id).
+///
+/// Used by the restore machinery: a client holding a resumed session's live
+/// id after an engine restart restores the SOURCE chain under the held id —
+/// the mapping survived on disk (write_resume_pointer), not in engine memory.
+pub async fn resolve_resume_handle(
+    config_toml: &str,
+    session_id: &str,
+    home_dir: Option<&std::path::Path>,
+) -> anyhow::Result<Option<String>> {
+    let manager = make_storage_manager(config_toml, home_dir, "trustee").await?;
+
+    let projects = manager
+        .list_projects()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
+
+    for project in &projects {
+        let project_storage = match manager
+            .get_project_storage_with_id(&project.project_path, &project.project_hash)
+            .await
+        {
+            Ok(ps) => ps,
+            Err(e) => {
+                tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
+                continue;
+            }
+        };
+
+        let sessions = match project_storage.list_sessions().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to list sessions for {}: {}",
+                    project.project_path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        if let Some(meta) = sessions.iter().find(|s| s.session_id == session_id) {
+            if let Some(source) = meta.configuration.get("resumed_from") {
+                if let Some(source_id) = source.as_str() {
+                    return Ok(Some(source_id.to_string()));
+                }
+            }
+            return Ok(None);
+        }
+    }
+
+    Ok(None)
+}
 
 /// Fork a session chain: copy the source chain's checkpoints into a NEW
 /// chain dir under `new_session_id`, rewriting each checkpoint's

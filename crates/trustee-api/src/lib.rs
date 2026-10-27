@@ -223,6 +223,7 @@ pub async fn run(
         )
         .route("/api/v1/sessions/{id}/live", get(routes::get_live_session))
         .route("/api/v1/sessions/{id}/resume", post(routes::resume_session))
+        .route("/api/v1/sessions/{id}/fork", post(routes::fork_session))
         .route(
             "/api/v1/sessions/{id}/history",
             get(routes::get_session_history),

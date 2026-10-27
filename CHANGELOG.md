@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.2] - 2026-10-27
+
+### Changed
+
+- **Fork-on-resume REVERTED (owner feedback: "forking a session when user resuming was a very very very very bad idea")** — resume is back to VIEW/CONTINUE onto the source chain (one logical conversation = one chain dir; the checkpoints accumulate under the source chain dir; no new chain per resume-click). The 0.23.1 fork-on-resume lasted one release.
+
+### Added
+
+- **Explicit chain fork: `POST /api/v1/sessions/{id}/fork` (+ `/xagent/{agent}/api/v1/sessions/{id}/fork`)** — forking is now a first-class feature with its own endpoint and a ⑂ Fork icon on the session cards (trustee-web 0.2.1). The fork copies the source chain's checkpoints into a NEW chain dir under the new session id (`fork_session_chain`, metadata.session_id rewritten) and creates a NEW live session continuing from the fork's latest checkpoint — INDEPENDENT of the source (the source stays intact; the fork's chain dir makes it restorable after an engine restart with no pointer machinery). Response shape = the resume response's.
+- **Resume-pointer on disk (solves the resumed-session restore gap the other way)** — `resume` records the live-id → source-chain-id mapping ON DISK (`write_resume_pointer`: the resumed handle's session constants' `resumed_from` — write-once by design, zero checkpoints so it stays invisible in the session list). The restore machinery (`get_or_restore_session_by_any_id`) follows the pointer on a miss: a client holding a resumed session's live id after an engine restart restores the SOURCE chain under the held id — the mapping survives restarts (previously it lived only in engine memory and the restore 404'd — Hamrah's on-device finding 06:07Z).
+
+### Fixed
+
+- trustee-core 0.8.10 (pointer helpers + fork), trustee-api 0.20.2, trustee-web 0.2.1, root 0.23.2.
+
 ## [0.23.1] - 2026-10-27
 
 ### Fixed

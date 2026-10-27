@@ -746,10 +746,43 @@ impl ServerState {
 
         // The chain must exist on disk with at least one checkpoint;
         // otherwise this id is genuinely unknown → 404 semantics.
-        let info =
-            trustee_core::sessions::create_resume_info(&config_toml, chain_id, home_dir.as_deref())
+        //
+        // Resume-handle resolution (Ravand 2026-10-27): a resumed session's
+        // live id is a fresh registry key — its disk dir carries a
+        // `resumed_from` constant naming the SOURCE chain (recorded at
+        // resume time by write_resume_pointer). Follow it so
+        // restore-by-held-id works after an engine restart: the SOURCE
+        // chain is restored under the HELD id, and the next command
+        // continues the source conversation.
+        let info = match trustee_core::sessions::create_resume_info(
+            &config_toml,
+            chain_id,
+            home_dir.as_deref(),
+        )
+        .await
+        .ok()
+        .flatten()
+        {
+            Some(info) => info,
+            None => {
+                let source = trustee_core::sessions::resolve_resume_handle(
+                    &config_toml,
+                    chain_id,
+                    home_dir.as_deref(),
+                )
                 .await
-                .ok()??;
+                .ok()
+                .flatten()?;
+                trustee_core::sessions::create_resume_info(
+                    &config_toml,
+                    &source,
+                    home_dir.as_deref(),
+                )
+                .await
+                .ok()
+                .flatten()?
+            }
+        };
 
         // Single-flight per chain id: racing lookups dedupe on the DashMap
         // entry — the first insert wins, the loser adopts the winner.

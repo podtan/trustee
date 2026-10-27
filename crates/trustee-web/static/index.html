@@ -2301,6 +2301,7 @@ function renderSessionCards(sessions) {
       </div>
       <div class="session-card-actions">
         <button onclick="resumeSession('${s.session_id}', ${s.checkpoint_count})">Resume</button>
+        <button onclick="forkSession('${s.session_id}')" title="Fork: branch a copy of this chain into a new independent session (the source stays intact)">⑂ Fork</button>
       </div>
     `;
     sessionsBody.appendChild(card);
@@ -2350,6 +2351,41 @@ async function saveSessionName(name) {
     });
   } catch (e) {
     // Best-effort
+  }
+}
+
+// Fork a session chain: branch a COPY of the chain into a new INDEPENDENT
+// session (the source stays intact at its pre-fork state). The fork's own
+// chain dir makes it restorable after an engine restart with no pointer.
+async function forkSession(sessionId) {
+  try {
+    const res = await fetch(API + '/api/v1/sessions/' + encodeURIComponent(sessionId) + '/fork', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    if (res.status === 404) {
+      showToast('Session or checkpoint not found.', 'error');
+      return;
+    }
+    if (!res.ok) {
+      showToast('Fork failed.', 'error');
+      return;
+    }
+    const data = await res.json();
+    // Attach to the fork — its session_id is the handle (and its chain id)
+    if (data.session_id) {
+      currentSessionId = data.session_id;
+      window._hasSession = true;
+      outputEl.innerHTML = '';
+      closeSessionsOverlay();
+      connectSessionWs(currentSessionId);
+      loadSessionHistory(sessionId); // the fork's copy has the same history
+    }
+    showToast('Session forked — independent branch created', 'success');
+    fetchSessions(); // refresh the list (the fork appears as its own chain)
+  } catch (e) {
+    showToast('Fork failed.', 'error');
   }
 }
 

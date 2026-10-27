@@ -697,12 +697,16 @@ pub async fn get_session_detail(
 
 /// POST /api/v1/sessions/{id}/resume — resume from checkpoint.
 ///
-/// Creates a NEW in-memory MSU session and FORKS the source chain into it
-/// (fork_session_chain): the resumed session gets its OWN chain dir under
-/// the new session id, so the live registry id and the disk chain id
-/// coincide structurally (the c2f9508 invariant, extended to resumes) and
-/// restore-by-held-id works after an engine restart. Returns the NEW
-/// session ID so the frontend can connect WS to the right session.
+/// Creates a NEW in-memory MSU session and loads the checkpoint data
+/// from disk into it. Returns the NEW session ID (not the checkpoint
+/// session ID) so the frontend can connect WS to the right session.
+///
+/// The resumed session CONTINUES the source chain (resume = view/continue
+/// onto one logical conversation — NOT a fork; forking is the explicit
+/// POST /api/v1/sessions/{id}/fork feature). The live-id → chain-id
+/// mapping is recorded ON DISK (write_resume_pointer — the session
+/// constants' `resumed_from`) so restore-by-held-id works after an engine
+/// restart (Ravand 2026-10-27, owner feedback: fork-on-resume REVERTED).
 pub async fn resume_session(
     State(state): State<ServerState>,
     Path(checkpoint_session_id): Path<String>,
@@ -788,14 +792,15 @@ pub async fn resume_session(
             }
         })?;
 
-    // 4. FORK the source chain into the new session's own chain dir
-    // (Ravand 2026-10-27, on-device finding): the resumed session's
-    // checkpoints used to land under the SOURCE chain while its live id was
-    // a fresh key — the mapping died with the engine process, so a restart
-    // orphaned the resumed session (restore-by-held-id 404'd). The fork
-    // makes the live id == the chain id structurally; the source chain
-    // stays intact at its pre-resume state (resume = branch).
-    let fork_info = trustee_core::sessions::fork_session_chain(
+    // 4. Record the resume handle's disk mapping (Ravand 2026-10-27, owner
+    // feedback): the resumed session CONTINUES the source chain — its
+    // checkpoints land under the SOURCE chain dir while its live id is a
+    // fresh key. The mapping lives ON DISK (the session constants'
+    // `resumed_from`) so restore-by-held-id works after an engine restart.
+    // Fork-on-resume was REVERTED (resume = view/continue; fork = the
+    // explicit /fork feature). Fail loud: without the pointer the resumed
+    // session is un-restorable after a restart — the exact gap this closes.
+    trustee_core::sessions::write_resume_pointer(
         &config_toml,
         &checkpoint_session_id,
         &new_sid,
@@ -805,13 +810,9 @@ pub async fn resume_session(
     .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to fork session chain: {}", e),
+            format!("Failed to record resume handle: {}", e),
         )
-    })?
-    .ok_or((
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Failed to fork session chain: source checkpoints vanished".to_string(),
-    ))?;
+    })?;
 
     // 5. Load checkpoint data into the new session
     {
@@ -821,13 +822,14 @@ pub async fn resume_session(
         ))?;
 
         let mut session = session_arc.lock().await;
-        // resume_info points at the FORK's chain (session_id = new_sid) —
-        // the workflow continues from the fork's copy; the checkpoints
-        // accumulate under the fork's own chain dir.
-        session.resume_info = Some(fork_info);
-        // session.session_id stays PINNED to new_sid (create_session) — the
-        // live id IS the chain id; no overwrite (the old
-        // continue-the-source semantics are retired with the fork).
+        // resume_info points at the SOURCE chain — the workflow continues
+        // the source conversation; the checkpoints accumulate under the
+        // source chain dir (one logical conversation = one chain dir).
+        session.resume_info = Some(resume_info);
+        // session.session_id = the SOURCE chain id (the continue-the-source
+        // semantics): the chain identity is the source's; the live registry
+        // key (new_sid) is the handle, mapped on disk via the resume pointer.
+        session.session_id = Some(checkpoint_session_id.clone());
 
         // Load conversation history into output_lines so the WS snapshot
         // includes them. Without this, the resumed session shows blank
@@ -858,7 +860,7 @@ pub async fn resume_session(
     ))?;
     let msg = serde_json::json!({
         "type": "SessionResumed",
-        "session_id": new_sid,
+        "session_id": checkpoint_session_id,
         "checkpoint_id": checkpoint_id,
     });
     let _ = ws_tx.send(msg.to_string());
@@ -871,6 +873,142 @@ pub async fn resume_session(
         // 7df3cae2: explicit resume of a destroyed chain is honored — the
         // user asked — but the destruction is disclosed on the wire.
         tombstoned_at: state.chain_tombstone_stamp(&user_key, &checkpoint_session_id),
+    });
+    Ok(with_rolling_cookie(resp.into_response(), cookie))
+}
+
+/// POST /api/v1/sessions/{id}/fork — FORK a session chain (explicit feature,
+/// owner order 2026-10-27: forking is a first-class action with its own
+/// endpoint + UI icon — NEVER a side effect of resume).
+///
+/// Copies the source chain's checkpoints into a NEW chain dir under the new
+/// session id (fork_session_chain) and creates a NEW live session continuing
+/// from the fork's latest checkpoint. The fork is INDEPENDENT of the source:
+/// its checkpoints accumulate under its own chain dir; the source stays
+/// intact at its pre-fork state. Returns the NEW session ID (the handle —
+/// which is also the fork's chain id, so restore-by-held-id works after an
+/// engine restart with no pointer machinery).
+pub async fn fork_session(
+    State(state): State<ServerState>,
+    Path(source_session_id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    let (cookie, user_key) =
+        crate::auth::check_auth(&state.auth, &headers, crate::auth::actions::CREATE_SESSION)
+            .await
+            .map_err(|s| (s, "Unauthorized".to_string()))?;
+
+    // 1. Config + home without creating a session (read-only)
+    let (config_toml, home_dir) = {
+        let (config, home) = state.get_user_config_and_home(&user_key);
+        match config {
+            Some(c) => (c, home),
+            None => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Configuration not loaded".to_string(),
+                ))
+            }
+        }
+    };
+
+    // 2. The source must exist with checkpoints (the fork copies them).
+    let source_info = trustee_core::sessions::create_resume_info(
+        &config_toml,
+        &source_session_id,
+        home_dir.as_deref(),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let source_info = source_info.ok_or((
+        StatusCode::NOT_FOUND,
+        "Session or checkpoint not found".to_string(),
+    ))?;
+    let checkpoint_id = source_info.checkpoint_id.clone();
+    let iteration = source_info.iteration;
+
+    // 3. Name the fork from the source's stored description.
+    let session_name = match trustee_core::sessions::get_session_detail(
+        &config_toml,
+        &source_session_id,
+        home_dir.as_deref(),
+    )
+    .await
+    {
+        Ok(Some((summary, _))) => summary.description.filter(|d| !d.trim().is_empty()),
+        _ => None,
+    }
+    .map(|d| format!("Forked: {}", d))
+    .unwrap_or_else(|| format!("Forked: {}", source_session_id));
+
+    // 4. Create the NEW live session (the pin sets session.session_id = the
+    // registry key — which becomes the fork's chain id).
+    let new_sid = state
+        .create_session(&user_key, Some(session_name), None)
+        .await
+        .map_err(|e| match e {
+            crate::state::SessionError::MaxSessionsReached(n) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("Max {} sessions reached", n),
+            ),
+            crate::state::SessionError::NotFound(_) => {
+                (StatusCode::NOT_FOUND, "Session not found".to_string())
+            }
+            crate::state::SessionError::NotIdle(_) => {
+                (StatusCode::CONFLICT, "Session is busy".to_string())
+            }
+        })?;
+
+    // 5. Fork the chain on disk: the source's checkpoints copied under the
+    // new chain id (metadata.session_id rewritten). Fail loud — a fork
+    // without its chain dir would be un-restorable after a restart.
+    let fork_info = trustee_core::sessions::fork_session_chain(
+        &config_toml,
+        &source_session_id,
+        &new_sid,
+        home_dir.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to fork session chain: {}", e),
+        )
+    })?
+    .ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Failed to fork session chain: source checkpoints vanished".to_string(),
+    ))?;
+
+    // 6. The fork continues from ITS OWN chain's latest checkpoint.
+    {
+        let (session_arc, _ws_tx) = state.get_session(&user_key, &new_sid).await.ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to get new session".to_string(),
+        ))?;
+        let mut session = session_arc.lock().await;
+        session.resume_info = Some(fork_info);
+    }
+
+    // 7. Broadcast the fork event on the new session's WS.
+    let (_, ws_tx) = state.get_session(&user_key, &new_sid).await.ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Failed to get session WS".to_string(),
+    ))?;
+    let msg = serde_json::json!({
+        "type": "SessionForked",
+        "session_id": new_sid,
+        "forked_from": source_session_id,
+        "checkpoint_id": checkpoint_id,
+    });
+    let _ = ws_tx.send(msg.to_string());
+
+    let resp = Json(ResumeResponse {
+        accepted: true,
+        session_id: new_sid,
+        checkpoint_id,
+        iteration,
+        tombstoned_at: None,
     });
     Ok(with_rolling_cookie(resp.into_response(), cookie))
 }
