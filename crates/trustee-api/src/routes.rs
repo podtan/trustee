@@ -697,9 +697,12 @@ pub async fn get_session_detail(
 
 /// POST /api/v1/sessions/{id}/resume — resume from checkpoint.
 ///
-/// Creates a NEW in-memory MSU session and loads the checkpoint data
-/// from disk into it. Returns the NEW session ID (not the checkpoint
-/// session ID) so the frontend can connect WS to the right session.
+/// Creates a NEW in-memory MSU session and FORKS the source chain into it
+/// (fork_session_chain): the resumed session gets its OWN chain dir under
+/// the new session id, so the live registry id and the disk chain id
+/// coincide structurally (the c2f9508 invariant, extended to resumes) and
+/// restore-by-held-id works after an engine restart. Returns the NEW
+/// session ID so the frontend can connect WS to the right session.
 pub async fn resume_session(
     State(state): State<ServerState>,
     Path(checkpoint_session_id): Path<String>,
@@ -785,7 +788,32 @@ pub async fn resume_session(
             }
         })?;
 
-    // 4. Load checkpoint data into the new session
+    // 4. FORK the source chain into the new session's own chain dir
+    // (Ravand 2026-10-27, on-device finding): the resumed session's
+    // checkpoints used to land under the SOURCE chain while its live id was
+    // a fresh key — the mapping died with the engine process, so a restart
+    // orphaned the resumed session (restore-by-held-id 404'd). The fork
+    // makes the live id == the chain id structurally; the source chain
+    // stays intact at its pre-resume state (resume = branch).
+    let fork_info = trustee_core::sessions::fork_session_chain(
+        &config_toml,
+        &checkpoint_session_id,
+        &new_sid,
+        home_dir.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to fork session chain: {}", e),
+        )
+    })?
+    .ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Failed to fork session chain: source checkpoints vanished".to_string(),
+    ))?;
+
+    // 5. Load checkpoint data into the new session
     {
         let (session_arc, _ws_tx) = state.get_session(&user_key, &new_sid).await.ok_or((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -793,8 +821,13 @@ pub async fn resume_session(
         ))?;
 
         let mut session = session_arc.lock().await;
-        session.resume_info = Some(resume_info);
-        session.session_id = Some(checkpoint_session_id.clone());
+        // resume_info points at the FORK's chain (session_id = new_sid) —
+        // the workflow continues from the fork's copy; the checkpoints
+        // accumulate under the fork's own chain dir.
+        session.resume_info = Some(fork_info);
+        // session.session_id stays PINNED to new_sid (create_session) — the
+        // live id IS the chain id; no overwrite (the old
+        // continue-the-source semantics are retired with the fork).
 
         // Load conversation history into output_lines so the WS snapshot
         // includes them. Without this, the resumed session shows blank
@@ -818,14 +851,14 @@ pub async fn resume_session(
         }
     }
 
-    // 5. Broadcast resume event on the new session's WS
+    // 6. Broadcast resume event on the new session's WS
     let (_, ws_tx) = state.get_session(&user_key, &new_sid).await.ok_or((
         StatusCode::INTERNAL_SERVER_ERROR,
         "Failed to get session WS".to_string(),
     ))?;
     let msg = serde_json::json!({
         "type": "SessionResumed",
-        "session_id": checkpoint_session_id,
+        "session_id": new_sid,
         "checkpoint_id": checkpoint_id,
     });
     let _ = ws_tx.send(msg.to_string());

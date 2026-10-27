@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use abk::checkpoint::{
     get_storage_manager,
-    models::{CheckpointMetadata, ChatMessage, SessionMetadata as AbkSessionMetadata},
+    models::{ChatMessage, CheckpointMetadata, SessionMetadata as AbkSessionMetadata},
     storage::ProjectMetadata as AbkProjectMetadata,
     CheckpointStorageManager,
 };
@@ -111,37 +111,32 @@ async fn make_storage_manager(
 
     match (home_dir, backend_config) {
         // Per-user home_dir + remote backend → use the merged constructor (async)
-        (Some(dir), Some(backend)) => {
-            CheckpointStorageManager::with_home_dir_and_backend(
-                dir.to_path_buf(),
-                agent_name,
-                backend,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create storage manager with backend: {}", e))
-        }
+        (Some(dir), Some(backend)) => CheckpointStorageManager::with_home_dir_and_backend(
+            dir.to_path_buf(),
+            agent_name,
+            backend,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create storage manager with backend: {}", e)),
         // Per-user home_dir, no remote backend → local-only per-user storage
-        (Some(dir), None) => {
-            CheckpointStorageManager::with_home_dir(dir.to_path_buf(), agent_name)
-                .map_err(|e| anyhow::anyhow!("Failed to create storage manager: {}", e))
-        }
+        (Some(dir), None) => CheckpointStorageManager::with_home_dir(dir.to_path_buf(), agent_name)
+            .map_err(|e| anyhow::anyhow!("Failed to create storage manager: {}", e)),
         // No home_dir, fall back to global
-        (None, _) => {
-            get_storage_manager()
-                .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e))
-        }
+        (None, _) => get_storage_manager()
+            .map_err(|e| anyhow::anyhow!("Failed to get storage manager: {}", e)),
     }
 }
 
 /// Parse `[checkpointing.storage_backend]` from a trustee config TOML string.
 ///
 /// Returns `None` if the section doesn't exist or if the backend type is `File`.
-fn parse_storage_backend_config(config_toml: &str) -> Option<abk::checkpoint::StorageBackendConfig> {
+fn parse_storage_backend_config(
+    config_toml: &str,
+) -> Option<abk::checkpoint::StorageBackendConfig> {
     let value = toml::from_str::<toml::Value>(config_toml).ok()?;
     let checkpointing = value.get("checkpointing")?;
     let storage_backend = checkpointing.get("storage_backend")?;
-    let backend: abk::checkpoint::StorageBackendConfig =
-        storage_backend.clone().try_into().ok()?;
+    let backend: abk::checkpoint::StorageBackendConfig = storage_backend.clone().try_into().ok()?;
 
     // Only return if it's actually a remote backend
     match backend.backend_type {
@@ -179,7 +174,10 @@ pub async fn list_all_sessions(
     for project in &projects {
         // Skip projects whose path can't be resolved (e.g. deleted dirs,
         // permission denied) — don't let one bad project kill the whole list.
-        let project_storage = match manager.get_project_storage_with_id(&project.project_path, &project.project_hash).await {
+        let project_storage = match manager
+            .get_project_storage_with_id(&project.project_path, &project.project_hash)
+            .await
+        {
             Ok(ps) => ps,
             Err(e) => {
                 tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
@@ -190,7 +188,11 @@ pub async fn list_all_sessions(
         let sessions = match project_storage.list_sessions().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::debug!("Failed to list sessions for {}: {}", project.project_path.display(), e);
+                tracing::debug!(
+                    "Failed to list sessions for {}: {}",
+                    project.project_path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -234,7 +236,10 @@ pub async fn get_session_detail(
         .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
 
     for project in &projects {
-        let project_storage = match manager.get_project_storage_with_id(&project.project_path, &project.project_hash).await {
+        let project_storage = match manager
+            .get_project_storage_with_id(&project.project_path, &project.project_hash)
+            .await
+        {
             Ok(ps) => ps,
             Err(e) => {
                 tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
@@ -245,7 +250,11 @@ pub async fn get_session_detail(
         let sessions = match project_storage.list_sessions().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::debug!("Failed to list sessions for {}: {}", project.project_path.display(), e);
+                tracing::debug!(
+                    "Failed to list sessions for {}: {}",
+                    project.project_path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -292,7 +301,10 @@ pub async fn create_resume_info(
         .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
 
     for project in &projects {
-        let project_storage = match manager.get_project_storage_with_id(&project.project_path, &project.project_hash).await {
+        let project_storage = match manager
+            .get_project_storage_with_id(&project.project_path, &project.project_hash)
+            .await
+        {
             Ok(ps) => ps,
             Err(e) => {
                 tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
@@ -303,7 +315,11 @@ pub async fn create_resume_info(
         let sessions = match project_storage.list_sessions().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::debug!("Failed to list sessions for {}: {}", project.project_path.display(), e);
+                tracing::debug!(
+                    "Failed to list sessions for {}: {}",
+                    project.project_path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -331,6 +347,130 @@ pub async fn create_resume_info(
             // Session found but no checkpoints
             return Ok(None);
         }
+    }
+
+    Ok(None)
+}
+
+// -----------------------------------------------------------------------
+// Chain forking (resume = fork; the c2f9508 invariant extended)
+// -----------------------------------------------------------------------
+
+/// Fork a session chain: copy the source chain's checkpoints into a NEW
+/// chain dir under `new_session_id`, rewriting each checkpoint's
+/// `metadata.session_id`.
+///
+/// WHY (Ravand 2026-10-27, on-device finding): a resumed session used to
+/// CONTINUE the source chain — its checkpoints landed under the SOURCE
+/// chain dir while its live registry id was a fresh key. The live-id →
+/// chain-id mapping lived only in the engine's memory, so an engine
+/// restart orphaned the resumed session: restore-by-held-id 404'd (the
+/// chain lives under the source's id). Forking makes the live registry id
+/// and the disk chain id coincide STRUCTURALLY for resumed sessions too —
+/// the same invariant as the c2f9508 pin for fresh sessions: the id the
+/// client holds IS the chain id, so restore-by-id works after any restart.
+/// Side benefits: the source chain stays intact at its pre-resume state
+/// (resume = branch — the user can resume the source again), and destroying
+/// a resumed session tombstones only the fork, never the source.
+///
+/// Returns the fork's `ResumeInfo` (pointing at the fork's latest
+/// checkpoint) so the resumed session continues from its OWN chain.
+pub async fn fork_session_chain(
+    config_toml: &str,
+    source_session_id: &str,
+    new_session_id: &str,
+    home_dir: Option<&std::path::Path>,
+) -> anyhow::Result<Option<ResumeInfo>> {
+    let manager = make_storage_manager(config_toml, home_dir, "trustee").await?;
+
+    let projects = manager
+        .list_projects()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
+
+    for project in &projects {
+        let project_storage = match manager
+            .get_project_storage_with_id(&project.project_path, &project.project_hash)
+            .await
+        {
+            Ok(ps) => ps,
+            Err(e) => {
+                tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
+                continue;
+            }
+        };
+
+        let sessions = match project_storage.list_sessions().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to list sessions for {}: {}",
+                    project.project_path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        if !sessions.iter().any(|s| s.session_id == source_session_id) {
+            continue;
+        }
+
+        let source_storage = project_storage
+            .create_session(source_session_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get source session storage: {}", e))?;
+
+        let checkpoints = source_storage
+            .list_checkpoints()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list source checkpoints: {}", e))?;
+
+        if checkpoints.is_empty() {
+            return Ok(None);
+        }
+
+        // Create the fork's chain dir and copy every checkpoint, rewriting
+        // the parent session id so the fork is a first-class chain.
+        let mut fork_storage = project_storage
+            .create_session(new_session_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create fork session storage: {}", e))?;
+
+        let mut latest: Option<CheckpointMetadata> = None;
+        for cp in &checkpoints {
+            let mut checkpoint = source_storage
+                .load_checkpoint(&cp.checkpoint_id)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to load checkpoint {}: {}", cp.checkpoint_id, e)
+                })?;
+            checkpoint.metadata.session_id = new_session_id.to_string();
+            fork_storage
+                .save_checkpoint(&checkpoint)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to save forked checkpoint {}: {}",
+                        cp.checkpoint_id,
+                        e
+                    )
+                })?;
+            if latest
+                .as_ref()
+                .map_or(true, |l| cp.created_at > l.created_at)
+            {
+                latest = Some(cp.clone());
+            }
+        }
+
+        let latest = latest.expect("checkpoints non-empty");
+        return Ok(Some(ResumeInfo {
+            session_id: new_session_id.to_string(),
+            checkpoint_id: latest.checkpoint_id.clone(),
+            iteration: latest.iteration,
+            project_path: Some(project.project_path.clone()),
+        }));
     }
 
     Ok(None)
@@ -400,7 +540,10 @@ pub async fn load_session_history(
         .map_err(|e| anyhow::anyhow!("Failed to list projects: {}", e))?;
 
     for project in &projects {
-        let project_storage = match manager.get_project_storage_with_id(&project.project_path, &project.project_hash).await {
+        let project_storage = match manager
+            .get_project_storage_with_id(&project.project_path, &project.project_hash)
+            .await
+        {
             Ok(ps) => ps,
             Err(e) => {
                 tracing::debug!("Skipping project {}: {}", project.project_path.display(), e);
@@ -411,7 +554,11 @@ pub async fn load_session_history(
         let sessions = match project_storage.list_sessions().await {
             Ok(s) => s,
             Err(e) => {
-                tracing::debug!("Failed to list sessions for {}: {}", project.project_path.display(), e);
+                tracing::debug!(
+                    "Failed to list sessions for {}: {}",
+                    project.project_path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -488,7 +635,10 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<HistoryMessage> {
         // (Persian/Arabic 2-byte, CJK/emoji 3–4) — nghr f844d2df, 3rd
         // occurrence of this crash class. ASCII output is byte-identical.
         let content = if msg.content.len() > MAX_CONTENT_LEN {
-            format!("{}...\n[truncated]", abk::text::truncate_at_boundary(&msg.content, MAX_CONTENT_LEN))
+            format!(
+                "{}...\n[truncated]",
+                abk::text::truncate_at_boundary(&msg.content, MAX_CONTENT_LEN)
+            )
         } else {
             msg.content.clone()
         };
@@ -548,34 +698,43 @@ fn summarize_tool_args(name: &str, args: &str) -> String {
     };
 
     match name {
-        "bash" | "execute_command" => {
-            obj.get("command").and_then(|v| v.as_str()).map(|s| s.to_string())
-        }
-        "read" | "read_file" => {
-            obj.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string())
-        }
-        "write" | "write_file" | "edit" => {
-            obj.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string())
-        }
-        "grep" | "search" => {
-            obj.get("pattern").and_then(|v| v.as_str()).map(|s| s.to_string())
-        }
-        "glob" => {
-            obj.get("pattern").and_then(|v| v.as_str()).map(|s| s.to_string())
-        }
+        "bash" | "execute_command" => obj
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        "read" | "read_file" => obj
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        "write" | "write_file" | "edit" => obj
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        "grep" | "search" => obj
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        "glob" => obj
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         "todowrite" => {
-            let count = obj.get("todos").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let count = obj
+                .get("todos")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
             Some(format!("{} items", count))
         }
-        "websearch" | "webfetch" => {
-            obj.get("query").or_else(|| obj.get("url")).and_then(|v| v.as_str()).map(|s| s.to_string())
-        }
-        _ => {
-            obj.values().next().and_then(|v| match v {
-                serde_json::Value::String(s) => Some(s.clone()),
-                _ => Some(v.to_string()),
-            })
-        }
+        "websearch" | "webfetch" => obj
+            .get("query")
+            .or_else(|| obj.get("url"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        _ => obj.values().next().and_then(|v| match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            _ => Some(v.to_string()),
+        }),
     }
     .unwrap_or_default()
     .chars()
@@ -608,10 +767,17 @@ mod history_truncation_tests {
         let long = "ب".repeat(6_000); // 12,000 bytes
         let out = convert_messages(&[msg("user", long.clone())]);
         let first = &out[0].content;
-        assert!(first.ends_with("...\n[truncated]"), "marker missing: {:?}", &first[first.len().saturating_sub(30)..]);
+        assert!(
+            first.ends_with("...\n[truncated]"),
+            "marker missing: {:?}",
+            &first[first.len().saturating_sub(30)..]
+        );
         let body = &first[..first.len() - "...\n[truncated]".len()];
         assert!(body.len() <= 10_000, "body over budget: {}", body.len());
-        assert!(long.starts_with(body), "body must be a prefix of the original");
+        assert!(
+            long.starts_with(body),
+            "body must be a prefix of the original"
+        );
     }
 
     /// ASCII behavior stays byte-for-byte identical to the legacy slice.

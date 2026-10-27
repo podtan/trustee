@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.1] - 2026-10-27
+
+### Fixed
+
+- **Resumed sessions survive engine restarts (on-device finding, Hamrah 2026-10-27)** — `resume` now FORKS the source chain: the resumed session gets its OWN chain dir under the new session id (`fork_session_chain`, trustee-core 0.8.9 — every checkpoint copied with `metadata.session_id` rewritten), so the live registry id and the disk chain id coincide STRUCTURALLY — the c2f9508 invariant extended to resumes. Previously the resumed session's checkpoints landed under the SOURCE chain while its live id was a fresh key; the mapping lived only in engine memory, so an engine restart orphaned the resumed session (restore-by-held-id 404'd). Side effects: the source chain stays intact at its pre-resume state (resume = branch — the source can be resumed again), and destroying a resumed session tombstones only the fork, never the source. The `SessionResumed` WS event now carries the fork's id (the resumed session's identity). Response shape unchanged.
+- **pep 0.5.12 → 0.5.14** (Cargo.lock refresh, owner-directed; the `0.5` req unchanged) — full workspace test pass, zero breakage.
+
 ## [0.23.0] - 2026-10-27
 
 ### Removed
