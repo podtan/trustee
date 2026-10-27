@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.3] - 2026-10-27
+
+### Fixed
+
+- **First interaction after a resume renders nothing until a manual refresh (owner-reported, browser-verified end-to-end)** — TWO root causes, both fixed:
+  1. **WS snapshot carried the SOURCE chain id** — the session-scoped WS snapshot (`handle_ws`) echoed the session's internal `session_id` FIELD, which for a resumed session holds the SOURCE chain id (the continue-the-source semantics). The web frontend's snapshot adoption (`msg.session_id !== currentSessionId → adopt`) then flipped its command target from the resumed handle BACK to the source — the next command ran on the source and its events broadcast on the source's WS while the client listened on the handle's: silence until a refresh. **Fix:** the WS snapshot now echoes the route's `{id}` — the handle the client connected to (`snapshot.session_id = Some(route_session_id)`); the client attached to `{id}`, the snapshot says `{id}`. Applies to both surfaces (the xagent WS handler delegates to the same `ws_session_handler`).
+  2. **resumeSession never connected the session-scoped WS** — after the resume re-point, the UI left the output with NO listener (the startup flow re-attaches at `ensureAttachedSession`; the resume path did not). **Fix:** `resumeSession` now calls `connectSessionWs(currentSessionId)` right after the re-point (trustee-web 0.2.2).
+- **Workflow died silently at tool-registry creation (the "nothing renders on a new session" class, root-caused in the browser)** — cats built a `reqwest::blocking::Client` at tool-registry creation INSIDE the workflow's async context; reqwest 0.12.28 + tokio 1.54.1 panic there ("Cannot drop a runtime in a context where blocking is not allowed") — every workflow run died at tool-registry creation, the engine accepted the command and went silent. **Fix:** cats 0.1.31 (`build_blocking_client` on a plain thread) — picked up via the lock refresh; abk's pin unchanged.
+
+### Changed
+
+- trustee-web 0.2.1 → 0.2.2 (resumeSession WS-connect), trustee-api 0.20.2 → 0.20.3 (the WS snapshot echoes the route's id), root 0.23.3.
+
 ## [0.23.2] - 2026-10-27
 
 ### Changed

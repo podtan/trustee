@@ -563,6 +563,7 @@ async fn handle_ws(
     socket: WebSocket,
     session_arc: std::sync::Arc<tokio::sync::Mutex<trustee_core::session::Session>>,
     ws_tx: broadcast::Sender<String>,
+    route_session_id: String,
 ) {
     use futures::{SinkExt, StreamExt};
     let (mut sender, mut receiver) = socket.split();
@@ -571,7 +572,18 @@ async fn handle_ws(
     // Send current session state as the first message
     {
         let session = session_arc.lock().await;
-        let snapshot = session_to_response(&session);
+        let mut snapshot = session_to_response(&session);
+        // The snapshot's session_id = the HANDLE the client connected to (the
+        // route's {id}) — NOT the session's internal chain-identity field.
+        // For a resumed session that field holds the SOURCE chain id (the
+        // continue-the-source semantics); the web frontend's snapshot
+        // adoption would otherwise flip its command target from the handle
+        // back to the source — the next command then runs on the source and
+        // its events broadcast on the source's WS while the client listens on
+        // the handle's: the first interaction after a resume renders nothing
+        // until a manual refresh. The client attached to {id}; the snapshot
+        // echoes {id}.
+        snapshot.session_id = Some(route_session_id);
         if let Ok(json) = serde_json::to_string(&snapshot) {
             let _ = sender.send(Message::Text(json.into())).await;
         }
@@ -1347,7 +1359,7 @@ pub async fn ws_session_handler(
         .await
         .map(|(_, s, ws)| (s, ws))
         .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(ws.on_upgrade(move |socket| handle_ws(socket, session_arc, ws_tx)))
+    Ok(ws.on_upgrade(move |socket| handle_ws(socket, session_arc, ws_tx, session_id)))
 }
 
 // ---------------------------------------------------------------------------

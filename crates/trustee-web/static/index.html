@@ -2422,6 +2422,12 @@ async function resumeSession(sessionId, checkpointCount) {
     // keeps the checkpoint id (it reads disk).
     if (data.session_id) currentSessionId = data.session_id;
 
+    // Connect the session-scoped WS to the resumed handle — without this the
+    // resumed session has NO output listener: the first interaction after a
+    // resume renders nothing until a manual refresh (the startup flow
+    // re-attaches the WS at ensureAttachedSession; the resume path must too).
+    connectSessionWs(currentSessionId);
+
     // Resume banner
     const banner = document.createElement('div');
     banner.className = 'line warn';
