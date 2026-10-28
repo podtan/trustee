@@ -360,7 +360,12 @@ pub struct ServerState {
     /// 16F: THQ per-agent dispatch table (agent_name → target), boot-populated.
     pub thq_dispatch: Arc<DashMap<String, ThqDispatchEntry>>,
     /// 16F: cached impersonation Bearers per agent user_key
-    /// `(token, expires_at)` — expiry-buffered, re-minted on 401.
+    /// `(token, expires_at)` — keyed on the exchanged JWT's REAL `exp` claim
+    /// (payload-parsed, never the `expires_in` estimate), proactively
+    /// refreshed at T-120s before expiry (±15s per-process jitter), and
+    /// invalidated + re-minted by the budget-of-one 401 retry in the
+    /// xagent dispatch wrappers (199c4801/9618b41c; elimination spec
+    /// fb82b866 response c35042bb leg L2).
     pub agent_dispatch_tokens: Arc<DashMap<String, (String, std::time::Instant)>>,
 }
 

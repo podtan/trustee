@@ -59,7 +59,7 @@ pub struct McpServerJson {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct CommandRequest {
     pub command: String,
     pub session_id: Option<String>,
@@ -281,7 +281,7 @@ pub struct ResumeResponse {
     pub tombstoned_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ResumeRequestBody {
     pub checkpoint_id: Option<String>,
 }
@@ -304,7 +304,7 @@ pub struct SessionHistoryResponse {
 // MSU new-session DTOs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct CreateSessionRequest {
     #[serde(default)]
     pub session_name: Option<String>,
