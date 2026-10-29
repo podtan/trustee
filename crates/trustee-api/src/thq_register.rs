@@ -664,17 +664,38 @@ pub fn enroll_route<S: Clone + Send + Sync + 'static>(enrollment: Enrollment) ->
 // THQ clients: register / pull / state
 // ---------------------------------------------------------------------------
 
+/// The register payload. The version field is the ONE version source: the
+/// BIN's version (what `trustee --version` prints, injected at main.rs
+/// startup via `set_bin_version`), passed by the caller — never this
+/// crate's `CARGO_PKG_VERSION`. The multi-crate trap (c91b483d):
+/// `env!("CARGO_PKG_VERSION")` inside trustee-api resolves to the API
+/// crate's version — register recorded 0.20.5 while the binary was 0.23.5,
+/// and the UI's version column lied until the runtime's first health
+/// check. register == state == /version == bin.
+fn register_payload(cfg: &ThqConfig, version: &str) -> serde_json::Value {
+    json!({
+        "name": cfg.runtime_name,
+        "advertise_url": cfg.advertise_url,
+        "version": version,
+    })
+}
+
+/// The state-report payload — same one-version-source rule as the register
+/// payload (c91b483d): the BIN's version, never this crate's.
+fn state_payload(observed: &str, version: &str) -> serde_json::Value {
+    json!({
+        "observed_state": observed,
+        "version": version,
+    })
+}
+
 /// `POST {thq_url}/api/v1/runtime/register` — open route, instance-gated.
 /// Response (201) carries `{runtime_id, asset_id, status, callback}` —
 /// logged for the receipt trail; the SECRET itself only ever travels on
 /// the callback, never in this response.
 async fn register_once(client: &reqwest::Client, cfg: &ThqConfig) {
     let url = format!("{}/api/v1/runtime/register", cfg.thq_url);
-    let body = json!({
-        "name": cfg.runtime_name,
-        "advertise_url": cfg.advertise_url,
-        "version": env!("CARGO_PKG_VERSION"),
-    });
+    let body = register_payload(cfg, crate::bin_version());
     match client
         .post(&url)
         .header("X-Instance-Id", &cfg.instance_id)
@@ -751,10 +772,7 @@ async fn report_state(
     observed: &str,
 ) -> StateOutcome {
     let url = format!("{}/api/v1/runtime/profiles/{profile_id}/state", cfg.thq_url);
-    let body = json!({
-        "observed_state": observed,
-        "version": env!("CARGO_PKG_VERSION"),
-    });
+    let body = state_payload(observed, crate::bin_version());
     match client
         .post(&url)
         .header("X-Instance-Id", &cfg.instance_id)
@@ -880,6 +898,59 @@ runtime_name = "nox"
 heartbeat_interval = 30
 "#
         .to_string()
+    }
+
+    // ── one version source (c91b483d) ────────────────────────────────
+
+    /// The payload builders must carry the version they are GIVEN (the
+    /// caller passes `crate::bin_version()` — the binary's injected
+    /// version), never this crate's `CARGO_PKG_VERSION`. Regression for
+    /// c91b483d: `env!("CARGO_PKG_VERSION")` inside trustee-api resolved
+    /// to the API crate's version (0.20.5) while the binary was 0.23.5 —
+    /// the sentinel here fails loud if the builder reverts to `env!()`.
+    #[test]
+    fn register_payload_carries_the_given_version_not_the_crate_env() {
+        let cfg = ThqConfig::from_toml(&full_toml())
+            .expect("parse ok")
+            .expect("section present");
+        let body = register_payload(&cfg, "0.23.6-sentinel");
+        assert_eq!(body["version"], "0.23.6-sentinel");
+        assert_ne!(
+            body["version"], env!("CARGO_PKG_VERSION"),
+            "the payload must never carry this crate's version when the bin's is given"
+        );
+        assert_eq!(body["name"], "nox");
+        assert_eq!(body["advertise_url"], "https://10.99.0.11:3000");
+    }
+
+    #[test]
+    fn state_payload_carries_the_given_version_not_the_crate_env() {
+        let body = state_payload("running", "0.23.6-sentinel");
+        assert_eq!(body["version"], "0.23.6-sentinel");
+        assert_ne!(
+            body["version"], env!("CARGO_PKG_VERSION"),
+            "the state report must never carry this crate's version when the bin's is given"
+        );
+        assert_eq!(body["observed_state"], "running");
+    }
+
+    /// Production wiring: both call sites pass `crate::bin_version()` — the
+    /// one version source (register == state == /version == bin). In a test
+    /// process the bin version falls back to this crate's, so assert the
+    /// identity holds through the production-shaped call.
+    #[test]
+    fn production_payloads_read_the_bin_version_source() {
+        let cfg = ThqConfig::from_toml(&full_toml())
+            .expect("parse ok")
+            .expect("section present");
+        assert_eq!(
+            register_payload(&cfg, crate::bin_version())["version"],
+            crate::bin_version()
+        );
+        assert_eq!(
+            state_payload("idle", crate::bin_version())["version"],
+            crate::bin_version()
+        );
     }
 
     // ── config ──────────────────────────────────────────────────────────
