@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.9] - 2026-10-31
+
+### Added
+
+- **THE POLICY/BINARY SKEW GUARD (the eynak boot-1 refusal class, 2026-10-31)** — a deployed filesystem policy override can reference actions the binary's schema doesn't declare (the binary updated its action set, the deployed policy files didn't); Cedar's validate_on_load then refuses the boot fail-closed with a validation error that names the FAILURE, not the SKEW — the operator's fix was 26s of manual archaeology and the next binary bump would re-trigger it. **The guard:** `audit_policy_action_skew` + `log_policy_action_skew` run at boot BEFORE the authorizer constructs — the embedded pair always (atomic-ship drift) and the resolved filesystem pair when the files exist (the deployed-override skew) — logging one LOUD error line per unknown action, naming the source and the fix. Fail-closed still applies downstream; the refusal is now actionable in seconds. Pins: shipped_policy_files_have_zero_skew (the shipped pair: every referenced action ∈ the embedded schema AND the route constants — the scanner strips `//` comments, the shipped policy's migration note names a removed action) + skew_audit_names_unknown_actions (the discriminating shape).
+
+### Changed
+
+- trustee-api 0.20.8 → 0.20.9, root 0.23.8 → 0.23.9. trustee-core/tui/web/upgrade unchanged.
+
 ## [0.23.8] - 2026-10-31
 
 ### Fixed

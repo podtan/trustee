@@ -2395,6 +2395,57 @@ mod cedar_p2_tests {
         assert!(crate::cedar_boot_decision(true, true, false).is_ok());
         assert!(crate::cedar_boot_decision(false, false, false).is_ok());
     }
+
+    /// PIN (the eynak boot-1 refusal class — the policy/binary skew guard):
+    /// the SHIPPED policy + schema pair must have ZERO skew — every action
+    /// the embedded policy references is declared by the embedded schema AND
+    /// present in the `actions` constants. The pair ships atomically; this
+    /// pin fails the gate if a future edit drifts one side.
+    #[test]
+    fn shipped_policy_files_have_zero_skew() {
+        let unknown = crate::audit_policy_action_skew(
+            crate::EMBEDDED_CEDAR_POLICY,
+            crate::EMBEDDED_CEDAR_SCHEMA,
+        );
+        assert!(unknown.is_empty(), "the shipped pair has skew: {unknown:?}");
+        // Every referenced action is also an `actions` constant (the route
+        // handlers' vocabulary) — both directions of the atomic ship.
+        for action in crate::policy_action_refs(crate::EMBEDDED_CEDAR_POLICY) {
+            assert!(
+                [
+                    actions::LIST_MODELS,
+                    actions::LIST_SESSIONS,
+                    actions::VIEW_SESSION,
+                    actions::VIEW_HISTORY,
+                    actions::CREATE_SESSION,
+                    actions::COMMAND_SESSION,
+                    actions::CANCEL_SESSION,
+                    actions::HANDOFF_SESSION,
+                    actions::RESUME_SESSION,
+                    actions::UPDATE_SESSION,
+                    actions::DELETE_SESSION,
+                    actions::VIEW_MCP_CREDENTIALS,
+                    actions::UPDATE_MCP_CREDENTIALS,
+                ]
+                .contains(&action.as_str()),
+                "the shipped policy references action {action} which no route constant names"
+            );
+        }
+    }
+
+    /// PIN (the skew guard's discriminating shape): a policy referencing an
+    /// action the schema doesn't declare is NAMED by the audit — the
+    /// eynak incident's failure mode (CreateSession et al. referenced by a
+    /// deployed policy the binary's schema didn't declare).
+    #[test]
+    fn skew_audit_names_unknown_actions() {
+        let policy = "permit(principal, action == Action::\"ViewSession\", resource);\npermit(principal, action == Action::\"BogusAction\", resource);";
+        let schema = "action ViewSession appliesTo { principal: [User], resource: [TrusteeApp] };";
+        let unknown = crate::audit_policy_action_skew(policy, schema);
+        assert_eq!(unknown, vec!["BogusAction".to_string()]);
+        // The declared action is NOT flagged.
+        assert!(!unknown.contains(&"ViewSession".to_string()));
+    }
 }
 
 /// Token validation cache (issue c41eb9d7) — pure-logic tests against a

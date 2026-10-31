@@ -378,6 +378,92 @@ pub(crate) fn cedar_boot_decision(
     }
 }
 
+/// THE POLICY/BINARY SKEW GUARD (the eynak boot-1 refusal class, 2026-10-31):
+/// a deployed filesystem policy override can reference actions the binary's
+/// schema doesn't declare — the binary updated its action set, the deployed
+/// policy files didn't, and Cedar's validate_on_load refused the boot
+/// fail-closed with a validation error that names the FAILURE, not the SKEW
+/// (the operator's fix was 26s of manual archaeology; the next binary bump
+/// would re-trigger it). This audit names the skew BEFORE the boot dies:
+/// every `Action::"X"` referenced by the policy but not declared by the
+/// schema — loud, one line each, at boot.
+pub(crate) fn audit_policy_action_skew(policy_text: &str, schema_text: &str) -> Vec<String> {
+    let referenced = policy_action_refs(policy_text);
+    let declared = schema_action_decls(schema_text);
+    referenced.difference(&declared).cloned().collect()
+}
+
+/// Every `Action::"Name"` referenced anywhere in a Cedar policy text
+/// (permit/forbid action clauses and condition clauses alike). `//` comments
+/// are stripped first — a comment may NAME a removed action (the shipped
+/// policy's migration note does) and that is not a reference.
+fn policy_action_refs(policy_text: &str) -> std::collections::BTreeSet<String> {
+    let code: String = policy_text
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(pos) => &l[..pos],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = std::collections::BTreeSet::new();
+    let mut rest = code.as_str();
+    while let Some(pos) = rest.find("Action::\"") {
+        rest = &rest[pos + "Action::\"".len()..];
+        match rest.find('"') {
+            Some(end) => {
+                out.insert(rest[..end].to_string());
+                rest = &rest[end..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+/// Every action DECLARED by a Cedar schema text (`action Name appliesTo …;`
+/// / `action Name;` — the empty-namespace form this repo ships).
+fn schema_action_decls(schema_text: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for line in schema_text.lines() {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("action ") {
+            let name: String = rest
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != ';')
+                .collect();
+            if !name.is_empty() {
+                out.insert(name);
+            }
+        }
+    }
+    out
+}
+
+/// Run the skew audit on a policy/schema pair and log LOUD per unknown
+/// action (the guard's disclosure — never silent). Returns the unknown list
+/// for tests.
+pub(crate) fn log_policy_action_skew(source: &str, policy_text: &str, schema_text: &str) -> Vec<String> {
+    let unknown = audit_policy_action_skew(policy_text, schema_text);
+    if !unknown.is_empty() {
+        // One line per unknown action, naming the source — the operator sees
+        // the skew in seconds, not archaeology. Fail-closed still applies
+        // downstream (validate_on_load refuses the boot); this is the
+        // disclosure that makes the refusal ACTIONABLE.
+        for action in &unknown {
+            tracing::error!(
+                "Cedar POLICY/BINARY SKEW ({source}): policy references action Action::\"{action}\" which this binary's schema does NOT declare — the deployed policy files predate (or postdate) this binary's action set. Fix: align the policy files with the binary's schema (the embedded pair is authoritative), or update the binary."
+            );
+        }
+        tracing::error!(
+            "Cedar POLICY/BINARY SKEW ({source}): {} unknown action(s) total: {:?}",
+            unknown.len(),
+            unknown
+        );
+    }
+    unknown
+}
+
 async fn parse_cedar_config(config_toml: &str) -> Result<CedarBoot, String> {
     let parsed: Option<toml::Table> = toml::from_str(config_toml).ok();
     let cedar_table = parsed.as_ref().and_then(|t| t.get("cedar"));
@@ -447,6 +533,34 @@ async fn parse_cedar_config(config_toml: &str) -> Result<CedarBoot, String> {
         .get("policy_store_token")
         .and_then(|v| v.as_str())
         .map(String::from);
+
+    // THE POLICY/BINARY SKEW GUARD (the eynak boot-1 refusal class): audit
+    // BEFORE the authorizer constructs — the embedded pair always (atomic
+    // ship drift), and the resolved filesystem pair when the files exist
+    // (the deployed-override skew). validate_on_load still refuses the boot
+    // fail-closed downstream; this names the skew so the refusal is
+    // actionable in seconds.
+    log_policy_action_skew("embedded", EMBEDDED_CEDAR_POLICY, EMBEDDED_CEDAR_SCHEMA);
+    if policy_path.exists() && schema_path.as_ref().is_some_and(|p| p.exists()) {
+        match (
+            std::fs::read_to_string(&policy_path),
+            schema_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()),
+        ) {
+            (Ok(policy_text), Some(schema_text)) => {
+                log_policy_action_skew(
+                    &format!("filesystem {}", policy_path.display()),
+                    &policy_text,
+                    &schema_text,
+                );
+            }
+            _ => {
+                tracing::warn!(
+                    "Cedar skew guard: policy file {} exists but the schema file is unreadable — the audit ran on the embedded pair only",
+                    policy_path.display()
+                );
+            }
+        }
+    }
 
     let cedar_config = pep::cedar::CedarConfig {
         policy_path,
