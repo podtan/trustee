@@ -846,6 +846,12 @@ pub async fn resume_session(
         // Load conversation history into output_lines so the WS snapshot
         // includes them. Without this, the resumed session shows blank
         // until the user sends a new command.
+        // nghr b29371e2 (display-layer consistency): assistant reasoning is
+        // rendered with the \x01 marker so the web/console UIs classify it as
+        // a collapsible reasoning section — the same rendering the LIVE path
+        // produces (ReasoningDelta → \x01-prefixed line). The old load path
+        // dropped reasoning entirely (and rendered any reasoning-derived
+        // content as plain agent text) — the msg[156] leak class.
         if let Some(history) = trustee_core::sessions::load_session_history(
             &checkpoint_session_id,
             home_dir.as_deref(),
@@ -858,8 +864,15 @@ pub async fn resume_session(
             for msg in &history.messages {
                 if msg.role == "user" {
                     session.output_lines.push(format!("> {}", msg.content));
-                } else if !msg.content.is_empty() {
-                    session.output_lines.push(msg.content.clone());
+                } else {
+                    if let Some(ref reasoning) = msg.reasoning {
+                        if !reasoning.trim().is_empty() {
+                            session.output_lines.push(format!("\x01{}", reasoning));
+                        }
+                    }
+                    if !msg.content.is_empty() {
+                        session.output_lines.push(msg.content.clone());
+                    }
                 }
             }
         }

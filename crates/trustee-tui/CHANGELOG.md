@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.10] - 2026-10-31
+
+### Changed
+- **deps: bump abk to 0.22.1** — streaming-assembly cross-run hardening (nghr b29371e2): per-run logger isolation in the spawned streaming tasks, finish_reason visibility, and the anomalous-turn guard (retry once, then fail loud — never a silent "Task completed"). No TUI code change; the pin adopt carries the engine fixes.
+
 ## [0.3.15] - 2026-08-26
 
 ### Changed

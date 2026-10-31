@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.8] - 2026-10-31
+
+### Fixed
+
+- **Resumed-session transcript drops reasoning (nghr b29371e2, display-layer consistency)** — the resume path loaded conversation history into `output_lines` rendering assistant content as plain text and DROPPING the reasoning field entirely — a resumed session's transcript was inconsistent with the live path (reasoning renders as a collapsible section there) and any reasoning-derived content rendered as plain agent text (the msg[156] leak class). **Fix:** the load path now renders assistant reasoning with the `\x01` marker (the web/console UIs classify `\x01`-prefixed lines as collapsible reasoning sections) before the content line — resumed sessions render reasoning exactly like live turns.
+- **abk 0.22.1 dep bump — streaming-assembly cross-run hardening (the engine fixes)**: per-run logger isolation in the spawned streaming tasks (task-locals don't propagate into `tokio::spawn` — all concurrent runs' raw deltas used to interleave in the process-global fallback logger/stdout), finish_reason visibility (stop/length/tool_calls logged instead of discarded), and the anomalous-turn guard (reasoning-without-content-or-tool-calls is retried once, then fails LOUD — never a silent "Task completed" with zero actions).
+
+### Changed
+
+- trustee-core 0.8.11 → 0.8.12, trustee-tui 0.4.9 → 0.4.10, trustee-api 0.20.7 → 0.20.8, root 0.23.7 → 0.23.8 (abk 0.22.1 pin adopt + the resume-path fix). trustee-web / trustee-upgrade unchanged (no abk edge).
+
 ## [0.23.4] - 2026-10-27
 
 ### Fixed
