@@ -863,21 +863,35 @@ fn dev_user_key(token: &str) -> Option<String> {
 }
 
 /// Pure decision core of [`check_dispatch_admin`] — unit-testable without an IdP.
+///
+/// v0.23.10 (issue eb385e4f, the THQ console relay's second door): HUMAN
+/// THQ roles dispatch — admin/user/developer. The old human-admin-only
+/// gate contradicted this repo's own Cedar ("user (human team) — full
+/// session management, current and future") the same way the THQ console
+/// gate contradicted rbac.cedar's AccessOwnAgents promise: every console
+/// API call 403'd for user-role principals (the platform owner, role=user)
+/// at the runtime after the thq side opened. Still denied: agents (agents
+/// never dispatch agents), service (read-only by design), roleless
+/// principals (torpi parity — an honest 403), case-sensitive.
 pub(crate) fn dispatch_allowed(kind: PrincipalKind, role: Option<&str>) -> bool {
-    kind == PrincipalKind::Human && role == Some("admin")
+    kind == PrincipalKind::Human
+        && matches!(role, Some("admin") | Some("user") | Some("developer"))
 }
 
-/// 16F: admin gate for the per-agent dispatch surface (`/xagent/{name}`).
+/// 16F: gate for the per-agent dispatch surface (`/xagent/{name}`).
 ///
-/// The OUTER dispatch must be performed by a HUMAN ADMIN: agents may never
-/// dispatch agents, and `service` is read-only by design. The impersonated
-/// INNER request is separately authenticated and Cedar-gated AS THE AGENT
-/// (per-action matrix), so this gate answers exactly one question: "may this
-/// principal dispatch agent-users at all".
+/// The OUTER dispatch must be performed by a HUMAN with a THQ role
+/// (admin/user/developer): agents may never dispatch agents, and `service`
+/// is read-only by design. The impersonated INNER request is separately
+/// authenticated and Cedar-gated AS THE AGENT (per-action matrix), so this
+/// gate answers exactly one question: "may this principal dispatch
+/// agent-users at all".
 ///
 /// Open mode (no auth configured) allows dispatch, consistent with the
 /// posture check_auth already applies. Dev-mode human tokens carry no role
-/// and are therefore rejected — dispatch testing requires a real admin JWT.
+/// and are therefore rejected — dispatch testing requires a real JWT.
+/// v0.23.10 (issue eb385e4f): user/developer humans dispatch (the THQ
+/// console is the owner-scoped plane) — see [`dispatch_allowed`].
 pub async fn check_dispatch_admin(
     auth: &Option<Arc<AuthState>>,
     headers: &axum::http::HeaderMap,

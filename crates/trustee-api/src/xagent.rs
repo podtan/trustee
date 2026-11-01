@@ -11,7 +11,8 @@
 //! 1. `{name}` resolves through the boot-time dispatch table
 //!    (`ServerState.thq_dispatch`, populated by 16E discovery) to the
 //!    agent-user's stable key (= its Kanidm `sub`, per the 16E pin).
-//! 2. The OUTER caller is gate-checked: human admin only
+//! 2. The OUTER caller is gate-checked: human THQ roles (admin/user/
+//!    developer — v0.23.10, issue eb385e4f; was human admin only)
 //!    ([`crate::auth::check_dispatch_admin`]). Agents can never dispatch
 //!    agents; open mode follows the same open posture as `check_auth`.
 //! 3. The agent's service token (captured from its per-user `.env` at boot)
@@ -662,15 +663,30 @@ mod tests {
     // ── admin decision core (no IdP needed) ─────────────────────────────
 
     #[test]
-    fn dispatch_allowed_only_for_human_admins() {
+    fn dispatch_allowed_for_human_thq_roles() {
         use crate::auth::{dispatch_allowed, PrincipalKind};
         assert!(dispatch_allowed(PrincipalKind::Human, Some("admin")));
-        assert!(!dispatch_allowed(PrincipalKind::Human, Some("user")));
+        // v0.23.10 (issue eb385e4f): user/developer humans dispatch — the
+        // THQ console is the owner-scoped plane; the old human-admin-only
+        // gate contradicted this repo's own Cedar ("user — full session
+        // management").
+        assert!(
+            dispatch_allowed(PrincipalKind::Human, Some("user")),
+            "user-role humans dispatch (the console's owner-scoped plane)"
+        );
+        assert!(dispatch_allowed(PrincipalKind::Human, Some("developer")));
         assert!(
             !dispatch_allowed(PrincipalKind::Agent, Some("admin")),
             "agents never dispatch agents"
         );
-        assert!(!dispatch_allowed(PrincipalKind::Human, None));
+        assert!(
+            !dispatch_allowed(PrincipalKind::Human, Some("service")),
+            "service is read-only by design"
+        );
+        assert!(
+            !dispatch_allowed(PrincipalKind::Human, None),
+            "roleless principals are default-denied (torpi parity)"
+        );
         assert!(
             !dispatch_allowed(PrincipalKind::Human, Some("Admin")),
             "case-sensitive"
