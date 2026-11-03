@@ -422,6 +422,28 @@ impl ServerState {
     }
 
     pub fn with_config_toml(mut self, config_toml: String) -> Self {
+        // fffe9141 F3: loud boot WARN when [llm.provider].model is
+        // missing/empty — the silent fictional fallback is gone (abk 0.22.8
+        // F5), so a missing model explodes at the first LLM call with the
+        // honest 'no model configured' error. THQ-runtime instances
+        // legitimately boot without serving LLM sessions — warn, never
+        // refuse.
+        let model = config_toml
+            .parse::<toml::Value>()
+            .ok()
+            .and_then(|v| {
+                v.get("llm")
+                    .and_then(|l| l.get("provider"))
+                    .and_then(|p| p.get("model"))
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.trim().to_string())
+            })
+            .unwrap_or_default();
+        if model.is_empty() {
+            tracing::warn!(
+                "[llm.provider].model is missing or empty — LLM calls will fail with 'no model configured: set [llm.provider].model or OPENAI_DEFAULT_MODEL' until set (THQ-runtime instances that never serve LLM sessions may ignore this)"
+            );
+        }
         self.config_toml = Some(config_toml);
         self
     }

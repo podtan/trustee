@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.12] - 2026-11-03
+
+### Fixed
+
+- **The `model` override boundary (fffe9141, z.ai 1211 incident — the CPO-ruled trustee-lane fix)** — third-party API-UI clients could send any string in the request `model` field; unknown strings were stamped VERBATIM onto the active provider (inject_model Case 3) and exploded at the provider with an opaque "Unknown Model" error, and the model resolution chain ended in a hardcoded `gpt-4o-mini` fallback silently sent to non-OpenAI endpoints. **F1:** the request `model` is now validated at the HTTP boundary against the resolvable catalog (built from the session's OWN merged config — the same resolution `GET /api/v1/models` uses, so materialized overlays are honored): `[llm.providers.*]` keys + every `model`/`models` value across `[llm.provider]` AND `[llm.providers.*]`. Unknown → `422` with the valid options in the body. The inert materialized selector string (`[llm] model = "model@provider"` — abk's `LlmConfig` ignores the bare key) is deliberately excluded. `inject_model` stays untouched: local CLI/TUI trusted paths keep today's semantics. **F3:** a command on a config with no model (and no valid override) fails early at the boundary with `no model configured: set [llm.provider].model or OPENAI_DEFAULT_MODEL` — never a provider round-trip; plus a loud boot WARN when `[llm.provider].model` is missing/empty (warn, never refuse — THQ-runtime instances legitimately boot without serving LLM sessions). **F4:** whitespace-trimmed at the boundary; README integrator note. **F2/F5 (abk 0.22.8, published first):** the orchestration retry branches classify 4xx as terminal (400/401/403/404/422 fail fast; 408/429/5xx/transport retry as before — typed `ApiStatusError`, Display keeps the wire format) and the fictional `gpt-4o-mini` fallback is DELETED (loud `no model configured` error naming the fix; the infallible `default_model()` trait is display-only).
+
+### Changed
+
+- trustee-api 0.20.10 → 0.20.11, root 0.23.11 → 0.23.12 (abk 0.22.8 pin adopt + the boundary fix). trustee-core/tui/web/upgrade unchanged (the trim happens at the boundary; `inject_model` untouched).
+
 ## [0.23.9] - 2026-10-31
 
 ### Added

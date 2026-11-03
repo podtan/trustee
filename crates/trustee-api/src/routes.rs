@@ -67,9 +67,11 @@ pub struct CommandRequest {
     /// identity yet, it is set before executing the command.
     #[serde(default)]
     pub identity: Option<String>,
-    /// Optional model override — name of a provider from `[llm.providers.{name}]`
-    /// in the config TOML. When set, that provider's model/base_url/api_key
-    /// override `[llm.provider]` for this command.
+    /// Optional model override — any resolvable catalog string (fffe9141
+    /// F1): a `[llm.providers.*]` KEY, a named-provider `model`/`models`
+    /// value, or the active provider's model/models list. Validated at the
+    /// HTTP boundary (unknown → 422 with the valid options); empty/omitted
+    /// → the config default. Source values from `GET /api/v1/models`.
     #[serde(default)]
     pub model: Option<String>,
     /// Optional multimodal attachments for this command (base64, in
@@ -391,6 +393,123 @@ pub struct ModelsResponse {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Model-override validation (fffe9141 F1/F3)
+// ---------------------------------------------------------------------------
+
+/// The resolvable model catalog for a user — the strings a request `model`
+/// override may carry (fffe9141 F1). Built from the RESOLVED per-user config
+/// (shared + overlay — the same resolution `GET /api/v1/models` uses), so
+/// materialized overlays are honored. Contents: `[llm.providers.*]` KEYS
+/// (inject_model Case 1) + every `model`/`models` value across
+/// `[llm.provider]` AND `[llm.providers.*]` (Case 2) — a value only in the
+/// active provider's `models` list resolves via Case 3 and stays valid.
+///
+/// The materialized selector string (`[llm] model = "model@provider"`) is
+/// deliberately EXCLUDED: the bare key is inert (abk's `LlmConfig` has no
+/// model field and no deny_unknown_fields — the key is silently ignored), so
+/// a verbatim Case-3 stamp would 1211 at the provider. Rejecting it here
+/// with the valid options is the honest boundary.
+fn model_catalog(resolved_config_toml: &str) -> Vec<String> {
+    fn push(catalog: &mut Vec<String>, m: Option<String>) {
+        if let Some(m) = m {
+            let m = m.trim().to_string();
+            if !m.is_empty() && !catalog.contains(&m) {
+                catalog.push(m);
+            }
+        }
+    }
+    fn push_models(catalog: &mut Vec<String>, v: &toml::Value) {
+        if let Some(arr) = v.get("models").and_then(|m| m.as_array()) {
+            for m in arr {
+                push(catalog, m.as_str().map(|s| s.to_string()));
+            }
+        }
+    }
+
+    let mut catalog: Vec<String> = Vec::new();
+    let Ok(v) = resolved_config_toml.parse::<toml::Value>() else {
+        return catalog;
+    };
+    let Some(llm) = v.get("llm").and_then(|l| l.as_table()) else {
+        return catalog;
+    };
+    // [llm.provider] — the active provider: its model + models list.
+    if let Some(p) = llm.get("provider") {
+        push(
+            &mut catalog,
+            p.get("model").and_then(|m| m.as_str()).map(|s| s.to_string()),
+        );
+        push_models(&mut catalog, p);
+    }
+    // [llm.providers.*] — keys (Case 1) + model/models values (Case 2).
+    if let Some(ps) = llm.get("providers").and_then(|p| p.as_table()) {
+        for (key, pv) in ps {
+            push(&mut catalog, Some(key.clone()));
+            push(
+                &mut catalog,
+                pv.get("model").and_then(|m| m.as_str()).map(|s| s.to_string()),
+            );
+            push_models(&mut catalog, pv);
+        }
+    }
+    catalog
+}
+
+/// fffe9141 F1: validate a request `model` override at the HTTP boundary —
+/// before it reaches `Session.model`. Unknown → `Err(catalog)` → 422 with
+/// the valid options. Empty/whitespace → `Ok("")` (explicitly filtered
+/// downstream — the config default applies). No resolvable config or empty
+/// catalog → `Ok(trimmed)` (nothing to validate against; `inject_model`
+/// semantics unchanged for local/CLI trusted paths — only the HTTP boundary
+/// enforces). The returned string is the TRIMMED model (fffe9141 F4).
+fn validate_model_override(resolved: Option<&str>, model: &str) -> Result<String, Vec<String>> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    let Some(config) = resolved else {
+        return Ok(trimmed.to_string());
+    };
+    let catalog = model_catalog(config);
+    if catalog.is_empty() {
+        return Ok(trimmed.to_string());
+    }
+    if catalog.iter().any(|m| m == trimmed) {
+        return Ok(trimmed.to_string());
+    }
+    Err(catalog)
+}
+
+/// fffe9141 F3: the model the first command WOULD use — request override →
+/// resolved `[llm.provider].model` → `OPENAI_DEFAULT_MODEL` env. `None` =
+/// nothing configured → the command fails early with the honest message
+/// (never a provider round-trip; abk 0.22.8's F5 wire error names the same
+/// keys).
+fn resolved_command_model(resolved: Option<&str>, request_model: Option<&str>) -> Option<String> {
+    if let Some(m) = request_model.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(m.to_string());
+    }
+    if let Some(config) = resolved {
+        if let Ok(v) = config.parse::<toml::Value>() {
+            if let Some(m) = v
+                .get("llm")
+                .and_then(|l| l.get("provider"))
+                .and_then(|p| p.get("model"))
+                .and_then(|m| m.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(m.to_string());
+            }
+        }
+    }
+    std::env::var("OPENAI_DEFAULT_MODEL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
 
 /// Build a SessionResponse from a locked session.
 /// 7df3cae2 (tombstone-shadow class): a destroy-tombstoned chain must answer
@@ -1103,11 +1222,33 @@ pub async fn create_session(
             _ => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         })?;
 
-    // Set model override on the new session if provided.
+    // Set model override on the new session if provided — validated at the
+    // boundary first (fffe9141 F1): unknown → 422 with the valid options.
+    // The catalog comes from the session's OWN merged config (shared +
+    // overlay — what inject_model will operate on; zero extra I/O).
     if let Some(ref model) = req.model {
-        if let Some((session_arc, _)) = state.get_session(&user_key, &session_id).await {
-            let mut session = session_arc.lock().await;
-            session.model = Some(model.clone());
+        let session_config = match state.get_session(&user_key, &session_id).await {
+            Some((session_arc, _)) => {
+                let session = session_arc.lock().await;
+                session.config_toml.clone()
+            }
+            None => None,
+        };
+        let validated = validate_model_override(session_config.as_deref(), model).map_err(|catalog| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "Unknown model '{}'. Valid models: {}. Source values from GET /api/v1/models or omit the field.",
+                    model,
+                    catalog.join(", ")
+                ),
+            )
+        })?;
+        if !validated.is_empty() {
+            if let Some((session_arc, _)) = state.get_session(&user_key, &session_id).await {
+                let mut session = session_arc.lock().await;
+                session.model = Some(validated);
+            }
         }
     }
 
@@ -1518,8 +1659,37 @@ async fn execute_command_inner(
             session.identity = req.identity;
         }
 
+        // fffe9141 F1: validate the request model override at the boundary
+        // BEFORE it reaches Session.model — unknown → 422 with the options.
+        // The catalog comes from the session's OWN merged config (what
+        // inject_model will operate on — zero extra I/O).
+        let validated = match req.model.as_deref() {
+            Some(m) => Some(
+                validate_model_override(session.config_toml.as_deref(), m).map_err(|catalog| {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!(
+                            "Unknown model '{}'. Valid models: {}. Source values from GET /api/v1/models or omit the field.",
+                            m,
+                            catalog.join(", ")
+                        ),
+                    )
+                })?,
+            ),
+            None => None,
+        };
+        // fffe9141 F3: no request override + nothing configured → the first
+        // command fails early with the honest message (never a provider
+        // round-trip; abk 0.22.8's F5 wire error names the same keys).
+        if resolved_command_model(session.config_toml.as_deref(), req.model.as_deref()).is_none() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "no model configured: set [llm.provider].model or OPENAI_DEFAULT_MODEL (or send a valid `model` override)".to_string(),
+            ));
+        }
+
         // Set model override for this command (consumed by execute_command).
-        session.model = req.model;
+        session.model = validated.filter(|s| !s.is_empty());
 
         let permit = state
             .workflow_semaphore
@@ -2002,5 +2172,208 @@ mod tombstone_disclosure_tests {
                 .is_none(),
             "unknown chain must carry no stamp"
         );
+    }
+}
+
+#[cfg(test)]
+mod model_override_tests {
+    use super::*;
+    use crate::state::ServerState;
+    use trustee_core::session::Session;
+
+    const CONFIG_TOML: &str = "\
+[agent]\nname = \"trustee\"\n\n[llm.provider]\nname = \"glm-zai\"\nprovider_type = \"openai\"\nbase_url = \"https://api.z.ai/api/coding/paas/v4\"\napi_key = \"test-key\"\nmodel = \"GLM-5.3-Flash\"\nmodels = [\"GLM-5.3\", \"GLM-5.2\", \"GLM-5-Turbo\", \"GLM-4.7-Flash\", \"GLM-5.3-Flash\"]\n\n[llm.providers.ninfer]\nmodel = \"qwen3.8-27b\"\nbase_url = \"https://10.253.1.9/v1\"\napi_key = \"test-key\"\n";
+
+    fn fresh_state_with_config() -> ServerState {
+        let (session, _rx) = Session::new();
+        let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(16);
+        let mut state = ServerState::new(session, ws_tx, None);
+        state.config_toml = Some(CONFIG_TOML.to_string());
+        state
+    }
+
+    /// Deterministic throwaway user (tombstone_disclosure_tests pattern).
+    struct TempUser {
+        key: String,
+    }
+
+    impl TempUser {
+        fn new(tag: &str) -> Self {
+            let key = format!("model-ovr-{tag}-{}@test.invalid", std::process::id());
+            let home = dirs::home_dir()
+                .expect("HOME available in test env")
+                .join(".trustee")
+                .join("users")
+                .join(trustee_core::user_hash(&key));
+            std::fs::create_dir_all(home).expect("create user home");
+            Self { key }
+        }
+    }
+
+    /// fffe9141 pin (b): the catalog carries every resolvable string —
+    /// [llm.providers.*] KEYS (Case 1), named-provider model/models values
+    /// (Case 2), and the ACTIVE provider's model + models list (Case 3).
+    #[test]
+    fn catalog_carries_every_resolvable_string() {
+        let catalog = model_catalog(CONFIG_TOML);
+        for m in [
+            "GLM-5.3-Flash", // active provider model (Case 3 verbatim)
+            "GLM-5.3",       // active provider models list (Case 3)
+            "GLM-5.2",
+            "GLM-5-Turbo",
+            "GLM-4.7-Flash",
+            "ninfer",        // providers KEY (Case 1)
+            "qwen3.8-27b",   // named-provider model (Case 2)
+        ] {
+            assert!(
+                catalog.iter().any(|c| c == m),
+                "{m} must be in the catalog: {catalog:?}"
+            );
+        }
+        assert!(
+            !catalog.iter().any(|c| c.contains('@')),
+            "the inert materialized selector form must NOT be in the catalog: {catalog:?}"
+        );
+    }
+
+    /// fffe9141 pin (a): an unknown request model → Err with the full
+    /// catalog — the fictional gpt-4o-mini fallback is rejected.
+    #[test]
+    fn unknown_model_rejected_with_options() {
+        let err = validate_model_override(Some(CONFIG_TOML), "gpt-4o-mini")
+            .expect_err("the fictional fallback must be rejected");
+        assert!(
+            err.contains(&"GLM-5.3-Flash".to_string()),
+            "options carry the catalog: {err:?}"
+        );
+    }
+
+    /// fffe9141 pin (b): each catalog member accepted.
+    #[test]
+    fn catalog_members_accepted() {
+        for m in ["GLM-5.3-Flash", "GLM-5.2", "ninfer", "qwen3.8-27b"] {
+            assert_eq!(
+                validate_model_override(Some(CONFIG_TOML), m).expect("catalog member"),
+                m
+            );
+        }
+    }
+
+    /// fffe9141 pin (c): empty string + whitespace → Ok("") (config default
+    /// applies downstream); the accepted model is TRIMMED (F4).
+    #[test]
+    fn empty_and_whitespace_handled() {
+        assert_eq!(validate_model_override(Some(CONFIG_TOML), "").expect("empty"), "");
+        assert_eq!(validate_model_override(Some(CONFIG_TOML), "  ").expect("ws"), "");
+        assert_eq!(
+            validate_model_override(Some(CONFIG_TOML), "  GLM-5.2  ").expect("trim"),
+            "GLM-5.2"
+        );
+    }
+
+    /// fffe9141 pin: no resolvable config → Ok (nothing to validate against;
+    /// inject_model semantics unchanged for local trusted paths).
+    #[test]
+    fn no_config_is_not_a_rejection() {
+        assert_eq!(
+            validate_model_override(None, "anything").expect("no config"),
+            "anything"
+        );
+    }
+
+    /// fffe9141 pin (e): resolved_command_model — request override wins,
+    /// config model next, nothing → None (the F3 early-failure condition).
+    #[test]
+    fn resolved_command_model_chain() {
+        std::env::remove_var("OPENAI_DEFAULT_MODEL");
+        assert_eq!(
+            resolved_command_model(Some(CONFIG_TOML), Some("GLM-5.2")).as_deref(),
+            Some("GLM-5.2")
+        );
+        assert_eq!(
+            resolved_command_model(Some(CONFIG_TOML), None).as_deref(),
+            Some("GLM-5.3-Flash")
+        );
+        let no_llm = "[agent]\nname = \"trustee\"\n";
+        assert_eq!(resolved_command_model(Some(no_llm), None), None);
+    }
+
+    /// fffe9141 pin (a) at the WIRE: an unknown request model on the command
+    /// endpoint → 422 naming the valid options.
+    #[tokio::test]
+    async fn command_unknown_model_422_with_options() {
+        let state = fresh_state_with_config();
+        let user = TempUser::new("model422");
+        let sid = state
+            .create_session(&user.key, None, None)
+            .await
+            .expect("create session");
+        let (session_arc, _ws) = state.get_session(&user.key, &sid).await.unwrap();
+        let (ws_tx, _rx) = tokio::sync::broadcast::channel::<String>(16);
+        let token_store = Arc::new(pep::MemoryTokenStore::new());
+        let req = CommandRequest {
+            command: "hello".to_string(),
+            session_id: Some(sid.clone()),
+            identity: None,
+            model: Some("gpt-4o-mini".to_string()),
+            attachments: vec![],
+        };
+        let result = execute_command_inner(
+            &state,
+            &axum::http::HeaderMap::new(),
+            &session_arc,
+            &ws_tx,
+            &token_store,
+            &user.key,
+            req,
+        )
+        .await;
+        let (status, body) = result.expect_err("unknown model must 422");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("Valid models"), "options in the body: {body}");
+        assert!(body.contains("GLM-5.3-Flash"), "catalog in the body: {body}");
+    }
+
+    /// fffe9141 pin (e) at the WIRE: a command on a config with no model →
+    /// 422 with the honest message (never a provider round-trip).
+    #[tokio::test]
+    async fn command_no_model_configured_422_honest() {
+        std::env::remove_var("OPENAI_DEFAULT_MODEL");
+        let (session, _rx) = Session::new();
+        let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(16);
+        let mut state = ServerState::new(session, ws_tx, None);
+        state.config_toml = Some("[agent]\nname = \"trustee\"\n".to_string());
+        let user = TempUser::new("nomodel");
+        let sid = state
+            .create_session(&user.key, None, None)
+            .await
+            .expect("create session");
+        let (session_arc, _ws) = state.get_session(&user.key, &sid).await.unwrap();
+        let (ws_tx, _rx) = tokio::sync::broadcast::channel::<String>(16);
+        let token_store = Arc::new(pep::MemoryTokenStore::new());
+        let req = CommandRequest {
+            command: "hello".to_string(),
+            session_id: Some(sid.clone()),
+            identity: None,
+            model: None,
+            attachments: vec![],
+        };
+        let result = execute_command_inner(
+            &state,
+            &axum::http::HeaderMap::new(),
+            &session_arc,
+            &ws_tx,
+            &token_store,
+            &user.key,
+            req,
+        )
+        .await;
+        let (status, body) = result.expect_err("no model must 422");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body.contains("no model configured"),
+            "honest message: {body}"
+        );
+        assert!(body.contains("[llm.provider].model"), "names the key: {body}");
     }
 }

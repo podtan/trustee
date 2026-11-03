@@ -119,6 +119,10 @@ The environment file supports the following variables:
 - **`ANTHROPIC_BASE_URL`**: Custom Anthropic endpoint URL
 - **`LLM_PROVIDER`**: LLM provider to use (default: `tanbal`)
 
+#### API Integrators: the `model` field (trustee-api)
+
+The API request's optional `model` field is **validated at the boundary and honored literally** — unknown strings are rejected with `422` naming the valid options (a `[llm.providers.*]` key, a named-provider `model`/`models` value, or the active provider's model/models list). Source values from `GET /api/v1/models` or omit the field (the configured default applies). No hardcoded fallback exists: a missing model fails loud with `no model configured: set [llm.provider].model or OPENAI_DEFAULT_MODEL` — never a fictional OpenAI model sent to a non-OpenAI endpoint.
+
 #### Remote Encrypted Configuration (getmyconfig)
 
 Trustee supports loading configuration from encrypted remote storage via the `getmyconfig` library. This is useful for secure, centralized configuration management.
