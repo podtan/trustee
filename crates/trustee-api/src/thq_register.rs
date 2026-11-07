@@ -728,7 +728,11 @@ enum PullOutcome {
 /// `GET {thq_url}/api/v1/runtime/profiles` — runtime-credential-ONLY (the
 /// unauthenticated `?runtime_id=` form is dead since thq v0.3.2).
 async fn pull(client: &reqwest::Client, cfg: &ThqConfig, cred: &RuntimeCredential) -> PullOutcome {
-    let url = format!("{}/api/v1/runtime/profiles", cfg.thq_url);
+    // v0.13.14 pairing (thq's profiles-pull secrets redaction): the
+    // materialization pull declares itself with ?secrets=1 — the secrets
+    // blob rides VERBATIM for the materializer (the v0.5.5 owner ruling);
+    // thq's flag-less read surface redacts it (the abadgar dump class).
+    let url = format!("{}/api/v1/runtime/profiles?secrets=1", cfg.thq_url);
     match client
         .get(&url)
         .header("X-Instance-Id", &cfg.instance_id)
