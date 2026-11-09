@@ -420,9 +420,16 @@ impl Enrollment {
             // Signature of the last logged bound set — None until the first
             // successful pull. Drives change-only INFO logging.
             let mut last_bound: Option<String> = None;
+            // F1 (nghr 5b21c84b): consecutive-register counter — a client
+            // whose callback never lands (misconfigured advertise_url, the
+            // flapper class) re-registers every heartbeat forever. Reset on
+            // any usable credential.
+            let mut consecutive_registers: u32 = 0;
             loop {
                 match enrollment.valid_credential() {
-                    Some(cred) => match pull(&client, &cfg, &cred).await {
+                    Some(cred) => {
+                        consecutive_registers = 0;
+                        match pull(&client, &cfg, &cred).await {
                         PullOutcome::Ok(payload) => {
                             // v0.19: the payload is (a) LOGGED REDACTED — the
                             // 0.18 full-payload info line printed the secrets
@@ -527,16 +534,35 @@ impl Enrollment {
                             tracing::warn!("THQ pull failed (will retry): {e}");
                             tokio::time::sleep(interval).await;
                         }
-                    },
+                        }
+                    }
                     None => {
                         // No usable credential (first boot, advertise_url
                         // change, corruption, or a 403 purge): REGISTER ONCE
                         // and wait for the /thq/enroll callback.
+                        //
+                        // F1 (nghr 5b21c84b): the first GRACE_REGISTERS
+                        // re-registers keep the heartbeat cadence (a first
+                        // boot or a brief server outage must not slow down);
+                        // beyond that the wait doubles per consecutive
+                        // register, capped — a client whose callback never
+                        // lands (misconfigured advertise_url, the flapper
+                        // class) stops churning the server's credential
+                        // store and the TARGET engine's credential file
+                        // every ~30s. The /thq/enroll notify still wakes the
+                        // wait instantly when the callback DOES land.
+                        consecutive_registers = consecutive_registers.saturating_add(1);
+                        let backoff = register_backoff(interval, consecutive_registers);
+                        if backoff > interval {
+                            tracing::warn!(
+                                "THQ: no usable credential — register #{consecutive_registers}, backing off {backoff:?}"
+                            );
+                        }
                         register_once(&client, &cfg).await;
                         let notified = enrollment.0.notify.notified();
                         tokio::select! {
                             _ = notified => {}
-                            _ = tokio::time::sleep(interval) => {}
+                            _ = tokio::time::sleep(backoff) => {}
                         }
                     }
                 }
@@ -554,6 +580,25 @@ fn build_http_client() -> reqwest::Client {
         .timeout(Duration::from_secs(10))
         .build()
         .expect("Failed to build HTTP client for THQ enrollment")
+}
+
+/// F1 (nghr 5b21c84b): consecutive-register backoff — the first
+/// GRACE_REGISTERS re-registers keep the heartbeat cadence (a first boot or
+/// a brief server outage must not slow down); beyond that the wait doubles
+/// per consecutive register, capped at MAX_REGISTER_BACKOFF. Reset by the
+/// enrollment loop on any usable credential.
+const GRACE_REGISTERS: u32 = 5;
+const MAX_REGISTER_BACKOFF: Duration = Duration::from_secs(600);
+
+fn register_backoff(interval: Duration, consecutive: u32) -> Duration {
+    if consecutive <= GRACE_REGISTERS {
+        interval
+    } else {
+        let shift = (consecutive - GRACE_REGISTERS).min(4);
+        interval
+            .saturating_mul(1u32 << shift)
+            .min(MAX_REGISTER_BACKOFF)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1339,6 +1384,44 @@ agent_name = "nox"
         assert!(
             !agent_busy(&state, "prof-1111").await,
             "another agent's live session must NOT report this profile running"
+        );
+    }
+
+    /// F1 (nghr 5b21c84b) PIN: the backoff keeps the heartbeat cadence
+    /// through the grace window — a first boot or a brief server outage
+    /// must not slow down.
+    #[test]
+    fn register_backoff_keeps_the_heartbeat_through_the_grace_window() {
+        let interval = Duration::from_secs(30);
+        for n in 1..=GRACE_REGISTERS {
+            assert_eq!(
+                register_backoff(interval, n),
+                interval,
+                "register #{n} keeps the heartbeat cadence"
+            );
+        }
+    }
+
+    /// F1 (nghr 5b21c84b) PIN: beyond the grace window the wait doubles per
+    /// consecutive register and caps — a client whose callback never lands
+    /// (the flapper class) stops churning the server + the target engine
+    /// every heartbeat.
+    #[test]
+    fn register_backoff_doubles_then_caps() {
+        let interval = Duration::from_secs(30);
+        assert_eq!(register_backoff(interval, GRACE_REGISTERS + 1), Duration::from_secs(60));
+        assert_eq!(register_backoff(interval, GRACE_REGISTERS + 2), Duration::from_secs(120));
+        assert_eq!(register_backoff(interval, GRACE_REGISTERS + 3), Duration::from_secs(240));
+        assert_eq!(register_backoff(interval, GRACE_REGISTERS + 4), Duration::from_secs(480));
+        assert_eq!(
+            register_backoff(interval, 20),
+            Duration::from_secs(480),
+            "shift-capped at 16x the heartbeat"
+        );
+        assert_eq!(
+            register_backoff(Duration::from_secs(120), 20),
+            MAX_REGISTER_BACKOFF,
+            "MAX_REGISTER_BACKOFF caps"
         );
     }
 }
