@@ -418,6 +418,45 @@ fn apply_one(trustee_home: &Path, p: &serde_json::Value) -> Result<ProfileOutcom
             }
         }
     }
+    // 840e5588 (the silent-401 class): a server referencing a named
+    // credential ABSENT from [mcp.credentials] is a DANGLING reference —
+    // the overlay materializes with mcp_applied=true and the agent 401s on
+    // every referenced server at session start (the Eynak profiles were
+    // born with mcp_credentials="" and 4-5 servers referencing named
+    // credentials with no definitions). FAIL LOUD per profile: name the
+    // server + credential, never apply a dangling overlay. Servers with no
+    // `credentials` field (public endpoints) and empty-string references
+    // are not dangling.
+    if let Some(mcp) = mcp_table.as_ref() {
+        let defined: std::collections::HashSet<&str> = mcp
+            .get("credentials")
+            .and_then(|c| c.as_table())
+            .map(|t| t.keys().map(|k| k.as_str()).collect())
+            .unwrap_or_default();
+        let mut dangling: Vec<String> = Vec::new();
+        if let Some(servers) = mcp.get("servers").and_then(|s| s.as_array()) {
+            for srv in servers {
+                let Some(cred) = srv.get("credentials").and_then(|c| c.as_str()) else {
+                    continue;
+                };
+                if cred.trim().is_empty() || defined.contains(cred) {
+                    continue;
+                }
+                let srv_name = srv.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                dangling.push(format!("{srv_name} → {cred}"));
+            }
+        }
+        if !dangling.is_empty() {
+            return Err(format!(
+                "profile {profile_id}: mcp_servers reference credentials with NO \
+                 [mcp.credentials] definition ({}) — the agent would 401 on every \
+                 referenced server at session start while mcp_applied=true (silent-401 \
+                 class, 840e5588). Define the credentials in the profile's \
+                 mcp_credentials blob.",
+                dangling.join(", ")
+            ));
+        }
+    }
     if let Some(mcp) = mcp_table {
         // serialize WITH the key context so [[mcp.servers]] keeps its
         // full path (an inner-table serialization would emit bare
@@ -653,6 +692,10 @@ mod tests {
         home.join("users").join(trustee_core::user_hash(pid))
     }
 
+    /// 840e5588: the known-good credentials blob — the reference definition
+    /// the tests' servers rely on (byte-shape: the owner's known-good config).
+    const KNOWN_GOOD_CREDENTIALS: &str = "[mcp.credentials.farzan_service_account]\ntype = \"service-account\"\nservice_token = \"${FARZAN_SERVICE_ACCOUNT}\"\nissuer_url = \"https://idp.tanbal.ir/oauth2/openid/pdt-api\"\nclient_id = \"pdt-api\"\naudience = \"pdt-api\"\nscope = \"openid groups profile\"\n";
+
     #[test]
     fn applies_profile_to_user_home() {
         let home = tmp("apply");
@@ -728,6 +771,9 @@ mod tests {
         payload["profiles"][0]["mcp_servers"] = json!(
             "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"fame\"\nurl = \"https://fame.example\"\ncredentials = \"farzan_service_account\"\n"
         );
+        // 840e5588: the referenced credential must be DEFINED — the
+        // dangling-reference guard fails loud otherwise.
+        payload["profiles"][0]["mcp_credentials"] = json!(KNOWN_GOOD_CREDENTIALS);
         payload["profiles"][0]["identity_service_token"] = json!("${FARZAN_SERVICE_ACCOUNT}");
         payload["profiles"][0]["identity_issuer_url"] =
             json!("https://idp.tanbal.ir/oauth2/openid/pdt-api");
@@ -781,6 +827,9 @@ mod tests {
         payload["profiles"][0]["mcp_servers"] = json!(
             "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"fame\"\nurl = \"https://fame.example\"\ncredentials = \"farzan_service_account\"\n"
         );
+        // 840e5588: the reference must be defined — the pin here is the
+        // ANCHOR (no declaration → no anchor), not the credentials guard.
+        payload["profiles"][0]["mcp_credentials"] = json!(KNOWN_GOOD_CREDENTIALS);
         // NO identity_service_token declared
         let report = apply_profiles(&home, &payload);
         assert!(matches!(
@@ -807,6 +856,10 @@ mod tests {
         payload["profiles"][0]["mcp_servers"] = json!(
             "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"a\"\nurl = \"https://a.example\"\ncredentials = \"cred_a\"\n\n[[mcp.servers]]\nname = \"b\"\nurl = \"https://b.example\"\ncredentials = \"cred_b\"\n"
         );
+        // 840e5588: both referenced credentials must be DEFINED.
+        payload["profiles"][0]["mcp_credentials"] = json!(
+            "[mcp.credentials.cred_a]\ntype = \"service-account\"\nservice_token = \"${CRED_A}\"\nissuer_url = \"https://idp.example/\"\n\n[mcp.credentials.cred_b]\ntype = \"service-account\"\nservice_token = \"${CRED_B}\"\nissuer_url = \"https://idp.example/\"\n"
+        );
         payload["profiles"][0]["identity_service_token"] = json!("${ID_TOKEN}");
         let report = apply_profiles(&home, &payload);
         assert!(matches!(
@@ -830,21 +883,26 @@ mod tests {
         // manufactured the .env key convention that collided with the ${VAR}
         // references (incident fc94aea9, T3). Bare values are rejected LOUD
         // in every shape, whatever the servers reference.
-        for (tag, servers) in [
-            ("none", ""),
+        for (tag, servers, creds) in [
+            ("none", "", ""),
             (
                 "single",
                 "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"fame\"\nurl = \"https://fame.example\"\ncredentials = \"farzan_service_account\"\n",
+                KNOWN_GOOD_CREDENTIALS,
             ),
             (
                 "multi",
                 "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"a\"\nurl = \"https://a.example\"\ncredentials = \"cred_a\"\n\n[[mcp.servers]]\nname = \"b\"\nurl = \"https://b.example\"\ncredentials = \"cred_b\"\n",
+                "[mcp.credentials.cred_a]\ntype = \"service-account\"\nservice_token = \"${CRED_A}\"\nissuer_url = \"https://idp.example/\"\n\n[mcp.credentials.cred_b]\ntype = \"service-account\"\nservice_token = \"${CRED_B}\"\nissuer_url = \"https://idp.example/\"\n",
             ),
         ] {
             let home = tmp(&format!("bare-reject-{tag}"));
             let mut payload = fixture_payload("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYXJ6YW4ifQ.sig");
             if !servers.is_empty() {
                 payload["profiles"][0]["mcp_servers"] = json!(servers);
+                // 840e5588: the references must be DEFINED — this pin is the
+                // BARE-SECRET rejection, not the credentials guard.
+                payload["profiles"][0]["mcp_credentials"] = json!(creds);
             }
             let report = apply_profiles(&home, &payload);
             match &report.profiles[0].outcome {
@@ -1130,7 +1188,13 @@ mod v0195_credentials_tests {
     #[test]
     fn credentials_change_self_heals_via_fingerprint() {
         let home = tmp("selfheal");
-        let without = apply_profiles(&home, &payload_with_credentials("", "k=v"));
+        // 840e5588: the first apply must be VALID — a public server (no
+        // credentials reference) with an empty credentials blob applies
+        // clean; the credentials ADDITION is then the fingerprint miss.
+        let mut first = payload_with_credentials("", "k=v");
+        first["profiles"][0]["mcp_servers"] =
+            json!("[[mcp.servers]]\nname = \"public\"\nurl = \"https://p.example\"\n");
+        let without = apply_profiles(&home, &first);
         assert_eq!(without.profiles[0].outcome, ProfileOutcome::Applied);
         let with = apply_profiles(
             &home,
@@ -1184,18 +1248,63 @@ mod v0195_credentials_tests {
     }
 
     #[test]
-    fn no_credentials_payload_unchanged_nothing_fabricated() {
-        let home = tmp("noauth");
+    fn dangling_credential_reference_fails_loud_never_applied() {
+        // 840e5588 (the silent-401 class): a server referencing a named
+        // credential with NO [mcp.credentials] definition — the Eynak shape
+        // (mcp_credentials="" at birth, servers referencing named
+        // credentials) — must FAIL LOUD per profile, never apply with
+        // mcp_applied=true while the agent 401s on every server.
+        let home = tmp("dangling");
         let report = apply_profiles(&home, &payload_with_credentials("", "k=v"));
+        match &report.profiles[0].outcome {
+            ProfileOutcome::Failed { reason } => {
+                assert!(reason.contains("dangling") || reason.contains("NO "), "loud: {reason}");
+                assert!(reason.contains("fame"), "names the SERVER: {reason}");
+                assert!(
+                    reason.contains("farzan_service_account"),
+                    "names the CREDENTIAL: {reason}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?} — the silent-401 class must never apply"),
+        }
+        // the overlay was NEVER written — no half-applied state
+        assert!(
+            !home.join("users").join(trustee_core::user_hash("prof-cred-1")).join("config").join("trustee.toml").exists(),
+            "a dangling-reference profile materializes NOTHING"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn no_credentials_and_no_references_applies_clean() {
+        // The lenient edge: an empty credentials blob with servers that
+        // reference NO credentials (public endpoints) is not dangling —
+        // nothing fabricated, apply clean.
+        let home = tmp("norefs");
+        let mut p = payload_with_credentials("", "k=v");
+        p["profiles"][0]["mcp_servers"] =
+            json!("[[mcp.servers]]\nname = \"public\"\nurl = \"https://p.example\"\n");
+        let report = apply_profiles(&home, &p);
         assert_eq!(report.profiles[0].outcome, ProfileOutcome::Applied);
         let overlay = overlay_of(&home, "prof-cred-1");
         assert!(
             !overlay.contains("mcp.credentials"),
             "empty credentials blob must fabricate nothing: {overlay}"
         );
-        assert!(
-            overlay.contains("[[mcp.servers]]"),
-            "servers still materialize"
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn empty_string_credentials_reference_is_not_dangling() {
+        let home = tmp("emptyref");
+        let mut p = payload_with_credentials("", "k=v");
+        p["profiles"][0]["mcp_servers"] =
+            json!("[[mcp.servers]]\nname = \"amb\"\nurl = \"https://a.example\"\ncredentials = \"\"\n");
+        let report = apply_profiles(&home, &p);
+        assert_eq!(
+            report.profiles[0].outcome,
+            ProfileOutcome::Applied,
+            "an empty-string reference is 'no credential', not a dangling name"
         );
         let _ = std::fs::remove_dir_all(&home);
     }
