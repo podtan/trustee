@@ -136,6 +136,15 @@ pub struct UserSessionEntry {
     /// Last time a command was submitted or state changed.
     /// Updated on every /sessions/{id}/command and /sessions/{id}/cancel call.
     pub last_active: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
+    /// The drain task's abort handle (a3e1f3b6, owner report 2026-11-14): the
+    /// drain task holds the ORIGINAL ws_tx sender + the session Arc — without
+    /// aborting it on destroy the broadcast channel never closes (the arc
+    /// cycle: the drain task keeps the session alive, the session keeps
+    /// workflow_tx alive, workflow_rx never closes) and the connected
+    /// clients' WS streams stay open (no onclose — the console's 'Session
+    /// ended' detection never fires) while the destroyed session's memory
+    /// leaks until process exit.
+    pub drain_abort: Option<tokio::task::AbortHandle>,
 }
 
 /// All sessions belonging to one authenticated user.
@@ -392,6 +401,7 @@ impl ServerState {
             ws_tx: ws_tx_entry,
             created_at: now,
             last_active: Arc::new(Mutex::new(now)),
+            drain_abort: None,
         };
 
         let user_sessions = UserSessions {
@@ -589,6 +599,7 @@ impl ServerState {
                 ws_tx: ws_tx_entry.clone(),
                 created_at: now,
                 last_active: Arc::new(Mutex::new(now)),
+                drain_abort: None,
             },
         );
 
@@ -598,7 +609,14 @@ impl ServerState {
             .get(&session_id)
             .map(|e| e.session.clone());
         if let Some(session_arc) = session_arc {
-            self.spawn_user_drain_task(session_id.clone(), session_arc, ws_tx_entry, workflow_rx);
+            let handle =
+                self.spawn_user_drain_task(session_id.clone(), session_arc, ws_tx_entry, workflow_rx);
+            // Store the abort handle (a3e1f3b6) so destroy_session can close
+            // the channel — the drain task holds the ORIGINAL sender + the
+            // session Arc.
+            if let Some(mut e) = user_sessions.sessions.get_mut(&session_id) {
+                e.drain_abort = Some(handle.abort_handle());
+            }
         }
 
         Ok(session_id)
@@ -849,6 +867,14 @@ impl ServerState {
                 }
             }
             if let Some((victim, _)) = evict {
+                // Abort the victim's drain task (a3e1f3b6) — same arc cycle
+                // as destroy: without the abort its ws_tx + session Arc keep
+                // the channel open and the memory alive.
+                if let Some(mut v) = user_sessions.sessions.get_mut(&victim) {
+                    if let Some(handle) = v.drain_abort.take() {
+                        handle.abort();
+                    }
+                }
                 user_sessions.sessions.remove(&victim);
             } else {
                 return None;
@@ -886,6 +912,7 @@ impl ServerState {
                 ws_tx: ws_tx_entry.clone(),
                 created_at: now,
                 last_active: Arc::new(Mutex::new(now)),
+                drain_abort: None,
             },
         );
 
@@ -898,12 +925,18 @@ impl ServerState {
             .map(|e| e.session.clone())
             .ok_or_else(|| SessionError::NotFound(chain_id.to_string()))
             .ok()?;
-        self.spawn_user_drain_task(
+        let handle = self.spawn_user_drain_task(
             chain_id.to_string(),
             session_arc.clone(),
             ws_tx_entry.clone(),
             workflow_rx,
         );
+        // Store the abort handle (a3e1f3b6) so destroy_session/eviction can
+        // close the channel — the drain task holds a ws_tx sender + the
+        // session Arc.
+        if let Some(mut e) = user_sessions.sessions.get_mut(chain_id) {
+            e.drain_abort = Some(handle.abort_handle());
+        }
 
         Some((chain_id.to_string(), session_arc, ws_tx_entry))
     }
@@ -968,6 +1001,21 @@ impl ServerState {
             }
             session.session_id.clone()
         };
+
+        // Abort the drain task FIRST (a3e1f3b6): it holds the ORIGINAL ws_tx
+        // sender + the session Arc — without the abort the broadcast channel
+        // never closes (the arc cycle: the drain task keeps the session
+        // alive, the session keeps workflow_tx alive, workflow_rx never
+        // closes) and the connected clients' WS streams stay open (no
+        // onclose — the console's 'Session ended' detection never fires)
+        // while the destroyed session's memory leaks. Destroy only happens
+        // on an Idle session (the check above) so no workflow is in flight —
+        // the abort is safe.
+        if let Some(mut entry) = user_sessions.sessions.get_mut(session_id) {
+            if let Some(handle) = entry.drain_abort.take() {
+                handle.abort();
+            }
+        }
 
         // Remove from DashMap
         user_sessions.sessions.remove(session_id);
@@ -1478,7 +1526,7 @@ impl ServerState {
         session: Arc<Mutex<Session>>,
         ws_tx: broadcast::Sender<String>,
         mut workflow_rx: mpsc::UnboundedReceiver<TuiMessage>,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         // Bug 6: broadcast StateChanged only on actual transitions. Without
         // this, every WS message was accompanied by a duplicate StateChanged,
         // doubling traffic and re-triggering frontend updateState on hot
@@ -1510,7 +1558,7 @@ impl ServerState {
                 let _ = ws_tx.send(json);
             }
             tracing::debug!("Drain task ended for session: {}", session_id);
-        });
+        })
     }
 
     /// Spawn the default user's drain task (backward compatibility).
@@ -1536,7 +1584,8 @@ impl ServerState {
         // spawn_user_drain_task). The task starts in Running state because
         // spawn_drain_task is only called after a command began executing.
         let mut last_broadcast_state = Some("Running".to_string());
-        tokio::spawn(async move {
+        let session_id_for_handle = session_id.clone();
+        let handle = tokio::spawn(async move {
             while let Some(msg) = workflow_rx.recv().await {
                 {
                     let mut session = session.lock().await;
@@ -1562,6 +1611,14 @@ impl ServerState {
             }
             tracing::debug!("Drain task ended for session: {}", session_id);
         });
+        // Store the abort handle (a3e1f3b6) so destroy_session can close the
+        // channel — the startup drain task holds a ws_tx clone + the session
+        // Arc (the same arc cycle as spawn_user_drain_task).
+        if let Some(default_user) = self.sessions.get("default") {
+            if let Some(mut e) = default_user.sessions.get_mut(&session_id_for_handle) {
+                e.drain_abort = Some(handle.abort_handle());
+            }
+        }
     }
 
     /// Resolve the user key from request headers.
@@ -2492,6 +2549,47 @@ mod restore_tests {
             .await
             .expect("destroy 2");
         // (No assertion beyond "no panic": session_id was None → no new markers.)
+    }
+
+    #[tokio::test]
+    async fn destroy_closes_the_broadcast_channel() {
+        // a3e1f3b6 (the owner's two-bug report, 2026-11-14): destroy must
+        // CLOSE the session's WS broadcast channel. The drain task held the
+        // ORIGINAL ws_tx sender + the session Arc (the arc cycle: the drain
+        // task keeps the session alive, the session keeps workflow_tx alive,
+        // workflow_rx never closes), so the channel never closed and the
+        // connected clients' streams stayed open — no onclose, the console's
+        // 'Session ended' detection never fired, and the destroyed session's
+        // memory leaked. The abort handle in the entry breaks the cycle:
+        // after destroy ALL senders are gone and the receivers see Closed.
+        let state = fresh_state();
+        let user = TempUser::new("ws-close");
+        let sid = state
+            .create_session(&user.key, None, None)
+            .await
+            .expect("create session");
+
+        let (_, ws_tx) = state.get_session(&user.key, &sid).await.unwrap();
+        let mut rx = ws_tx.subscribe();
+        drop(ws_tx); // the caller's clone goes; the entry + the drain task hold theirs
+
+        state
+            .destroy_session(&user.key, &sid)
+            .await
+            .expect("destroy");
+
+        // The channel is CLOSED: the receiver sees Closed (all senders
+        // dropped — the entry removed + the drain task aborted). An open
+        // channel with no messages would block here forever; Closed returns
+        // immediately.
+        let outcome = rx.recv().await;
+        assert!(
+            matches!(
+                outcome,
+                Err(tokio::sync::broadcast::error::RecvError::Closed)
+            ),
+            "destroy must close the broadcast channel (the drain task aborted), got {outcome:?}"
+        );
     }
 
     #[tokio::test]

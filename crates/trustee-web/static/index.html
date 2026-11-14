@@ -435,6 +435,16 @@
       gap: 8px;
     }
     .context-badge { font-size: 11px; color: #888; }
+    /* WS connection indicator (a3e1f3b6 companion, owner report 2026-11-14):
+       the page reconnects silently — without a visible indicator a user
+       cannot see a disconnect and reads the silence as a dead agent. */
+    .ws-dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: #555; margin-right: 5px; vertical-align: middle;
+    }
+    .ws-dot.ok { background: #4ade80; }
+    .ws-dot.warn { background: #fbbf24; }
+    #ws-label { font-size: 11px; color: #888; }
 
     /* --- Markdown rendering inside agent bubbles --- */
     .bubble.md {
@@ -930,6 +940,7 @@
 </div>
 
 <div id="status-bar">
+  <span id="ws-indicator" title="WebSocket connection"><span class="ws-dot" id="ws-dot"></span><span id="ws-label">Connecting…</span></span>
   <span id="state">Idle</span>
   <span id="spinner-container"></span>
   <button id="btn-cancel" class="danger" style="display:none; padding: 4px 12px; font-size: 12px;">Cancel</button>
@@ -1298,6 +1309,26 @@ function handleMessage(msg) {
   // resolve to this session instead of 404ing (Bug 1/3 companion).
   if (msg.output_lines && msg.session_id && msg.session_id !== currentSessionId) {
     currentSessionId = msg.session_id;
+  }
+  // The WS snapshot (first message after connect/reconnect) carries the
+  // session's full transcript — render it so the events missed during a
+  // disconnect appear WITHOUT a manual refresh (a3e1f3b6 companion, the
+  // owner's "refresh shows the agent running" report). The transcript is
+  // authoritative: clear + re-render, and reset lastSentCommand so the
+  // '> {command}' echo lines render (the optimistic bubble they dedup
+  // against was just cleared). Runs on every (re)connect; a new session's
+  // empty transcript renders nothing.
+  if (Array.isArray(msg.output_lines)) {
+    outputEl.innerHTML = '';
+    lastSentCommand = null;
+    window._hasSession = true;
+    for (const line of msg.output_lines) appendOutput(line);
+    updateState(msg.workflow_state || 'Idle');
+    if (typeof msg.context_tokens === 'number') {
+      document.getElementById('context-tokens').textContent = msg.context_tokens.toLocaleString() + ' tokens';
+    }
+    if (autoScroll) outputEl.scrollTop = outputEl.scrollHeight;
+    return;
   }
   switch (msg.type) {
     case 'OutputLine':
@@ -1827,16 +1858,39 @@ async function sendCommand() {
 
   // Session-scoped command — targets THIS session (no active-pointer race).
   const cmdUrl = API + '/api/v1/sessions/' + encodeURIComponent(sid) + '/command';
-  await fetch(cmdUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      command: cmd,
-      session_id: sid,
-      ...(selectedModel ? { model: selectedModel } : {}),
-      ...(sentAttachments.length ? { attachments: sentAttachments } : {}),
-    }),
-  });
+  try {
+    const res = await fetch(cmdUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        command: cmd,
+        session_id: sid,
+        ...(selectedModel ? { model: selectedModel } : {}),
+        ...(sentAttachments.length ? { attachments: sentAttachments } : {}),
+      }),
+    });
+    if (!res.ok) {
+      // The engine returns honest statuses DIRECTLY (409 destroyed chain,
+      // 404 no live session, 422 bad request — no envelope). Surface them
+      // AT SEND TIME instead of the silent optimistic-bubble-and-nothing
+      // the owner reported (a3e1f3b6 companion).
+      let detail = 'HTTP ' + res.status;
+      try { const d = await res.json(); detail = d.error || d.detail || detail; } catch (_) {}
+      showToast('Command failed: ' + detail, 'error');
+    }
+  } catch (err) {
+    showToast('Command failed: ' + err.message, 'error');
+  } finally {
+    // Re-enable the input HERE, not solely via the WS StateChanged — a dead
+    // WS left the input disabled forever (a3e1f3b6 companion). Skip when a
+    // workflow actually started (its StateChanged already disabled it).
+    const st = document.getElementById('state').textContent;
+    if (st !== 'Running' && st !== 'Cancelling') {
+      document.getElementById('btn-send').disabled = false;
+      document.getElementById('input').disabled = false;
+      document.getElementById('btn-attach').disabled = false;
+    }
+  }
   // State change is now broadcast via WebSocket (StateChanged message)
   // so we don't call updateState('Running') here — avoids race conditions
   // where a WorkflowCompleted arrives before this point.
@@ -2254,16 +2308,30 @@ async function attachLiveSession(sessionId) {
   showToast('Attached to live session', 'success');
 }
 
+// WS connection indicator (a3e1f3b6 companion): the console's
+// Connected/Disconnected badge pattern — a dead WS must be VISIBLE.
+function setWsIndicator(cls, text) {
+  const dot = document.getElementById('ws-dot');
+  const label = document.getElementById('ws-label');
+  if (dot) dot.className = 'ws-dot' + (cls ? ' ' + cls : '');
+  if (label) label.textContent = text;
+}
+
 // Connect the page to a specific session's WS stream.
 function connectSessionWs(sessionId) {
   if (ws) { ws.onclose = null; ws.close(); ws = null; }
   const url = (API.startsWith('https') ? 'wss' : 'ws') + '://'
     + window.location.host + '/api/v1/sessions/' + encodeURIComponent(sessionId) + '/stream';
   ws = new WebSocket(url);
-  ws.onopen = () => { wsReconnectDelay = 1000; };
+  ws.onopen = () => {
+    wsReconnectDelay = 1000;
+    setWsIndicator('ok', 'Connected');
+  };
   ws.onmessage = (event) => { handleMessage(JSON.parse(event.data)); };
   ws.onclose = () => {
+    setWsIndicator('', 'Disconnected');
     setTimeout(() => {
+      setWsIndicator('warn', 'Reconnecting…');
       if (currentSessionId) connectSessionWs(currentSessionId);
       else ensureAttachedSession().then((sid) => { if (sid) connectSessionWs(sid); });
     }, wsReconnectDelay);
