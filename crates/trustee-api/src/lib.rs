@@ -39,6 +39,34 @@ pub fn bin_version() -> &'static str {
         .unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
+// ── Test-process HOME isolation (the 456-folder leak) ────────────────────
+//
+// OWNER REPORT 2026-11-22: ~/.trustee/users held 456 folders on an
+// 18-profile runtime. Root cause: the test fixtures (TempUser & friends,
+// keyed by `std::process::id()`) resolved `dirs::home_dir()` — every
+// `cargo test` run minted a fresh set of ghost `users/{hash}` folders in
+// the REAL home (456 folders ≈ every gate run since the users/ namespace
+// shipped; the mtime histogram matches ship days exactly, and a disk
+// tombstone carried a test fixture's literal chain id).
+//
+// FIX: a ctor runs before main → before any test thread spawns → the
+// set_var below is race-free (single-threaded at that point). The whole
+// test binary then resolves HOME to a fresh per-run scratch dir; the
+// pid-keyed fixtures keep their cross-run isolation semantics, just under
+// /tmp instead of the real home. Zero prod impact: cfg(test) + dev-dep.
+// The `trustee-test-home-*` scratch class is swept like every other
+// per-pid test-residue class.
+#[cfg(test)]
+mod test_home_isolation {
+    #[ctor::ctor]
+    fn isolate_test_home() {
+        let scratch = std::env::temp_dir()
+            .join(format!("trustee-test-home-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&scratch);
+        std::env::set_var("HOME", &scratch);
+    }
+}
+
 // Embedded Cedar policy defaults (compiled into binary)
 const EMBEDDED_CEDAR_POLICY: &str = include_str!("../policies/trustee_default.cedar");
 const EMBEDDED_CEDAR_SCHEMA: &str = include_str!("../policies/trustee_schema.cedarschema");

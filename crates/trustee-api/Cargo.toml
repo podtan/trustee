@@ -1,6 +1,6 @@
 [package]
 name = "trustee-api"
-version = "0.20.15"
+version = "0.20.16"
 edition = "2021"
 description = "REST + WebSocket API server for Trustee agent"
 license = "MIT OR Apache-2.0"
@@ -67,3 +67,10 @@ abk = { version = "0.22", features = ["config", "agent", "registry-mcp-token", "
 sha2 = "0.10"
 # Home directory resolution
 dirs = "5"
+
+[dev-dependencies]
+# Test-process HOME isolation (the 456-folder leak, owner report 2026-11-22):
+# the ctor in src/lib.rs redirects the whole test binary to a scratch home
+# BEFORE any test thread spawns, so the pid-keyed fixtures (TempUser &
+# friends) can never write the real ~/.trustee/users again.
+ctor = "0.2"
